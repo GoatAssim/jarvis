@@ -129,7 +129,11 @@ def parse_magnet(text):
 
 def parse_stream(obj):
     """A Stremio stream object (dict or its JSON text) -> {infohash, file_idx, name, trackers,
-    filename, video_size} or None when it isn't a torrent stream."""
+    filename, video_size} or None when it isn't a torrent stream.
+
+    A real stream object has `infoHash` (and `fileIdx`).  A `stream_search` ROW is accepted too (N26): one
+    that has a `magnet` (its hash, file index, name and trackers are read from it) or an `infohash` and a
+    `file_idx`, and no `infoHash`.  For an object that has `infoHash` nothing here changed."""
     if isinstance(obj, str):
         text = obj.strip()
         if not text.startswith("{") or len(text) > 8192:
@@ -141,16 +145,28 @@ def parse_stream(obj):
     if not isinstance(obj, dict):
         return None
     digest = normalize_infohash(obj.get("infoHash") or obj.get("infohash"))
+    row = not normalize_infohash(obj.get("infoHash"))          # a search row, not a stream object
+    magnet = None
+    if not digest and isinstance(obj.get("magnet"), str):
+        magnet = parse_magnet(obj["magnet"])
+        digest = magnet["infohash"] if magnet else None
     if not digest:
         return None
     trackers = []
     for source in obj.get("sources") or []:
         if isinstance(source, str) and source.lower().startswith("tracker:"):
             trackers.append(source)
+    if magnet:
+        trackers += magnet["trackers"]
     hints = obj.get("behaviorHints") if isinstance(obj.get("behaviorHints"), dict) else {}
     size = hints.get("videoSize")
-    return {"infohash": digest, "file_idx": _file_index(obj.get("fileIdx")),
-            "name": _clean_name(hints.get("filename") or obj.get("title") or obj.get("name") or ""),
+    file_idx = _file_index(obj.get("fileIdx"))
+    if file_idx is None and row:
+        file_idx = _file_index(obj.get("file_idx"))
+        if file_idx is None and magnet:
+            file_idx = magnet["file_idx"]
+    return {"infohash": digest, "file_idx": file_idx,
+            "name": _clean_name(hints.get("filename") or obj.get("title") or obj.get("name") or (magnet or {}).get("name") or ""),
             "trackers": _clean_trackers(trackers),
             "filename": _clean_name(hints.get("filename") or ""),
             "video_size": size if isinstance(size, int) and size > 0 else None}

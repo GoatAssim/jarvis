@@ -62,6 +62,32 @@ SOURCE = (("remux", r"remux"), ("bluray", r"blu[\s-]?ray|bdrip|brrip|bd"), ("web
 SEEDERS = (r"(?:seeders?|seeds?)\s*[:=]?\s*(\d{1,7})", r"\U0001F464\s*(\d{1,7})")
 SIZE = r"(\d{1,4}(?:[.,]\d{1,2})?)[\s-]?(gib|gb|mib|mb)"
 
+# --------------------------------------------------------------------------- packs and languages (N28, N30; brief 8B)
+#
+# Every word below was READ OFF the ten stream names of ONE real turn: finding 04, copied to
+# `tests/data/stream-names-175.json` ("row N" = the `rank_logged` there).  One show, one set of addons
+# (Torrentio, StremThru Torz, AIOStreams), names CUT at 80 characters.  A word that no logged name
+# shows is NOT in this file (the few the brief names but no logged name shows live in ranking.py,
+# marked there).  The owner's `stream_markers.json` does not extend these lists.
+#
+# a release's own word for "a whole season":  Saison (rows 1, 4), Temporada (rows 2, 6, 7), Completa (rows 2, 6)
+PACK = (r"saison", r"temporada", r"completa")
+# a season token or a range of seasons: `S01` (row 9), `S01-S08` (row 3).  Not `S01E03`: a letter may not follow.
+SEASON = r"s(\d{1,2})(?:[\s._-]?(?:-|to)[\s._-]?s?(\d{1,2}))?"
+# an episode token: `S01E03` (row 4).  Ranges (`S01E01-E10`, `S01E01E02`) are read too; no logged name shows one.
+EPISODE = r"s(\d{1,2})[\s._-]?e(\d{1,3})(?:[\s._-]?(?:-|e)[\s._-]?e?(\d{1,3}))?"
+# "more than one language in the file": MULTI / MULTi / Multi (rows 1, 3, 4, 9), [DUAL] (row 7)
+MULTI = (r"multi", r"dual")
+# a language the text names: (name, words).  `eng` (row 9; `cze` and `hun` too), `saison` is French (rows 1, 4),
+# `temporada` is Portuguese (rows 2, 6, 7: written by Spanish releases too, see the 8B report).
+LANGUAGE = (
+    ("english", (r"eng",)),
+    ("french", (r"saison",)),
+    ("portuguese", (r"temporada",)),
+    ("czech", (r"cze",)),
+    ("hungarian", (r"hun",)),
+)
+
 MAX_EXTRA_WORDS = 40
 MAX_EXTRA_LEN = 40
 EXTRA_FILE = "stream_markers.json"
@@ -115,6 +141,12 @@ def compiled():
         "source": [(name, re.compile(r"(?<![0-9a-z])(?:%s)(?![0-9a-z])" % pat, re.I)) for name, pat in SOURCE],
         "seeders": [re.compile(p, re.I) for p in SEEDERS],
         "size": re.compile(SIZE, re.I),
+        # N28 / N30 (brief 8B): packs and languages
+        "pack": _wrap(list(PACK)),
+        "season": re.compile(r"(?<![0-9a-z])" + SEASON + r"(?![0-9a-z])", re.I),
+        "episode": re.compile(r"(?<![0-9a-z])" + EPISODE + r"(?![0-9a-z])", re.I),
+        "multi": _wrap(list(MULTI)),
+        "language": [(name, _wrap(list(words))) for name, words in LANGUAGE],
     }
 
 

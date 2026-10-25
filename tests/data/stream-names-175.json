@@ -1,0 +1,122 @@
+{
+ "header": {
+  "what": "The ten rows of ONE real stream_search answer, as logged (finding 04, docs/findings/04-play-flow-log-175.md): 'play episode 3 of Rick and Morty', tt2861424 S1 E3, quality 1080p, audio dub.",
+  "when": "2026-10-25, one chat turn on the owner's PC; Jarvis build not recorded in the log (the code read was jarvis-main_175_).",
+  "source": "results/play-flow-log-175.jsonl, row 11 (the stream_search tool_result), the 'streams' list. Magnets are redacted in the log and are not here.",
+  "cut": "Every `name` is CUT at 80 characters by the tool-result shaping at medium capacity; the text '…(trimmed)' at the end marks the cut. The full stream text (title lines, description, behaviorHints.filename, fileIdx) is NOT in the log. Nothing here says which row had a fileIdx.",
+  "addons": "Torrentio (rows 1-4, 6, 7, 9), StremThru Torz (row 5), AIOStreams Stable (rows 8, 10). One set of addons, one show, one turn: not evidence about other addons.",
+  "logged_labels": "`label_logged`, `resolution_logged` and `audio_logged` are what the answer said. None of the ten CUT names contains a word that the dub table of jarvis-main_175_ reads as a dub (checked once by running parse_release on the untouched code: all ten come out 'unknown'), so the logged 'dub' came from text after the cut or from another field. A reader of the cut name alone does not reproduce it.",
+  "fields": [
+   "rank_logged",
+   "name",
+   "size_gb",
+   "seeders",
+   "addon",
+   "label_logged",
+   "resolution_logged",
+   "audio_logged"
+  ]
+ },
+ "rows": [
+  {
+   "rank_logged": 1,
+   "name": "Torrentio 1080p Rick et Morty - Rick and Morty Saison 1 MULTI HDTV 1080p 2013 Ri…(trimmed)",
+   "size_gb": 1.55,
+   "seeders": 22,
+   "addon": "Torrentio",
+   "label_logged": "1080p dub",
+   "resolution_logged": 1080,
+   "audio_logged": "dub"
+  },
+  {
+   "rank_logged": 2,
+   "name": "Torrentio 1080p Rick and Morty 2016 – 1ª Temporada Completa (1080p) WWW.BLUDV.CO…(trimmed)",
+   "size_gb": 0.93,
+   "seeders": 15,
+   "addon": "Torrentio",
+   "label_logged": "1080p dub",
+   "resolution_logged": 1080,
+   "audio_logged": "dub"
+  },
+  {
+   "rank_logged": 3,
+   "name": "Torrentio 1080p Rick and Morty (2013-2025) [S01-S08] [MULTi] [1080p] [MAX] [WEB-…(trimmed)",
+   "size_gb": 0.45,
+   "seeders": 9,
+   "addon": "Torrentio",
+   "label_logged": "1080p dub",
+   "resolution_logged": 1080,
+   "audio_logged": "dub"
+  },
+  {
+   "rank_logged": 4,
+   "name": "Torrentio 1080p Rick et Morty Saison 1 MULTI 1080p HDTV Rick.and.Morty.S01E03.MU…(trimmed)",
+   "size_gb": 0.35,
+   "seeders": 8,
+   "addon": "Torrentio",
+   "label_logged": "1080p dub",
+   "resolution_logged": 1080,
+   "audio_logged": "dub"
+  },
+  {
+   "rank_logged": 5,
+   "name": "[P2P] Torz 1080p",
+   "size_gb": 0.88,
+   "seeders": null,
+   "addon": "StremThru Torz",
+   "label_logged": "1080p dub",
+   "resolution_logged": 1080,
+   "audio_logged": "dub"
+  },
+  {
+   "rank_logged": 6,
+   "name": "Torrentio 720p Rick and Morty 2016 – 1ª Temporada Completa (720p) WWW.BLUDV.COM…(trimmed)",
+   "size_gb": 0.55,
+   "seeders": 8,
+   "addon": "Torrentio",
+   "label_logged": "720p dub",
+   "resolution_logged": 720,
+   "audio_logged": "dub"
+  },
+  {
+   "rank_logged": 7,
+   "name": "Torrentio 720p Rick and Morty 1ª Temporada [BluRay] [720p] [DUAL] comandotorrent…(trimmed)",
+   "size_gb": 0.31,
+   "seeders": 5,
+   "addon": "Torrentio",
+   "label_logged": "720p dub",
+   "resolution_logged": 720,
+   "audio_logged": "dub"
+  },
+  {
+   "rank_logged": 8,
+   "name": "[P2P] Comet 720p",
+   "size_gb": 0.59,
+   "seeders": null,
+   "addon": "AIOStreams Stable",
+   "label_logged": "720p dub",
+   "resolution_logged": 720,
+   "audio_logged": "dub"
+  },
+  {
+   "rank_logged": 9,
+   "name": "Torrentio Rick And Morty 2013 Multi Adult Comedy Burntodisc S01 eng cze(vo) hun…(trimmed)",
+   "size_gb": 0.57,
+   "seeders": 9,
+   "addon": "Torrentio",
+   "label_logged": "quality not stated dub",
+   "resolution_logged": null,
+   "audio_logged": "dub"
+  },
+  {
+   "rank_logged": 10,
+   "name": "[P2P] Comet 360p",
+   "size_gb": 0.16,
+   "seeders": null,
+   "addon": "AIOStreams Stable",
+   "label_logged": "quality not stated dub",
+   "resolution_logged": null,
+   "audio_logged": "dub"
+  }
+ ]
+}

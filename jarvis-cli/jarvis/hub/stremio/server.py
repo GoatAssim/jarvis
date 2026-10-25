@@ -209,6 +209,71 @@ def active_torrents(stats_by_hash):
     return out
 
 
+# --------------------------------------------------------------------------- waiting for a file list (N27)
+
+CREATE_WAIT_S = 3.0            # how long ONE register call may keep us (a torrent with no peers keeps it open)
+POLL_CALL_S = 2.0              # how long ONE stats call may keep us
+POLL_EVERY_S = 0.5
+
+
+def wait_for_files(server, infohash, trackers=(), *, budget_s=15.0, need_files=True, poll_s=None,
+                   clock=time.monotonic, sleep=time.sleep):
+    """Register a torrent and wait for its file list in SHORT polls, never longer than `budget_s` in total
+    (a register call of at most CREATE_WAIT_S, then a stats call of at most POLL_CALL_S per poll: never one
+    long block).  `server` is anything with `create` and `stats` like StremioServer; `clock` and `sleep` are
+    for the tests.
+
+    `need_files=False` is for a source that already names its file index: the torrent is registered and the
+    call returns at once, with the file list only if the server gave it in the register answer.
+
+    -> {"state", "stats", "waited", "error"}; state is
+         "files"       the server listed files (`stats["files"]` is not empty)
+         "registered"  registered, no file list, and none was waited for (`need_files=False`)
+         "no_files"    the server answered about the torrent but still listed no files when the budget ran out
+         "no_answer"   the server gave no answer about the torrent in the whole budget
+         "error"       the server refused or could not be reached (`error` is a sentence the owner can read)"""
+    start = clock()
+    deadline = start + max(0.5, float(budget_s))
+    stats, answered = None, False
+    poll_s = poll_s or POLL_EVERY_S
+
+    def left():
+        return max(0.1, deadline - clock())
+
+    def done(state, error=""):
+        return {"state": state, "stats": stats, "waited": round(max(0.0, clock() - start), 1), "error": error}
+
+    try:
+        stats = server.create(infohash, trackers, timeout=(min(5, left()), min(CREATE_WAIT_S, left())))
+        answered = True
+    except ServerBusy:
+        pass                                    # registered, the answer is still being held back: poll below
+    except ServerError as exc:
+        return done("error", str(exc))
+    if (stats or {}).get("files"):
+        return done("files")
+    if not need_files:
+        if not answered:
+            try:
+                stats = server.stats(infohash, timeout=min(POLL_CALL_S, left()))
+            except ServerError:
+                stats = None                    # a late answer is not needed: the index is known
+        return done("files" if (stats or {}).get("files") else "registered")
+    while clock() < deadline:
+        sleep(min(poll_s, left()))
+        try:
+            fresh = server.stats(infohash, timeout=min(POLL_CALL_S, left()))
+        except ServerBusy:
+            continue
+        except ServerError as exc:
+            return done("error", str(exc))
+        if fresh is not None:
+            stats, answered = fresh, True
+        if (stats or {}).get("files"):
+            return done("files")
+    return done("no_files" if answered else "no_answer")
+
+
 # --------------------------------------------------------------------------- Jarvis daemons
 
 SERVER_DAEMON = "stremio_stack-server"

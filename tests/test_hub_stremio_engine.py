@@ -176,6 +176,10 @@ def test_no_seeders_and_fallback():
     out = run(store, item, meta=1)
     check("a torrent with no peers fails as no seeders (not retried blindly)", out.kind == Outcome.FAILED and not out.retryable
           and "no seeders" in out.error)
+    check("... and its error says what the server last reported, so the owner isn't left guessing",
+          "the server said:" in out.error and ("peers" in out.error or "no stats" in out.error))
+    check("... and the row said what it was waiting for while it waited (the panel shows it under 'Connecting')",
+          "waiting for the file list" in (store.get_item(item["id"]).get("phase") or ""))
 
     store.update_item(item["id"], {"source_ref": {"fallbacks": [magnet(H3), {"infoHash": H1}]}})
     item = store.get_item(item["id"])

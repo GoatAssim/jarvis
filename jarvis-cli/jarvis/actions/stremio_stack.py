@@ -749,6 +749,7 @@ TOOL_KEYWORDS = {
     "server_cache": {"stremio cache": 8, "what's in the stremio cache": 10, "stremio cache usage": 10, "how big is the stremio cache": 10},
     "server_cache_clear": {"clear the stremio cache": 10, "clear stremio cache": 10, "empty the stremio cache": 10,
                            "delete the stremio cache": 10},
+    "stremio": {"stremio":10}
 }
 
 TOOL_PACK_INSTRUCTION = (
@@ -762,10 +763,11 @@ TOOL_PACK_INSTRUCTION = (
     "A whole season: bulk_plan shows a plan and queues nothing; read its message to the owner, ask about any episode with no "
     "match (the plan lists what exists), and only after they agree call bulk_run with the plan_id (it asks for confirmation "
     "itself). With no season named the plan takes the latest and says so: pass that on. "
-    "To play: play_episode takes a title or an IMDb id, plus season and episode for a series (several titles match: ask); it plays "
-    "a finished download or a torrent stream in mpv/VLC when it has one, else opens the episode's stream list in stremio-web. "
-    "play_local plays a finished download by id or title; stremio_open opens a stremio-web screen. play_control pauses, seeks, "
-    "stops or sets the volume of the mpv Jarvis opened. dl_add also takes the full path of a .torrent file on this PC."
+    "To play: ONE play_episode call: play_episode takes a title or an IMDb id, season and episode, quality, audio and language; "
+    "it finds, ranks and tries releases itself, plays in mpv/VLC, else opens stremio-web. After stream_search pass pick = the "
+    "row's rank. \"Stream\"/\"watch\" = play now; \"download\" = dl_add. Ask the owner only when a tool says so. play_local plays a "
+    "finished download; stremio_open opens stremio-web; play_control controls the mpv Jarvis opened. dl_add also takes the full "
+    "path of a .torrent file."
 )
 
 # stremio_prepare changes the server's own settings; server_cache_clear stops it and deletes files.

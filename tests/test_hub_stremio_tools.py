@@ -153,8 +153,10 @@ player.subprocess.Popen = lambda argv, **kw: (launched.append(argv) or FakeProc(
 player.find_one = lambda kind: "/fake/%s" % kind if kind == "mpv" else ""
 opened.clear()
 
-res = play_media.tool_play_episode({"imdb_id": "tt0944947", "season": 1, "episode": 1})
-check("tier 1: IMDb id + season + episode alone opens the stream list", res["ok"] and res["tier"] == 1 and opened == [res["link"]]
+# MOVED in brief 8A (N25d): IMDb id + season + episode alone now runs the whole play flow (search, rank, try); the stream list is
+# what via="stremio" gives.  The call below gained via="stremio"; the expectations are the old ones.
+res = play_media.tool_play_episode({"imdb_id": "tt0944947", "season": 1, "episode": 1, "via": "stremio"})
+check("tier 1: IMDb id + season + episode with via=stremio opens the stream list", res["ok"] and res["tier"] == 1 and opened == [res["link"]]
       and res["link"].endswith("#/detail/series/tt0944947/tt0944947:1:1"))
 check("no IMDb id and nothing else asks which show", play_media.tool_play_episode({}).get("needs_clarification"))
 check("a series without season/episode asks", play_media.tool_play_episode({"imdb_id": "tt0944947"}).get("needs_clarification"))
@@ -204,8 +206,8 @@ check("title: one clear match goes where the imdb_id goes (same tier, same link)
 check("the result says what the title was taken to be", "Spirit Hunters" in res.get("matched", "") and SH in res["matched"])
 check("the lookup went to the addons' catalog search only", any("/catalog/" in x for x in AST.log) and not any("/stream/" in x for x in AST.log))
 opened.clear()
-res = play_media.tool_play_episode({"title": "Spirit Hunters", "season": 2, "episode": 3})
-check("title: the browser opens the same episode page", res["ok"] and opened == [by_id["link"]])
+res = play_media.tool_play_episode({"title": "Spirit Hunters", "season": 2, "episode": 3, "via": "stremio"})   # MOVED in brief 8A (N25d): via="stremio" added
+check("title: the browser opens the same episode page (via=stremio)", res["ok"] and opened == [by_id["link"]])
 opened.clear()
 res = play_media.tool_play_episode({"title": "spirit", "season": 1, "episode": 1})
 check("title: several matches ask, with a short list of id, type, name, year, and open nothing",
@@ -246,8 +248,8 @@ check("film by title, no type, no season or episode: it is looked up and the fil
       and "movie" in res["matched"] and not res.get("needs_clarification"))
 check("film by title: only manifests and catalog searches were made (no episode list, no stream), the movie catalog among them",
       any("/catalog/movie/" in x for x in AST.log) and all(("/catalog/" in x or x.endswith("manifest.json")) for x in AST.log))
-res = play_media.tool_play_episode({"title": "Paper Lanterns"})
-check("film by title: the browser opens the film's page", res["ok"] and opened and opened[-1].endswith("#/detail/movie/tt7000100/tt7000100"))
+res = play_media.tool_play_episode({"title": "Paper Lanterns", "via": "stremio"})   # MOVED in brief 8A (N25d): via="stremio" added
+check("film by title: the browser opens the film's page (via=stremio)", res["ok"] and opened and opened[-1].endswith("#/detail/movie/tt7000100/tt7000100"))
 res = play_media.tool_play_episode({"title": "Paper Lanterns", "type": "movie", "open": False})
 check("film with type=movie still works as before", res["ok"] and res["link"].endswith("#/detail/movie/tt7000100/tt7000100"))
 AST.log.clear()

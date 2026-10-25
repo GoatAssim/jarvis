@@ -285,10 +285,22 @@ def _fetch_torrent(url, ctx):
         session.close()
 
 
-def _register(server, target, ctx, wait_s):
-    """create + wait for the file list.  Returns (stats, None) or (None, Outcome)."""
+def _sources_text(stats):
+    """", 2 of 9 trackers / DHT answered" from the server's own stats (its `sources` list), or "".  Read defensively:
+    the server is closed-source, so a missing or odd shape just gives no text."""
+    sources = (stats or {}).get("sources")
+    if not isinstance(sources, list) or not sources:
+        return ""
+    found = sum(1 for src in sources if isinstance(src, dict) and _int(src.get("numFound")) > 0)
+    return ", %d of %d trackers / DHT answered" % (found, len(sources))
+
+
+def _register(server, target, ctx, wait_s, diag=None):
+    """create + wait for the file list.  Returns (stats, None) or (None, Outcome).  `diag` (a dict) receives a
+    sentence about the last thing the server said, for the row's error when nothing ever answers."""
     infohash, trackers = target["infohash"], target.get("trackers") or []
     stats = None
+    started, told = time.monotonic(), False
     try:
         stats = server.create(infohash, trackers)
     except sserver.ServerBusy:
@@ -304,7 +316,16 @@ def _register(server, target, ctx, wait_s):
             return None, _stop_outcome(stop)
         if time.monotonic() >= deadline:
             return None, Outcome.failed("no_seeders", retryable=False)
-        ctx.update(phase="waiting for metadata", peers=_int((stats or {}).get("peers")))
+        peers = _int((stats or {}).get("peers"))
+        waited = int(time.monotonic() - started)
+        note = "%d peers%s" % (peers, _sources_text(stats)) if stats else "the server has no stats for this torrent yet"
+        if diag is not None:
+            diag["note"] = note
+        # the panel shows this under "Connecting": a torrent nobody answers for used to look hung for minutes
+        ctx.update(phase="waiting for the file list (%d of %d s: %s)" % (waited, wait_s, note), peers=peers)
+        if not told and waited >= 30:
+            told = True
+            ctx.event("info", "still waiting for the torrent's file list after %d s: %s" % (waited, note))
         stop = _wait(ctx, 2.0)
         if stop:
             return None, _stop_outcome(stop)
@@ -455,10 +476,13 @@ def _run(item, ctx):
             target = dict(target, infohash=digest)
             ref["infohash"] = digest
         ctx.update(phase="registering the torrent", source_ref=ref)
-        stats, outcome = _register(server, target, ctx, meta_wait)
+        diag = {}
+        stats, outcome = _register(server, target, ctx, meta_wait, diag)
         if outcome is not None:
             if outcome.kind == Outcome.FAILED and outcome.error == "no_seeders":
                 msg = "no seeders: the torrent gave no file list in %d s" % meta_wait
+                if diag.get("note"):
+                    msg += " (the server said: %s)" % diag["note"]
                 return _switch_candidate(ctx, item, ref, hostport, msg) or Outcome.failed(
                     msg + ". Try again later, or another release")
             return outcome

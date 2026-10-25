@@ -133,5 +133,17 @@ for module, name in ((play_media, "play_local"), (play_media, "play_episode"), (
     check(f"the {name} checklist entry says owner only (OWNER_ONLY_TOOLS)", "Owner only" in text and "OWNER_ONLY_TOOLS" in text)
     check(f"the {name} checklist entry does not say a guest is offered it", "OFFERED" not in text and "guest is offered" not in text)
 
+# ------------------------------------------------------------------ brief 8A (ADD-ONLY): play_episode's handler now refuses a guest too
+# (it searches streams and starts a player on the owner's PC; the docstring above predates this and is left as it was).
+try:
+    set_sender(GUEST)
+    res = play_media.tool_play_episode({"imdb_id": "tt7654321", "season": 1, "episode": 1})
+    check("play_episode's handler refuses a chat guest in the owner's words, before any lookup",
+          res.get("ok") is False and "owner" in res.get("error", "") and "failed:" not in res.get("error", ""))
+    set_sender(GUEST_NO_FLAG)
+    check("...and a sender with no is_owner flag", play_media.tool_play_episode({"imdb_id": "tt7654321", "season": 1, "episode": 1}).get("ok") is False)
+finally:
+    set_sender(None)
+
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

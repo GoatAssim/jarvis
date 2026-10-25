@@ -277,7 +277,7 @@ function statusText(row) {
     case "queued":
       return row.retry_in_s ? "Waiting to retry in " + row.retry_in_s + " s" : "Queued";
     case "probing": return "Checking\u2026";
-    case "connecting": return "Connecting\u2026";
+    case "connecting": return row.phase ? row.phase.charAt(0).toUpperCase() + row.phase.slice(1) : "Connecting\u2026";
     case "downloading":
       [percentText(row), speedText(row), etaText(row)].forEach((t) => { if (t) parts.push(t); });
       return parts.length ? parts.join(DOT) : "Downloading";
@@ -1033,7 +1033,7 @@ const doc = root.ownerDocument || document;
 const $ = (sel) => root.querySelector(sel);
 
 const S = {
-  rows: [], summary: null, selected: null, view: "all", search: "", groupBy: "none",
+  rows: [], summary: null, selected: null, view: "all", search: "", groupBy: "group", groupTouched: false,
   detail: null, busy: false, timer: 0, closed: false, lastError: "", hold: 0, holdTimer: 0,
   pendingSelect: "", sig: {},
   showHidden: false, hiddenRows: [], revealed: {}, clearing: false,   // brief 19: the "Show hidden" switch, the rows it lists, the ones listed again
@@ -1088,7 +1088,11 @@ function changed(key, value) {
 
 function savePrefs() {
   try {
-    host.storage.set("prefs", JSON.stringify({ view: S.view, groupBy: S.groupBy })).catch(() => {});
+    // groupBy is saved only after the owner picked one: clicking a status chip used to save the default "Nothing" for good,
+    // and a batch (a whole season) then never showed as a group.
+    const prefs = { view: S.view };
+    if (S.groupTouched) { prefs.groupBy = S.groupBy; prefs.groupTouched = true; }
+    host.storage.set("prefs", JSON.stringify(prefs)).catch(() => {});
   } catch (e) { /* storage is a convenience */ }
 }
 
@@ -1098,7 +1102,8 @@ async function loadPrefs() {
     const p = raw ? JSON.parse(raw) : {};
     if (VIEWS.some((v) => v.id === p.view)) S.view = p.view;
     // a `source` saved by an older panel is ignored on purpose: the source chips are gone (N22 part d), so it would hide rows with no control to clear it
-    if (["none", "source", "group"].indexOf(p.groupBy) !== -1) S.groupBy = p.groupBy;
+    // an older panel saved groupBy on every chip click, so only a value saved with groupTouched counts as the owner's choice
+    if (p.groupTouched === true && ["none", "source", "group"].indexOf(p.groupBy) !== -1) { S.groupBy = p.groupBy; S.groupTouched = true; }
   } catch (e) { /* defaults */ }
 }
 
@@ -1324,7 +1329,9 @@ function renderList() {
     }));
     return;
   }
-  groupRows(rows, S.groupBy).forEach((section) => {
+  // "Batch" with no batch on the list would only add a "Single downloads" header over everything: show the plain list then
+  const mode = S.groupBy === "group" && !rows.some((r) => r.group_id) ? "none" : S.groupBy;
+  groupRows(rows, mode).forEach((section) => {
     if (section.title) list.appendChild(sectionHeader(section));
     section.rows.forEach((r) => list.appendChild(renderRow(r)));
   });
@@ -2080,7 +2087,7 @@ $("#addDestBrowse").addEventListener("click", async () => {
   box.focus();
 });
 $("#search").addEventListener("input", (e) => { S.search = e.target.value; render(); });
-$("#groupBy").addEventListener("change", (e) => { S.groupBy = e.target.value; savePrefs(); render(); });
+$("#groupBy").addEventListener("change", (e) => { S.groupBy = e.target.value; S.groupTouched = true; savePrefs(); render(); });
 $("#refresh").addEventListener("click", () => { S.lastError = ""; schedule(10); });
 $("#newBtn").addEventListener("click", newDownload);
 $("#openFolder").addEventListener("click", openLibrary);

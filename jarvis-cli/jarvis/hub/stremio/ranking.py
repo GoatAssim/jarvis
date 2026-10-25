@@ -5,6 +5,7 @@
     choose(...)                -> what one episode gets: exact / fallback / pending / none
 
 The request is `want = {"resolution": 1080, "audio": "dub", "max_gb": None, "min_seeders": None}`.
+A `language` key ("english") is added to it ONLY when the owner asked for one (8B, N30).
 
 Order of preference for one episode, always:
 
@@ -16,6 +17,13 @@ Order of preference for one episode, always:
 What is ALLOWED to be queued is the `on_missing` policy's business (see POLICY_TIERS): `ask` and
 `skip` allow only `exact`, so a plan never quietly swaps a dub for a sub.  The words the markers
 are matched against come from `markers.py`, the one table that is easy to extend.
+
+Two additions of round 8 (brief 8B), both off by default:
+
+    rank(..., intent="play")   for ONE episode now (N28): inside a tier, a release whose file is known
+                               comes before one whose file must be found.  `intent="bulk"` is the order
+                               of before, byte for byte.
+    want["language"]           (N30) a language the TEXT names; "dub" never means English.
 
 Streams are untrusted text.  Nothing here evaluates it: it is matched against fixed patterns and
 the results are numbers, short labels and booleans.
@@ -46,11 +54,35 @@ MAX_FALLBACKS = 2
 _GB = 1024 ** 3
 _MB = 1024 ** 2
 
+# What the owner may type for `language`: the names in markers.LANGUAGE (words seen in real stream
+# names only) plus the usual short codes.  Anything else is a plain error sentence.
+LANGUAGE_NAMES = tuple(name for name, _words in markers.LANGUAGE)
+_LANGUAGE_ALIASES = {"en": "english", "eng": "english", "fr": "french", "fra": "french", "fre": "french",
+                     "pt": "portuguese", "por": "portuguese", "cs": "czech", "ces": "czech", "cze": "czech",
+                     "hu": "hungarian", "hun": "hungarian"}
+
+# --- words the BRIEF names but NO logged stream name shows.  They are kept out of markers.py on
+# purpose (that file holds only words seen in real answers); each one is a guess about how addons
+# write things, so each is listed in the report's Open points.  NOT SEEN IN ANY REAL ANSWER.
+_PACK_NOT_SEEN = re.compile(r"(?<![0-9a-z])(?:season|complete)(?![0-9a-z])", re.I)    # "Season 10", "Complete Series"
+_ENGLISH_NOT_SEEN = re.compile(r"(?<![0-9a-z])english(?![0-9a-z])|\U0001F1EC\U0001F1E7|\U0001F1FA\U0001F1F8", re.I)  # the word, the GB and US flags
+_EPISODE_CAP = 20
+
 
 # --------------------------------------------------------------------------- the request
 
-def normalize_want(resolution=None, audio=None, max_gb=None, min_seeders=None):
-    """The owner's words -> ({want}, error).  \"1080p\", 1080 and \"full hd\" are one thing."""
+def _language_name(value):
+    text = str(value).strip().lower()
+    if text in LANGUAGE_NAMES:
+        return text
+    return _LANGUAGE_ALIASES.get(text)
+
+
+def normalize_want(resolution=None, audio=None, max_gb=None, min_seeders=None, language=None):
+    """The owner's words -> ({want}, error).  \"1080p\", 1080 and \"full hd\" are one thing.
+
+    `language` ("english") is optional.  The `language` key is in `want` ONLY when one was asked for:
+    callers read it with `want.get("language")`.  \"dub\" is never turned into a language."""
     out = {"resolution": None, "audio": "any", "max_gb": None, "min_seeders": None}
     if resolution not in (None, "", "any"):
         text = str(resolution).strip().lower().replace("p", "").replace("i", "")
@@ -81,6 +113,15 @@ def normalize_want(resolution=None, audio=None, max_gb=None, min_seeders=None):
         if not (0 <= number <= 100000):
             return None, "min_seeders must be between 0 and 100000"
         out["min_seeders"] = number or None
+    if language is not None and str(language).strip().lower() not in ("", "any"):
+        name = _language_name(language)
+        if name is None:
+            return None, ("language must be one of %s (or any); got %r. Only languages whose words were seen in real "
+                          "stream names are supported so far." % (", ".join(LANGUAGE_NAMES), str(language)[:20]))
+        if out["audio"] == "sub":
+            return None, ("language names the AUDIO language, so it can't be combined with audio=sub "
+                          "(subtitle languages are not read yet); ask for audio dub or any")
+        out["language"] = name
     return out, None
 
 
@@ -120,8 +161,79 @@ def _seeders(stream, text, table):
     return None
 
 
-def parse_release(stream, table=None):
-    """One Stremio stream object -> the facts ranking needs.  Never raises."""
+def _episode_tokens(text, table):
+    """Every SxxExx token in normalised `text` -> [[season, first, last]] (a range has last > first)."""
+    out = []
+    for match in table["episode"].finditer(text):
+        season, first = int(match.group(1)), int(match.group(2))
+        last = int(match.group(3)) if match.group(3) else first
+        out.append([season, first, last if last > first else first])
+        if len(out) >= _EPISODE_CAP:
+            break
+    return out
+
+
+def _clean_episode(episode):
+    """(season, episode) as two whole numbers, or None."""
+    try:
+        season, number = episode
+        season, number = int(season), int(number)
+    except (TypeError, ValueError):
+        return None
+    return (season, number) if season >= 0 and number >= 0 else None
+
+
+def _pack_and_file(release, episode=None):
+    """-> (pack, file_known, file_known_by).  Pure, from the facts parse_release stored.
+
+    SEEN in the ten logged names (finding 04): season words (Saison, Temporada, Completa), a season
+    range (`[S01-S08]`), a single `S01E03` inside a name.  NOT SEEN in any real answer (guesses):
+    that `behaviorHints.filename` carries an SxxExx, that `fileIdx` is present on a pack result, and
+    that the `S01E03` in a logged name is the file's name and not the torrent's.  `pack` is never
+    decided from the size (an addon often prints one file's size for a whole pack).
+
+    Without `episode` the wanted episode is unknown: a single episode token is taken as 'the
+    episode itself'.  With `episode=(season, number)` a token for ANOTHER episode makes it a pack."""
+    facts = release.get("facts") or {}
+    tokens = [tuple(t) for t in facts.get("episodes") or []]
+    singles = {(s, a) for s, a, b in tokens if a == b}
+    has_range = any(a != b for s, a, b in tokens)
+    if episode:
+        pack = (episode not in singles) and (bool(facts.get("pack_word")) or bool(tokens))
+    else:
+        pack = (bool(facts.get("pack_word")) and not singles) or has_range or len(singles) > 1
+
+    def names_the_file(found):
+        if any(a != b for s, a, b in found):
+            return False                          # a range names many files, not one
+        ones = {(s, a) for s, a, b in found}
+        return ones == {episode} if episode else len(ones) == 1
+
+    if release.get("file_idx") is not None:
+        return pack, True, "file_idx"
+    if names_the_file([tuple(t) for t in facts.get("file_episodes") or []]):
+        return pack, True, "filename"
+    if names_the_file(tokens):
+        return pack, True, "text"
+    return pack, False, None
+
+
+def _language_match(release, wanted):
+    """named | multi | no, for a wanted language.  `no` means 'not named': other languages, or none
+    at all (`languages` says which).  A MULTI / DUAL marker only ever gives `multi`: 'may contain it'."""
+    if wanted in (release.get("languages") or []):
+        return "named"
+    if (release.get("facts") or {}).get("multi"):
+        return "multi"
+    return "no"
+
+
+def parse_release(stream, table=None, episode=None):
+    """One Stremio stream object -> the facts ranking needs.  Never raises.
+
+    Round 8 (brief 8B) adds `pack`, `file_known` (+ `file_known_by`: file_idx, filename or text),
+    `languages` and `facts` (the raw tokens the flags came from).  `episode=(season, number)` is
+    optional: `rank` can pass it later for the same flags."""
     table = table or markers.compiled()
     if not isinstance(stream, dict):
         return None
@@ -138,7 +250,17 @@ def parse_release(stream, table=None):
     audio = "dub" if dub else ("sub" if sub else "unknown")
     banned = table["banned"].search(text)
     url = stream.get("url")
-    return {
+    # packs and languages (N28, N30).  A subtitle marker ("eng sub", "multi sub") is not an audio language.
+    heard = table["sub"].sub(" ", text)
+    languages = [name for name, pattern in table["language"] if pattern.search(heard)]
+    if "english" not in languages and _ENGLISH_NOT_SEEN.search(heard):
+        languages.insert(0, "english")
+    filename = hints.get("filename")
+    facts = {"episodes": _episode_tokens(text, table),
+             "file_episodes": _episode_tokens(markers.normalise(filename[:4000]), table) if isinstance(filename, str) else [],
+             "pack_word": bool(table["pack"].search(text) or table["season"].search(text) or _PACK_NOT_SEEN.search(text)),
+             "multi": bool(table["multi"].search(heard)) and audio != "sub"}
+    out = {
         "resolution": resolution, "audio": audio,
         "codec": next((n for n, p in table["codec"] if p.search(text)), None),
         "source": next((n for n, p in table["source"] if p.search(text)), None),
@@ -150,15 +272,22 @@ def parse_release(stream, table=None):
         "name": states.clean_text(" ".join(str(stream.get(k) or "") for k in ("name", "title")).strip()
                                   or hints.get("filename") or "", 120) or "",
         "stream": stream,
+        "languages": languages, "facts": facts,
     }
+    out["pack"], out["file_known"], out["file_known_by"] = _pack_and_file(out, _clean_episode(episode))
+    return out
 
 
 # --------------------------------------------------------------------------- against the request
 
 def audio_ok(release, want):
-    """Does the release give the audio the owner asked for?  `unknown` never counts as a dub."""
+    """Does the release give the audio the owner asked for?  `unknown` never counts as a dub.
+    With a `language` in `want`, the text must also NAME that language: `multi` and `no` never count."""
     wanted = want.get("audio") or "any"
-    return wanted == "any" or release["audio"] == wanted
+    if not (wanted == "any" or release["audio"] == wanted):
+        return False
+    language = want.get("language")
+    return not language or _language_match(release, language) == "named"
 
 
 def tier_of(release, want):
@@ -207,6 +336,10 @@ def label(release):
     return "%s %s" % (res, audio) if release["audio"] != "unknown" else "%s, %s" % (res, audio)
 
 
+_LANGUAGE_SUFFIX = {"named": "%s named", "multi": "multi-language, %s not confirmed", "no": "%s not named"}
+_LANGUAGE_ORDER = {"named": 0, "multi": 1, "no": 2}
+
+
 def fmt_gb(size):
     return None if not size else round(size / _GB, 2)
 
@@ -222,10 +355,22 @@ def rejected_reason(release, want):
     return None
 
 
-def rank(releases, want, *, batch_binge=None, torrents_only=True):
+def rank(releases, want, *, batch_binge=None, torrents_only=True, intent="bulk", episode=None):
     """[release] -> ({kept: [candidate], rejected: Counter of reasons}).  Candidates are the
-    release dicts plus `tier`, `score` and `label`, best first (tier order, then quality distance
-    inside other_quality, then score)."""
+    release dicts plus `tier`, `score`, `label` and `language_match`, best first (tier order, then
+    quality distance inside other_quality, then score).
+
+    `intent="bulk"` (the default; any value but "play") is the order of before, byte for byte.
+    `intent="play"` (one episode now, N28): inside a tier a release whose file is known (`file_known`)
+    comes before one whose file must be found, then the score as before.  Nothing else changes:
+    not the tiers, the hard filters or the dedupe.
+
+    With `want["language"]` set (N30): only a release that NAMES the language can be `exact` or
+    `other_quality`; inside a tier named comes before multi before no.  The label then says which.
+    `episode=(season, number)` (optional) lets the pack flag see a token for ANOTHER episode."""
+    play = intent == "play"
+    wanted_language = want.get("language") or None
+    wanted_episode = _clean_episode(episode)
     kept, rejected = [], Counter()
     seen = set()
     for release in releases:
@@ -244,11 +389,20 @@ def rank(releases, want, *, batch_binge=None, torrents_only=True):
         seen.add(key)
         item = dict(release, tier=tier_of(release, want), score=score(release, want, batch_binge))
         item["label"] = label(item)
+        item["language_match"] = _language_match(release, wanted_language) if wanted_language else None
+        if wanted_language:
+            item["label"] += " (%s)" % (_LANGUAGE_SUFFIX[item["language_match"]] % wanted_language.capitalize())
+        if wanted_episode:
+            item["pack"], item["file_known"], item["file_known_by"] = _pack_and_file(release, wanted_episode)
         kept.append(item)
 
     def order(c):
         distance = _quality_distance(c, want) if c["tier"] == "other_quality" else (0, 0)
-        return (TIERS.index(c["tier"]), distance, -c["score"])
+        # the two extra parts are 0 for every release unless a language / the play intent is asked for,
+        # so the order is then exactly (tier, distance, -score) as before
+        by_language = _LANGUAGE_ORDER[c["language_match"]] if wanted_language else 0
+        by_file = 0 if (not play or c.get("file_known")) else 1
+        return (TIERS.index(c["tier"]), distance, by_language, by_file, -c["score"])
     kept.sort(key=order)
     return kept, rejected
 

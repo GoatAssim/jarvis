@@ -21,6 +21,12 @@ tests/data/addon-answers-cinemeta.json) rebuilt into addon responses by test_hub
 
 `state.log` records every request path; `state.fail` = {"/str"} makes that addon answer 500 to everything, `state.fail_streams` only to stream requests;
 `state.slow` = {"/str": seconds} delays it.
+
+Added for brief 8D (all of it is off until a test sets it, so every older test sees the same behaviour as before):
+`state.calls` = {"/str": n} counts every request an addon got and `state.stream_calls` only its stream requests;
+`state.stream_delay` = {"/str": seconds} delays the addon's STREAM requests only (the manifest is not delayed);
+`state.fail_mode` = {"/str": 404 | 500 | "timeout"} makes the addon's stream requests answer 404, answer 500, or hang for
+`state.hang_s` seconds and then close the connection without an answer (the client sees "didn't answer").
 """
 
 import hashlib
@@ -44,6 +50,11 @@ class State:
         self.fail = set()
         self.fail_streams = set()
         self.slow = {}
+        self.calls = {}          # brief 8D: requests per addon
+        self.stream_calls = {}   # brief 8D: stream requests per addon
+        self.stream_delay = {}   # brief 8D: seconds of delay for an addon's stream requests only
+        self.fail_mode = {}      # brief 8D: {"/str": 404 | 500 | "timeout"} for stream requests
+        self.hang_s = 1.0        # brief 8D: how long "timeout" hangs before the connection is closed
         self.posts = []
         self.movies = False      # True: "/cat" also has a searchable MOVIE catalog (two films: "Paper Lanterns", "Spirit Hunters: The Film")
         self.cin = None          # a RECORDED addon (test_hub_stremio_real_cinemeta.py) served at /cin: see Handler.cinemeta
@@ -126,10 +137,25 @@ class Handler(http.server.BaseHTTPRequestHandler):
                  else "/cin" if path.startswith("/cin/") and STATE.cin else None)
         if addon is None:
             return self._send(404, {})
+        STATE.calls[addon] = STATE.calls.get(addon, 0) + 1
+        if "/stream/" in path:
+            STATE.stream_calls[addon] = STATE.stream_calls.get(addon, 0) + 1
         if addon in STATE.slow:
             time.sleep(STATE.slow[addon])
         if addon in STATE.fail:
             return self._send(500, {"err": "boom"})
+        if "/stream/" in path:
+            if STATE.stream_delay.get(addon):
+                time.sleep(STATE.stream_delay[addon])
+            mode = STATE.fail_mode.get(addon)
+            if mode == 404:
+                return self._send(404, {"err": "gone"})
+            if mode == 500:
+                return self._send(500, {"err": "boom"})
+            if mode == "timeout":
+                time.sleep(STATE.hang_s)
+                self.close_connection = True
+                return None
         rest = path[len(addon):]
         if addon == "/cin":
             return self.cinemeta(rest)

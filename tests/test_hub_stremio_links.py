@@ -181,5 +181,30 @@ def _opener(url):
 check("only a link on stremio-web is opened", player.open_in_browser(web + "/#/library", opener=_opener)[0] and opened
       and not player.open_in_browser("https://evil.example/", opener=_opener)[0] and len(opened) == 1)
 
+# ---- brief 8A (N26): parse_stream also reads a stream_search ROW (a magnet, or infohash + file_idx).  ADD-ONLY: nothing above changed.
+ROW_MAGNET = {"rank": 1, "label": "1080p dub", "name": "Show S01E03", "seeders": 22,
+              "magnet": links.build_magnet(H, 7, None, ["udp://tracker.example:80", "udp://two.example:81"])}
+got = links.parse_stream(ROW_MAGNET)
+check("a search row with a magnet gives its hash, its file index and its trackers",
+      got and got["infohash"] == H and got["file_idx"] == 7 and got["trackers"] == ["udp://tracker.example:80", "udp://two.example:81"])
+check("...and the row's name", got and got["name"] == "Show S01E03")
+check("a search row with a magnet and no file index keeps None", links.parse_stream({"magnet": links.build_magnet(H)})["file_idx"] is None)
+check("a magnet that selects several files leaves the pick to us", links.parse_stream({"magnet": "magnet:?xt=urn:btih:%s&so=0,2-4" % H})["file_idx"] is None)
+got = links.parse_stream({"infohash": H.upper(), "file_idx": 3, "name": "n"})
+check("a search row with infohash and file_idx (no infoHash) gives both", got and got["infohash"] == H and got["file_idx"] == 3)
+check("a search row with infohash and no file_idx keeps None", links.parse_stream({"infohash": H})["file_idx"] is None)
+check("a row as JSON text parses too", (links.parse_stream('{"magnet": "%s"}' % links.build_magnet(H, 2)) or {}).get("file_idx") == 2)
+check("fileIdx wins over file_idx and the magnet's so", links.parse_stream({"infohash": H, "fileIdx": 1, "file_idx": 5, "magnet": links.build_magnet(H, 6)})["file_idx"] == 1)
+check("a row with no hash and no usable magnet is not a torrent", links.parse_stream({"label": "x"}) is None
+      and links.parse_stream({"magnet": "magnet:?dn=nothing"}) is None and links.parse_stream({"magnet": 12}) is None)
+STREAM_OBJ = {"infoHash": H, "fileIdx": 4, "sources": ["tracker:udp://x.example:1", "dht:%s" % H],
+              "behaviorHints": {"filename": "a.mkv", "videoSize": 123}, "title": "t"}
+check("a real stream object gives exactly what it gave before",
+      links.parse_stream(STREAM_OBJ) == {"infohash": H, "file_idx": 4, "name": "a.mkv", "trackers": ["udp://x.example:1"],
+                                         "filename": "a.mkv", "video_size": 123})
+check("...and an object with infoHash ignores a stray file_idx and magnet",
+      links.parse_stream({"infoHash": H, "file_idx": 9, "magnet": links.build_magnet(H, 8)})["file_idx"] is None)
+check("a stream that has only a bad infoHash is still refused", links.parse_stream({"infoHash": "zz"}) is None)
+
 print("\n%d passed, %d failed" % (passed, failed))
 sys.exit(1 if failed else 0)

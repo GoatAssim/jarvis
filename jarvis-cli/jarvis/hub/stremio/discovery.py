@@ -2,7 +2,7 @@
 
     find(net, addons, query)                 -> candidates for a title ("jjk" -> a short list)
     episodes(net, addons, type, id)          -> the show's episodes, season by season
-    streams_for(net, addons, type, video_id) -> every addon's streams for one episode, in parallel
+    streams_for(net, addons, type, video_id) -> every addon's streams for one episode, all at once
     library(net, ...) / mark_watched(...)    -> the owner's Stremio library (cloud account)
 
 Nothing here is tied to one id scheme.  A result carries the id and the `type` the addon gave
@@ -17,9 +17,10 @@ to one short line and only ever shown or ranked, never executed or passed on as 
 import difflib
 import re
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 
 from .. import states
+from . import addon_health, stream_cache
 from . import addons as A
 
 FAN_OUT = 8                    # parallel addon calls (plan 9.3)
@@ -27,6 +28,10 @@ MAX_SEARCH_CALLS = 12
 MAX_RESULTS = 12
 MAX_VIDEOS = 3000
 STREAM_BUDGET_S = 40.0         # one stream_search never waits longer than this in total
+STREAM_FAN_OUT = 24            # stream search: one worker per addon asked, at most this many (the work is waiting on the network)
+EARLY_MIN_ADDONS = 2           # the play intent's early return (N31a): this many addons answered ...
+EARLY_MIN_EXACT = 3            # ... with this many exact-quality torrents that have seeders ...
+EARLY_MIN_S = 6.0              # ... and at least this many seconds have passed
 
 
 def _clean(value, limit):
@@ -107,8 +112,7 @@ def find(net, found_addons, query, type_=None):
                 except A.AddonError:
                     continue
                 futures[pool.submit(net.get_json, url, addon.name)] = (addon, cat_type)
-            for future in as_completed(futures):
-                addon, cat_type = futures[future]
+            for future, (addon, cat_type) in list(futures.items()):      # in the order asked, not the order answered
                 try:
                     data = future.result()
                 except A.AddonError as exc:
@@ -122,8 +126,30 @@ def find(net, found_addons, query, type_=None):
     for cand in results.values():
         cand["score"] = round(_similarity(query, cand["name"]), 3)
         ranked.append(cand)
-    ranked.sort(key=lambda c: (-c["score"], -(c["year"] or 0)))
-    return {"results": ranked[:MAX_RESULTS], "searched": len(calls), "errors": errors[:5]}
+    # Results are read in the order the addons were asked (they used to be read as they finished, so equal scores came
+    # out in a different order every run, and one run's "which one?" was the next run's clear answer).  Ties then go
+    # to a real IMDb / Kitsu id before an addon's own, and otherwise keep that order.
+    ranked.sort(key=lambda c: (-c["score"], -(c["year"] or 0), _KIND_RANK.get(c.get("id_kind"), 2)))
+    return {"results": _collapse_same_title(ranked)[:MAX_RESULTS], "searched": len(calls), "errors": errors[:5]}
+
+
+_KIND_RANK = {"imdb": 0, "kitsu": 1}
+
+
+def _collapse_same_title(ranked):
+    """One row per title: addons such as MediaFusion list the same show under their own ids (mf123...) next to
+    the IMDb entry.  When a result has the same name, year and type as an earlier one that carries a real
+    IMDb / Kitsu id, it is the same show: drop it, so a plain name resolves instead of asking "which one?"."""
+    keep, seen = [], {}
+    for cand in ranked:
+        key = (re.sub(r"[^a-z0-9]+", " ", cand["name"].lower()).strip(), cand.get("year"), cand.get("type"))
+        first = seen.get(key)
+        if first is not None and first.get("id_kind") in _KIND_RANK:
+            continue
+        if first is None:
+            seen[key] = cand
+        keep.append(cand)
+    return keep
 
 
 def is_clear_winner(results):
@@ -263,42 +289,129 @@ def no_streams_sentence(type_=None, item_id=None):
             "then ask again." % what)
 
 
-def streams_for(net, found_addons, type_, video_id, *, budget_s=STREAM_BUDGET_S):
-    """Ask every stream-capable addon for one episode, in parallel.
+def _early_enough(want, answered, streams):
+    """The play intent's early return (N31a): are there enough exact-quality torrents with seeders yet?
 
-    -> {"streams": [(stream dict, addon name)], "answered": [names], "failed": [sentences]}"""
+    `want` is the ranking's want dict (ranking.normalize_want).  "Exact" is the ranking's own tier for that want,
+    after the same torrent from two addons is counted once.  Never raises: a failure here only means "keep waiting"."""
+    if want is None or answered < EARLY_MIN_ADDONS:
+        return False
+    try:
+        from . import ranking
+        releases = []
+        for stream, addon_name in streams:
+            release = ranking.parse_release(stream)
+            if release is not None:
+                release["addon"] = addon_name
+                releases.append(release)
+        kept, _rejected = ranking.rank(releases, want, torrents_only=True)
+    except Exception:  # noqa: BLE001
+        return False
+    exact = [c for c in kept if c.get("tier") == "exact" and (c.get("seeders") or 0) > 0]
+    return len(exact) >= EARLY_MIN_EXACT
+
+
+def streams_for(net, found_addons, type_, video_id, *, budget_s=STREAM_BUDGET_S, intent="bulk", want=None):
+    """Ask every stream-capable addon for one episode, all at once.
+
+    -> {"streams": [(stream dict, addon name)], "answered": [names], "failed": [sentences], "asked": N, ...}
+    The first four keys are today's.  Added keys: `cached` (True when the answer came from `stream_cache`, with
+    `cached_age_s` and `cache_note`), `skipped` (names of addons left out because they keep failing: see
+    `addon_health`), `waiting` (names dropped by the early return or the budget), `waited_s`, `intent`,
+    `complete` (False when some addon was not waited for).
+
+    `intent` (contract C5):
+      "bulk" (the default, today's behaviour): wait for every addon or the budget.  Never reads the cache, so a plan
+              always sees live answers; it does write what it got, so a play search after it can use it.
+      "play"  first looks in `stream_cache`; and, when `want` (the ranking's want dict) is given, stops waiting when
+              at least EARLY_MIN_ADDONS addons answered with at least EARLY_MIN_EXACT exact-quality torrents that have
+              seeders and EARLY_MIN_S seconds have passed.  The addons not waited for are named in `failed` as
+              "still waiting".  Without `want` nothing is "exact", so the play intent waits as bulk does.
+    Any other `intent` is "bulk".
+
+    An addon that keeps failing is not asked (and is named in `failed`); an addon the SSRF guard refused because
+    its address is private or local is named once, with the allow_private_hosts sentence, and does not count as a
+    failure.  Failures are only counted in a search where at least one addon answered."""
     type_, video_id = A.valid_type(type_), A.valid_id(video_id)
     if not type_ or not video_id:
         raise A.AddonError("that isn't an episode id I can use")
+    intent = "play" if intent == "play" else "bulk"
     targets = [a for a in found_addons if a.supports("stream", type_, video_id)]
     out = {"streams": [], "answered": [], "failed": [], "asked": len(targets)}
     if not targets:
         out["failed"].append("no installed addon offers streams for %s ids (type %s)" % (A.id_kind(video_id), type_))
         return out
-    pool = ThreadPoolExecutor(max_workers=min(FAN_OUT, len(targets)))
+    if intent == "play":
+        hit = stream_cache.get(type_, video_id)
+        if hit is not None:
+            return hit
+
+    active, skipped = addon_health.split(targets)
+    if not active:                                   # a skip must never leave a search with nobody to ask
+        active, skipped = list(targets), []
+    out["asked"] = len(active)
+    early_ok = intent == "play" and want is not None
+    ok, bad, local, waiting, early = [], [], [], [], False
+    started = time.monotonic()
+    pool = ThreadPoolExecutor(max_workers=max(1, min(STREAM_FAN_OUT, len(active))))
     try:
         futures = {}
-        for addon in targets:
+        for addon in active:
             futures[pool.submit(net.get_json, A.resource_url(addon.base, "stream", type_, video_id), addon.name)] = addon
-        try:
-            for future in as_completed(futures, timeout=budget_s):
+        pending = set(futures)
+        while pending:
+            elapsed = time.monotonic() - started
+            remaining = budget_s - elapsed
+            if remaining <= 0:
+                break
+            wake = remaining
+            if early_ok and elapsed < EARLY_MIN_S:
+                wake = min(wake, EARLY_MIN_S - elapsed)            # wake up when the minimum time has passed
+            done, pending = wait(pending, timeout=max(wake, 0.001), return_when=FIRST_COMPLETED)
+            for future in done:
                 addon = futures[future]
                 try:
                     data = future.result()
                 except A.AddonError as exc:
-                    out["failed"].append(str(exc))
+                    if addon_health.is_local_refusal(exc):
+                        local.append(addon.name)
+                    else:
+                        out["failed"].append(str(exc))
+                        if addon_health.counts_as_failure(exc):
+                            bad.append(addon)
+                    continue
+                except Exception as exc:  # noqa: BLE001 - one addon's odd failure must not lose the others
+                    out["failed"].append("%s failed (%s)" % (addon.name, type(exc).__name__))
                     continue
                 items = data.get("streams") if isinstance(data, dict) else None
                 out["answered"].append(addon.name)
+                ok.append(addon)
                 for stream in (items or [])[:200]:
                     if isinstance(stream, dict):
                         out["streams"].append((stream, addon.name))
-        except Exception:  # noqa: BLE001 - as_completed's TimeoutError: the slow ones are reported, not waited for
-            for future, addon in futures.items():
-                if not future.done():
-                    out["failed"].append("%s was too slow" % addon.name)
+            if (early_ok and pending and time.monotonic() - started >= EARLY_MIN_S
+                    and _early_enough(want, len(out["answered"]), out["streams"])):
+                early = True
+                break
+        waiting = [futures[f].name for f in pending]
     finally:
         pool.shutdown(wait=False, cancel_futures=True)
+
+    if local:
+        out["failed"].append(addon_health.local_refused_sentence(local))
+    if skipped:
+        out["failed"].append(addon_health.skipped_sentence([a.name for a, _n in skipped]))
+    if waiting:
+        if early:
+            out["failed"].append("still waiting: %s (not waited for: enough answers were in)" % ", ".join(sorted(set(waiting))))
+        else:
+            for name in waiting:
+                out["failed"].append("%s was too slow" % name)
+    if ok:                          # a search nobody answered says nothing about the addons (the PC may be offline)
+        addon_health.record(ok=ok, failed=bad)
+    out.update(cached=False, skipped=[a.name for a, _n in skipped], waiting=waiting, intent=intent,
+               complete=not waiting, waited_s=round(time.monotonic() - started, 1))
+    stream_cache.put(type_, video_id, out, complete=not waiting)
     return out
 
 

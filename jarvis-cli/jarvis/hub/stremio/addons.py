@@ -42,7 +42,17 @@ _CATALOG_ID_RE = re.compile(r"^[A-Za-z0-9:._-]{1,80}$")
 
 
 class AddonError(Exception):
-    """A call to an addon or the cloud failed.  The message is safe to show: no URL, no key."""
+    """A call to an addon or the cloud failed.  The message is safe to show: no URL, no key.
+
+    `kind` and `status` are optional and only say WHAT went wrong, for `addon_health` (N31): kind is
+    "local_refused" (the SSRF guard refused a private or local address), "refused" (any other guard refusal),
+    "network" (a timeout, a refused connection, a name that did not resolve), "http" (with `status`),
+    "json", "size", "redirect", or None when nobody said.  Code that raises it without them is unchanged."""
+
+    def __init__(self, message="", *, kind=None, status=None):
+        super().__init__(message)
+        self.kind = kind
+        self.status = status
 
 
 # --------------------------------------------------------------------------- ids and URLs
@@ -129,7 +139,7 @@ class Net:
         for chunk in resp.iter_content(chunk_size=64 * 1024):
             data += chunk
             if len(data) > limit:
-                raise AddonError("the reply was larger than %d MB" % (limit // (1024 * 1024)))
+                raise AddonError("the reply was larger than %d MB" % (limit // (1024 * 1024)), kind="size")
         return bytes(data)
 
     def request(self, method, url, label, *, json_body=None, limit=MAX_REPLY_BYTES, timeout=ADDON_TIMEOUT):
@@ -141,7 +151,9 @@ class Net:
                 try:
                     netguard.check_url(current, self.allow, self.resolver)
                 except netguard.GuardError as exc:
-                    raise AddonError("%s was refused: %s" % (label, str(exc).replace(url, "the address")))
+                    local = "allow_private_hosts" in str(exc)          # netguard's own sentence for a private or local address
+                    raise AddonError("%s was refused: %s" % (label, str(exc).replace(url, "the address")),
+                                     kind="local_refused" if local else "refused")
                 try:
                     if method == "POST":
                         resp = self.sess().post(current, json=json_body, stream=True, allow_redirects=False, timeout=timeout)
@@ -149,10 +161,10 @@ class Net:
                         resp = self.sess().get(current, stream=True, allow_redirects=False, timeout=timeout,
                                                headers={"Accept": "application/json"})
                 except Exception as exc:  # noqa: BLE001 - requests' errors carry the URL: say only what happened
-                    raise AddonError("%s didn't answer (%s)" % (label, type(exc).__name__))
+                    raise AddonError("%s didn't answer (%s)" % (label, type(exc).__name__), kind="network")
                 if resp.status_code in (301, 302, 303, 307, 308) and resp.headers.get("Location"):
                     if method == "POST":                      # never replay a body (the account key) elsewhere
-                        raise AddonError("%s redirected a request that carries a key; refused" % label)
+                        raise AddonError("%s redirected a request that carries a key; refused" % label, kind="redirect")
                     nxt = urljoin(current, resp.headers["Location"])
                     resp.close()
                     resp = None
@@ -160,14 +172,14 @@ class Net:
                     continue
                 break
             else:
-                raise AddonError("%s redirected too many times" % label)
+                raise AddonError("%s redirected too many times" % label, kind="redirect")
             if resp.status_code != 200:
-                raise AddonError("%s answered HTTP %d" % (label, resp.status_code))
+                raise AddonError("%s answered HTTP %d" % (label, resp.status_code), kind="http", status=resp.status_code)
             raw = self._read(resp, limit)
             try:
                 return json.loads(raw.decode("utf-8", errors="replace"))
             except ValueError:
-                raise AddonError("%s didn't answer with JSON" % label)
+                raise AddonError("%s didn't answer with JSON" % label, kind="json")
         finally:
             if resp is not None:
                 try:

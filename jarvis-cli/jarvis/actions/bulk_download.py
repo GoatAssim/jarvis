@@ -19,6 +19,7 @@ its fallback releases, which only bulk_run's own rows carry.
 
 import json
 import os
+import time
 
 
 def _is_chat_guest():
@@ -117,7 +118,17 @@ def tool_bulk_run(args):
         from ..hub.store import Store
         from ..hub.stremio import bulk
         if not args.get("plan_id"):
-            return {"needs_clarification": True, "message": "Which plan? bulk_plan gives a plan_id."}
+            latest = bulk.newest_plan()
+            if latest is None:
+                return {"needs_clarification": True, "message": "Which plan? bulk_plan gives a plan_id."}
+            # Nothing is queued by a guess: name the newest plan and let the next call (which asks the owner) carry its id.
+            made = max(1, int((time.time() - float(latest.get("created") or 0)) // 60))
+            return {"ok": False, "needs_clarification": True, "newest_plan_id": latest["id"],
+                    "message": ("No plan_id was given. The newest saved plan is %s: %s season %s, %s episode%s, made %d min ago. "
+                                "If that is the one the owner just agreed to, call bulk_run again with plan_id=%s. "
+                                "If they meant another show or season, run bulk_plan for it instead. Nothing is queued yet."
+                                % (latest["id"], latest["media"]["title"], latest["season"], latest["totals"]["episodes"],
+                                   "" if latest["totals"]["episodes"] == 1 else "s", made, latest["id"]))}
         try:
             return bulk.run_plan(str(args["plan_id"]).strip(), store=Store(), override_caps=args.get("override_caps") is True,
                                  start_paused=args.get("start_paused") is True)

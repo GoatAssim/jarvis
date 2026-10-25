@@ -83,6 +83,25 @@ def load_plan(plan_id):
     return plan
 
 
+def newest_plan(max_age_s=PLAN_TTL_S):
+    """The most recently saved plan that is still fresh, or None.  Used when `bulk_run` is called without a
+    plan_id: a chat only carries the words of earlier turns, so the id from `bulk_plan` is usually gone by the
+    time the owner says yes."""
+    folder = plans_dir()
+    try:
+        paths = sorted(folder.glob("bp*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    except OSError:
+        return None
+    for path in paths[:MAX_PLANS]:
+        plan = read_json(path, default=None, expect=dict)
+        if not plan or not PLAN_ID_RE.match(str(plan.get("id") or "")):
+            continue
+        if time.time() - float(plan.get("created") or 0) > max_age_s:
+            continue
+        return plan
+    return None
+
+
 # --------------------------------------------------------------------------- names
 
 def group_id_for(media_id, season, want):
@@ -309,7 +328,11 @@ def plan_message(plan):
         rows = [r["episode"] for r in plan["episodes"] if r["status"] == key]
         if rows:
             out.append("Episode%s %s %s." % ("s" if len(rows) > 1 else "", ", ".join(str(n) for n in rows[:12]), text))
-    out.append("Nothing is queued yet. If they say yes: bulk_run with this plan_id.")
+    if plan.get("id"):
+        out.append("Nothing is queued yet. If they say yes: bulk_run with plan_id=%s. Write that plan id in your reply when you "
+                   "ask, so it is still in the chat when they answer." % plan["id"])
+    else:
+        out.append("Nothing is queued yet. If they say yes: bulk_run with this plan_id.")
     return " ".join(out)
 
 

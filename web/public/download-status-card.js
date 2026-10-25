@@ -119,7 +119,7 @@
       case "queued":
         return row.retry_in_s ? "Waiting to retry in " + row.retry_in_s + " s" : "Queued";
       case "probing": return "Checking\u2026";
-      case "connecting": return "Connecting\u2026";
+      case "connecting": return row.phase ? row.phase.charAt(0).toUpperCase() + row.phase.slice(1) : "Connecting\u2026";
       case "downloading":
         [percentText(row), speedText(row), etaText(row)].forEach((t) => { if (t) parts.push(t); });
         return parts.length ? parts.join(DOT) : "Downloading";
