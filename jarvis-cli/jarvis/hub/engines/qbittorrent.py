@@ -204,6 +204,37 @@ def _settings_base(settings):
     return _clean_config({k: block[k] for k in SETTINGS_KEYS if k in block})
 
 
+def file_overridden_keys(path=None):
+    """The NAMES of the behaviour keys (SETTINGS_KEYS) that ~/.jarvis/qbittorrent.json sets, so the Settings
+    page can say "the file wins for this one" (brief 7C).  Read-only, and it never returns, logs or raises a
+    VALUE: no address, user name or password, nor the value of a behaviour key.  A missing, unreadable or
+    broken file, or one that is not an object, gives [].
+
+    It asks `_clean_config` itself which keys the file sets (a key counts only when the file's value is one
+    `_clean_config` accepts), so it cannot drift from load_config.  One key follows a different rule:
+    `prefer_for_magnets` is on when EITHER the file or the settings say so, so a file that says false does not
+    decide anything; it is named only when the file says true.  Precedence itself is load_config's and is
+    not changed here."""
+    try:
+        target = Path(path) if path else config_path()
+        raw = json.loads(target.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(raw, dict):
+        return []
+    probe = {key: object() for key in SETTINGS_KEYS}          # a value no file can equal
+    probe.update({"poll_s": 1e9, "metadata_timeout_s": 1e9, "stall_minutes": 1e9})   # numbers get compared with a floor
+    try:
+        cfg = _clean_config({k: raw[k] for k in SETTINGS_KEYS if k in raw}, probe)
+    except Exception:  # noqa: BLE001 - this only reports names; it must never break the Settings page
+        return []
+    names = [key for key in SETTINGS_KEYS if cfg.get(key) is not probe[key]
+             and not (isinstance(probe[key], float) and cfg.get(key) == probe[key])]
+    if "prefer_for_magnets" in names and raw.get("prefer_for_magnets") is not True:
+        names.remove("prefer_for_magnets")
+    return names
+
+
 def load_config(path=None, settings=None):
     """(config, None) or (None, a one-line problem the owner can act on).  Never raises, and the
     problem never contains the password.

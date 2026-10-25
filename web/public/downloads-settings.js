@@ -4,7 +4,9 @@
  * hands build() the same row helpers its other sections use as ctx.ui).  Nothing here owns a rule:
  *   - what exists and what may be written comes from `jarvis hub-admin settings` (GET /api/hub/settings),
  *     which reads hub/settings.py's own WRITABLE / PREFS_WRITABLE lists.  A setting the hub doesn't accept
- *     yet (retention today) simply has no row; a key another phase adds shows up as a generic row.
+ *     yet simply has no row; a key another phase adds shows up as a generic row.  Two rows have a rule of their
+ *     own (brief 7C): the History retention row asks first when it would remove rows, and a qBittorrent key that
+ *     ~/.jarvis/qbittorrent.json also sets (`overridden_by` in the same answer) is shown read-only.
  *   - every change is written through the dl_prefs / dl_settings tools, with the confirmation dl_settings
  *     asks for (library folder, private hosts) and the hub's own validator.  An error the hub returns is
  *     shown as it is; no limit or range is checked twice here.
@@ -88,6 +90,9 @@
     // brief 19: the hub's own range (1 to 720) is not repeated here; a value it refuses shows its refusal text.
     { path: "unknown_settle_hours", group: "Lost downloads", label: "Give up on a lost download after (hours)", type: "int",
       help: "When another tool (Steam, Playnite ...) stops listing a download that hadn't finished, its row waits as \"unknown\". After this long it becomes \"cancelled\" (never \"failed\"). A row that is only out of date because its program is closed is never given up on." },
+    // brief 7C: the hub's own range (0 to 3650) is not repeated here; a value it refuses shows its refusal text.  Lowering it asks first.
+    { path: "retention.keep_history_days", group: "When a download finishes", label: "Keep finished downloads in History for", type: "int", min: 0, unit: "days",
+      help: "Finished downloads older than this many days are removed from History. The files on disk are never deleted. 0 keeps everything." },
     { path: "allow_private_hosts", group: "Safety", label: "Allowed private addresses", type: "hosts",
       help: "Links to your own network are refused unless listed here: one host or host:port per line. Changing it asks first." },
   ];
@@ -224,7 +229,7 @@
     if ((m = /^(http|stremio|qbittorrent)\.[a-z0-9_]+$/.exec(p))) return { section: "sources", source: m[1] };
     if (p === "unknown_settle_hours") return { section: "sources", source: "" };
     if (/^notify\./.test(p)) return { section: "notifications", source: null };
-    if (/^after_download\./.test(p)) return { section: "finish", source: null };
+    if (/^after_download\./.test(p) || p === "retention.keep_history_days") return { section: "finish", source: null };
     if (p === "allow_private_hosts") return { section: "safety", source: null };
     return { section: "other", source: null };
   }
@@ -244,6 +249,8 @@
     [/^qbittorrent\.prefer_for_magnets$/, "for the next magnet link you add"],
     [/^qbittorrent\.[a-z_]+$/, "for the next torrent that starts"],
     [/^(http|stremio)\.max_retries$/, "the next time a download fails and the hub decides on a retry"],
+    // hub/daemon.py _prune_history re-reads the setting each time it runs: when the hub starts, then every PRUNE_EVERY (an hour)
+    [/^retention\.keep_history_days$/, "at the hub's next History clean-up (about once an hour while the hub runs)"],
   ];
   function timingFor(path) {
     for (const [re, text] of TIMING_RULES) if (re.test(String(path || ""))) return text;
@@ -287,6 +294,48 @@
     if (typeof v === "number") return String(v) + (spec.unit ? " " + spec.unit : "");
     if (v === "") return spec.path === "library_root" ? "the default Jarvis downloads folder" : "empty";
     return String(v);
+  }
+
+  // ---- brief 7C: the two rows with a rule of their own (pure; no DOM) -----------------------------------------------------
+  const RETENTION_PATH = "retention.keep_history_days";
+  const OVERRIDE_TEXT = "Set in qbittorrent.json: that value is used instead of the one saved here.";
+
+  // The file that sets a key, as the hub's `overridden_by` names it ("" = nothing overrides it).  Names only: the page never sees a value.
+  function overrideOf(payload, path) {
+    const map = payload && payload.overridden_by;
+    if (!map || typeof map !== "object" || !Object.prototype.hasOwnProperty.call(map, path)) return "";
+    return typeof map[path] === "string" ? map[path] : "";
+  }
+
+  // Would this change remove History rows the hub keeps today?  Yes when the number goes down, and when a number is set where
+  // there was 0 (keep everything).  Going up, setting 0, or a value the hub will refuse anyway (it says so itself) asks nothing.
+  function retentionNeedsConfirm(current, next) {
+    if (next === null || next === undefined || typeof next === "boolean" || String(next).trim() === "") return false;
+    const to = Number(next);
+    if (!isFinite(to) || !(to > 0)) return false;
+    if (current === null || current === undefined || typeof current === "boolean" || String(current).trim() === "") return true;
+    const was = Number(current);
+    if (!isFinite(was) || !(was > 0)) return true;
+    return to < was;
+  }
+
+  // The finish time (epoch seconds) before which a History row would go, for the hub's history `until`.
+  function retentionCutoff(nowMs, days) { return Math.floor(nowMs / 1000 - Number(days) * 86400); }
+
+  // What the confirmation says.  `count` is the number of rows the History list can see that old (null = it could not be counted).
+  function retentionWarning(days, count) {
+    const d = Number(days);
+    const unit = d === 1 ? "day" : "days";
+    const tail = " Only the History rows go: the files on disk are never deleted. A removed row can't be brought back.";
+    let first;
+    if (typeof count === "number" && count > 0) {
+      first = "Up to " + count + " finished download" + (count === 1 ? "" : "s") + " older than " + d + " " + unit + " will be removed from History the next time the hub tidies up (about once an hour).";
+    } else if (count === 0) {
+      first = "No finished download in History is older than " + d + " " + unit + " yet, so nothing goes now. From then on a row older than that is removed when the hub tidies up (about once an hour).";
+    } else {
+      first = "Finished downloads older than " + d + " " + unit + " will be removed from History the next time the hub tidies up (about once an hour). I couldn't count how many that is.";
+    }
+    return { title: "Remove older downloads from History?", body: first + tail };
   }
 
   // What a row says under its help text: the default, whether the value differs, and when a change takes effect.
@@ -1042,7 +1091,7 @@
     ".dls-rail__item{display:flex;justify-content:space-between;gap:8px;text-align:left;padding:5px 8px;border:0;border-radius:var(--radius);background:none;color:var(--text-dim);font:inherit;font-size:12.5px;cursor:pointer}",
     ".dls-rail__item:hover,.dls-rail__item.is-active{background:var(--bg-1);color:var(--text)}.dls-rail__n{color:var(--text-dimmer);font-size:11px}",
     ".dls-main{min-width:0}.dls-section{margin:0 0 22px}.dls-section>.dls-lede{margin:0 0 8px;font-size:11.5px;color:var(--text-dim)}",
-    ".dls [hidden]{display:none!important}",
+    ".dls [hidden]{display:none!important}.dls-locked{color:var(--text-dim)}",
     ".dls-meta{display:flex;flex-wrap:wrap;align-items:center;gap:2px 12px;margin-top:3px;font-size:11px;color:var(--text-dimmer)}",
     ".dls-reset{padding:0;border:0;background:none;color:var(--accent);font:inherit;font-size:11px;text-decoration:underline;cursor:pointer}",
     ".dls-source{margin:0 0 8px;border:1px solid var(--border);border-radius:var(--radius);background:var(--bg-1)}",
@@ -1193,7 +1242,43 @@
       if (e.node && typeof e.node.setAttribute === "function") e.node.setAttribute("data-changed", info.differs ? "1" : "0");
     }
 
+    // History retention: when the change would remove rows, say so, count them when the History list can, and ask.  Nothing is
+    // saved before the answer; "no" puts the old number back (the row shows the refusal).
+    async function countOlderThan(days) {
+      try {
+        const body = await getJson("/api/hub/history?limit=1&until=" + retentionCutoff(Date.now(), days));
+        if (!body || body.summary_truncated || !body.summary || typeof body.summary.count !== "number") return null;
+        return body.summary.count;
+      } catch (_) { return null; }
+    }
+    async function confirmRetention(current, next) {
+      if (!retentionNeedsConfirm(current, next)) return;
+      const words = retentionWarning(Number(next), await countOlderThan(Number(next)));
+      const dialog = global.JarvisUI;
+      const ok = dialog && typeof dialog.confirm === "function"
+        ? await dialog.confirm({ title: words.title, level: "warn", focusCancel: true, confirmLabel: "Remove old rows", body: words.body })
+        : false;
+      if (!ok) throw new Error("Not changed: you declined.");
+    }
+
+    // A key ~/.jarvis/qbittorrent.json also sets: the file wins, so this row only SHOWS what is saved here and says so.  No control,
+    // no Reset, no default line: nothing on this page can change what is in force.
+    function lockedRow(spec, where, file) {
+      const status = h("span", { class: "prefs-row__status" });
+      const help = (spec.help ? spec.help + " " : "") + OVERRIDE_TEXT;
+      const shown = formatValue(spec, getPath(payload.settings, spec.path), payload);
+      const ctlEl = h("span", { class: "prefs-note dls-locked", "data-readonly": "1", text: shown === "" ? "not set" : shown });
+      const e = { kind: "setting", path: spec.path, label: spec.label, help: help, section: where.section, source: where.source, spec: spec,
+        status: status, readonly: true, overriddenBy: file };
+      e.node = ui.rowShell(spec.label, help, ctlEl, status);
+      e.info = () => ({ hasDefault: false, differs: false, defaultText: "", timing: "" });
+      e.reset = async () => {};
+      return addEntry(e);
+    }
+
     function settingRow(spec, where) {
+      const file = overrideOf(payload, spec.path);
+      if (file) return lockedRow(spec, where, file);
       const status = h("span", { class: "prefs-row__status" });
       const toCtl = spec.toCtl || ((v) => (spec.type === "hosts" ? (v || []).join(", ") : v));
       const fromCtl = spec.fromCtl || ((v) => (spec.type === "hosts" ? textToHosts(v) : v));
@@ -1203,6 +1288,7 @@
       const e = { kind: "setting", path: spec.path, label: spec.label, help: spec.help || "", section: where.section, source: where.source, spec: spec, status: status };
       const commit = async (next) => {
         const sent = fromCtl(next);
+        if (spec.path === RETENTION_PATH) await confirmRetention(getPath(payload.settings, spec.path), sent);
         await writeSetting(spec.path, sent, payload);
         setPath(payload.settings, spec.path, sent);
         savedFlash(status);
@@ -1217,6 +1303,7 @@
         const def = defaultOf(payload, spec.path);
         if (def === undefined || !e.info().differs) return;
         try {
+          if (spec.path === RETENTION_PATH) await confirmRetention(getPath(payload.settings, spec.path), def);
           await writeSetting(spec.path, def, payload);
           setPath(payload.settings, spec.path, def);
           ctl.set(toCtl(def));
@@ -1566,6 +1653,8 @@
     textToHosts: textToHosts, anchorOf: anchorOf, daysChoice: daysChoice, windowsToModel: windowsToModel, modelToWindows: modelToWindows,
     extToModel: extToModel, modelToExt: modelToExt, isEventPath: isEventPath,
     PROVIDER_SETTING_FIELDS: PROVIDER_SETTING_FIELDS, providerSettingRows: providerSettingRows, providerSettingArgs: providerSettingArgs,
+    overrideOf: overrideOf, retentionNeedsConfirm: retentionNeedsConfirm, retentionCutoff: retentionCutoff, retentionWarning: retentionWarning,
+    OVERRIDE_TEXT: OVERRIDE_TEXT, RETENTION_PATH: RETENTION_PATH,
     stremioModel: stremioModel, stremioFacts: stremioFacts, diagnosticFor: diagnosticFor, folderOf: folderOf, pickOptions: pickOptions,
     locateFlow: locateFlow, startFlow: startFlow, startTimeoutMs: startTimeoutMs, hubPost: hubPost, STREMIO_TONE: STREMIO_TONE,
     stremioSetupModel: stremioSetupModel, accountModel: accountModel, loginBody: loginBody, keyBody: keyBody, playerModel: playerModel, playerSaveBody: playerSaveBody, addonsModel: addonsModel, addonsBody: addonsBody, serverSaveBody: serverSaveBody, webSaveBody: webSaveBody, stremioCacheModel: stremioCacheModel,

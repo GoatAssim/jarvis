@@ -263,9 +263,10 @@ def normalize_item_options(limit_kbps=None, open_when_done=None, notify_me=None,
 # deliberately narrow: an allow-list, one entry per option, naming the engines that honour it and
 # the checker that decides what a value may be.  A key not listed is an error, never stored.
 #
-# Not here on purpose: `headers` (an Authorization value would sit in the database in clear text),
-# `filename`, and the Stremio engine's `show` / `season` / `episode` / `fallbacks` (H23, which the
-# bulk tools write themselves).  Each is an owner decision (brief 31, "Open points").
+# Not here on purpose: `headers` (an Authorization value would sit in the database in clear text; the
+# owner said no, brief 7C: only a `referer` is allowed, below) and the Stremio engine's `show` /
+# `season` / `episode` / `fallbacks` (H23, which the bulk tools write themselves).  Each is an owner
+# decision (brief 31, "Open points").  `filename` and `referer` came in with brief 7C (owner: yes).
 
 def _check_segments(value):
     """Parallel parts for ONE download: a whole number from 1 (off for this one) to the engine's maximum."""
@@ -279,9 +280,73 @@ def _check_segments(value):
     return settings_mod._int_in(value, 1, top, "segments")
 
 
+FILENAME_MAX_INPUT = 200      # the longest `filename` a caller may send at all
+REFERER_MAX = 500
+
+
+def _check_filename(value):
+    """The name ONE download is saved as (brief 7C).  A name the hub would have to change is REFUSED in
+    words, never quietly fixed: the engine's own `naming.sanitize_filename` would turn a path into its last
+    part, `a:b` into `a_b` and cut a long name, and the owner would get a file they didn't ask for.
+    The final name still goes through `naming.unique_path` and the engine's name reservation."""
+    import re
+    import unicodedata
+    if not isinstance(value, str):
+        return None, "filename must be text, like report.pdf"
+    text = unicodedata.normalize("NFC", value)          # the same letters in another encoding: not a change
+    if not text.strip():
+        return None, "filename is empty"
+    if len(text) > FILENAME_MAX_INPUT:
+        return None, "filename can be at most %d characters" % FILENAME_MAX_INPUT
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in text):
+        return None, "filename can't hold a NUL or another control character"
+    if "/" in text or "\\" in text:
+        return None, "filename is a file name, not a path: it can't hold / or \\ (use dest for a folder)"
+    if ".." in text:
+        return None, "filename can't hold '..'"
+    if re.match(r"^[A-Za-z]:", text):
+        return None, "filename can't start with a drive letter like C:"
+    if text != text.strip(" ."):
+        return None, "filename can't start or end with a space or a dot"
+    if text.split(".")[0].lower() in naming._WIN_RESERVED:
+        return None, "filename %r is a reserved Windows device name; pick another" % text[:40]
+    if len(text) > naming.MAX_NAME:
+        return None, ("a saved file name is at most %d characters here (this one has %d); shorten it"
+                      % (naming.MAX_NAME, len(text)))
+    if naming.sanitize_filename(text) != text:
+        return None, "filename holds characters a file name can't carry (one of < > : \" | ? *); take them out"
+    return text, None
+
+
+def _check_referer(value):
+    """The Referer sent on the FIRST request (brief 7C): an http(s) link up to REFERER_MAX characters.
+    No user name or password in it, and no spaces or control characters (a header must stay one line)."""
+    if not isinstance(value, str):
+        return None, "referer must be an http or https link"
+    text = value.strip()
+    if not text:
+        return None, "referer is empty"
+    if len(text) > REFERER_MAX:
+        return None, "referer can be at most %d characters" % REFERER_MAX
+    if any(ord(ch) <= 32 or ord(ch) == 127 for ch in text):
+        return None, "referer can't hold spaces or control characters"
+    try:
+        parts = urlsplit(text)
+        parts.port  # noqa: B018 - raises ValueError on a bad port
+    except ValueError:
+        return None, "referer isn't a usable link"
+    if parts.scheme.lower() not in ("http", "https") or not parts.hostname:
+        return None, "referer must be an http or https link like https://example.com/page"
+    if parts.username is not None or parts.password is not None:
+        return None, "referer can't hold a user name or password (it is stored in clear text)"
+    return text, None
+
+
 ITEM_OPTION_CHECKS = {
     # option -> (the engines that honour it, checker(value) -> (clean, error))
     "segments": (("http",), _check_segments),
+    "filename": (("http",), _check_filename),
+    "referer": (("http",), _check_referer),
 }
 
 

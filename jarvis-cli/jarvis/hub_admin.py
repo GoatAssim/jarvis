@@ -378,6 +378,18 @@ def resolve_thumb(item_id, store=None):
 
 # --------------------------------------------------------------------------- settings (read)
 
+def _overridden_by():
+    """{"qbittorrent.tag": "qbittorrent.json", ...}: the hub settings whose saved value is NOT the one in force,
+    because ~/.jarvis/qbittorrent.json sets the same key and the file wins (brief 7C).  Names only: the engine's
+    `file_overridden_keys` never hands over a value, so no address, user name or password can reach this answer.
+    {} when there is no file, it can't be read, or anything fails."""
+    try:
+        from .hub.engines import qbittorrent
+        return {"qbittorrent." + key: qbittorrent.CONFIG_NAME for key in qbittorrent.file_overridden_keys()}
+    except Exception:  # noqa: BLE001 - the Settings read never fails over this
+        return {}
+
+
 def settings_payload(store=None):
     """What the Settings tab's Downloads section needs and nothing more: the merged settings, which
     keys `dl_prefs` / `dl_settings` may write (read from hub/settings.py, never copied), the
@@ -394,6 +406,7 @@ def settings_payload(store=None):
         return {"ok": True, "settings": settings, "view": view, "defaults": copy.deepcopy(settings_mod.DEFAULTS),
                 "writable": sorted(settings_mod.WRITABLE), "prefs_writable": sorted(settings_mod.PREFS_WRITABLE),
                 "events": list(settings_mod.EVENTS), "open_modes": list(settings_mod.OPEN_MODES),
+                "overridden_by": _overridden_by(),
                 "providers": service.list_providers(store).get("providers", [])}
     except Exception as exc:  # noqa: BLE001
         return _err("couldn't read the settings: %s" % exc)

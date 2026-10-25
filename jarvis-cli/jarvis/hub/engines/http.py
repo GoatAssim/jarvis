@@ -290,6 +290,8 @@ def _stream_to_file(ctx, item, url, headers, resolver, session, segments, mine):
 
     req = {"Accept-Encoding": "identity", "User-Agent": USER_AGENT}
     req.update(clean_headers(headers if headers is not None else opts.get("headers")))
+    if opts.get("referer"):      # brief 7C: the owner's own Referer for this download (dl_add_http); it wins over a headers one
+        req.update(clean_headers({"referer": opts.get("referer")}))
     if offset > 0:
         req["Range"] = "bytes=%d-" % offset
         validator = ref.get("etag") or ref.get("last_modified")

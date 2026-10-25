@@ -32,7 +32,7 @@ function fakeEl(tag, attrs, kids) {
 function world(opts) {
   const o = Object.assign({ providers: [], confirmRequired: false, confirmAnswer: true, runResult: { ok: true }, settings: {}, writable: [], prefsWritable: [],
     stremio: { ok: true, state: "running", title: "Running", sentence: "Stremio's server is running.", can_start: false, address: "http://127.0.0.1:11470", path: {} },
-    stremioHang: false, pathsReply: null, startReply: null, hang: null, defaults: undefined, events: [], openModes: [], sources: null,
+    stremioHang: false, pathsReply: null, startReply: null, hang: null, defaults: undefined, events: [], openModes: [], sources: null, overriddenBy: undefined,
     qbt: { ok: true, file: "~/.jarvis/qbittorrent.json", exists: true, problem: null, values: { enabled: true, address: "http://127.0.0.1:8080", username: "admin" },
       defaults: { enabled: true, address: "http://127.0.0.1:8080", username: "" }, password_set: true, file_overrides: [], engine: { ok: true, reason: "" } },
     qbtPost: null }, opts || {});
@@ -43,7 +43,7 @@ function world(opts) {
     calls.push({ url, body, headers: (init && init.headers) || null, method: (init && init.method) || "GET" });
     const reply = (data, status) => ({ ok: !status || status < 400, status: status || 200, statusText: status ? "ERR" : "OK", json: async () => data });
     if (o.hang && o.hang.test(url)) return new Promise((resolve, reject) => { if (init && init.signal) init.signal.addEventListener("abort", () => { const e = new Error("aborted"); e.name = "AbortError"; reject(e); }); });
-    if (url === "/api/hub/settings") return reply({ ok: true, settings: o.settings, defaults: o.defaults, providers: o.providers, writable: o.writable, prefs_writable: o.prefsWritable, events: o.events, open_modes: o.openModes });
+    if (url === "/api/hub/settings") return reply({ ok: true, settings: o.settings, defaults: o.defaults, providers: o.providers, writable: o.writable, prefs_writable: o.prefsWritable, events: o.events, open_modes: o.openModes, overridden_by: o.overriddenBy });
     if (url === "/api/hub/sources" && o.sources) return reply(o.sources);
     if (url === "/api/hub/stremio") return o.stremioHang ? new Promise(() => {}) : (o.stremio && o.stremio.ok === false ? reply(o.stremio, 400) : reply(o.stremio));
     if (url === "/api/hub/stremio/paths" && o.pathsReply) return reply(o.pathsReply.body, o.pathsReply.status);
@@ -702,11 +702,144 @@ const playniteP = { id: "playnite", label: "Playnite", enabled: true, read_only:
     check("the lists are searchable like any row", (() => { page.setQuery("midnight"); const v = page.visiblePaths(); page.setQuery(""); return eq(v, ["schedule"]); })());
   }
 
+
+  // ---- brief 7C: the History retention row, and the qBittorrent keys the file overrides
+  {
+    const KEY = "retention.keep_history_days";
+    const P = world().pure;
+    check("7C pure: lowering asks, raising doesn't, 0 doesn't, a number where there was 0 asks",
+      P.retentionNeedsConfirm(90, 30) === true && P.retentionNeedsConfirm(90, 120) === false && P.retentionNeedsConfirm(90, 90) === false
+      && P.retentionNeedsConfirm(90, 0) === false && P.retentionNeedsConfirm(0, 30) === true && P.retentionNeedsConfirm(0, 0) === false);
+    check("7C pure: text numbers count; junk and negatives ask nothing (the hub refuses them in its own words); an unknown old value asks",
+      P.retentionNeedsConfirm("90", "30") === true && P.retentionNeedsConfirm(90, "ten") === false && P.retentionNeedsConfirm(90, -1) === false
+      && P.retentionNeedsConfirm(90, "") === false && P.retentionNeedsConfirm(90, null) === false && P.retentionNeedsConfirm(90, true) === false
+      && P.retentionNeedsConfirm(undefined, 30) === true && P.retentionNeedsConfirm(null, 30) === true);
+    check("7C pure: the cutoff is 'now minus N days' in epoch seconds", P.retentionCutoff(1800000000000, 90) === 1800000000 - 90 * 86400 && P.retentionCutoff(1800000000999, 1) === 1800000000 - 86400);
+    const w5 = P.retentionWarning(30, 7), w1 = P.retentionWarning(1, 1), w0 = P.retentionWarning(30, 0), wn = P.retentionWarning(30, null);
+    check("7C pure: the warning says how many, that files stay, and that it can't be undone",
+      /Up to 7 finished downloads older than 30 days/.test(w5.body) && /files on disk are never deleted/.test(w5.body) && /can't be brought back/.test(w5.body)
+      && /Up to 1 finished download older than 1 day /.test(w1.body));
+    check("7C pure: with nothing that old it says nothing goes now; with no count it says it couldn't count (no invented number)",
+      /nothing goes now/.test(w0.body) && !/Up to/.test(w0.body) && /couldn't count/.test(wn.body) && !/\d+ finished download/.test(wn.body));
+    check("7C pure: overrideOf reads the name of the file only, and only for a key the hub listed",
+      P.overrideOf({ overridden_by: { "qbittorrent.tag": "qbittorrent.json" } }, "qbittorrent.tag") === "qbittorrent.json"
+      && P.overrideOf({ overridden_by: { "qbittorrent.tag": "qbittorrent.json" } }, "qbittorrent.category") === ""
+      && P.overrideOf({}, "x") === "" && P.overrideOf(null, "x") === "" && P.overrideOf({ overridden_by: { x: 5 } }, "x") === ""
+      && P.overrideOf({ overridden_by: {} }, "toString") === "");
+
+    const mkR = async (extra) => {
+      const w = world(Object.assign({ settings: { retention: { keep_history_days: 90, auto_delete_files: false } }, defaults: { retention: { keep_history_days: 90 } },
+        writable: [KEY], prefsWritable: [] }, extra || {}));
+      const realFetch = w.win.fetch;
+      w.history = [];
+      w.win.fetch = async (url, init) => {
+        if (/^\/api\/hub\/history/.test(url)) {
+          w.history.push(url);
+          return w.historyReply ? w.historyReply(url) : { ok: false, status: 404, statusText: "nope", json: async () => null };
+        }
+        return realFetch(url, init);
+      };
+      const page = (await w.section.build({ ui: w.ui }))[0].__dls;
+      const ctl = w.controls.find((c) => c.spec.path === KEY);
+      const writes = () => w.calls.filter((c) => c.url === "/api/tools/run");
+      return { w, page, ctl, writes };
+    };
+
+    let r = await mkR();
+    const shell = r.w.shells.find((x) => x.label === "Keep finished downloads in History for");
+    check("7C: the retention row is on the page, in 'When a download finishes', with the owner's help text word for word",
+      !!shell && r.page.rowFor(KEY).section === "finish"
+      && shell.help === "Finished downloads older than this many days are removed from History. The files on disk are never deleted. 0 keeps everything.");
+    check("7C: it is a whole-number box in days showing the hub's value; auto_delete_files has no row at all",
+      !!r.ctl && r.ctl.spec.type === "int" && r.ctl.spec.unit === "days" && r.ctl.value === 90 && r.ctl.spec.max === undefined
+      && !r.w.shells.some((x) => /auto.?delete/i.test(x.label + x.help)));
+    check("7C: its timing line says when it takes effect (the hourly clean-up)", /clean-up/.test(r.page.rowFor(KEY).info().timing));
+
+    r.w.calls.length = 0;
+    await r.ctl.commit(30);
+    const askedFirst = r.w.confirms[0];
+    const firstWrite = r.writes()[0];
+    check("7C: lowering 90 -> 30 asks first, with a warning, before anything is saved",
+      r.w.confirms.length === 1 && askedFirst.level === "warn" && askedFirst.focusCancel === true && /older than 30 days/.test(askedFirst.body) && /never deleted/.test(askedFirst.body)
+      && !!firstWrite && r.w.calls.indexOf(firstWrite) > -1);
+    check("7C: with no way to count it says so (it does not invent a number)", /couldn't count/.test(askedFirst.body));
+    check("7C: it is saved through dl_settings (never dl_prefs: the model can't change it unasked)",
+      r.w.calls.filter((c) => c.url === "/api/tools/preview").pop().body.name === "dl_settings" && eq(firstWrite.body, { name: "dl_settings", arguments: { set: { [KEY]: 30 } } }));
+
+    r = await mkR({ confirmAnswer: false });
+    r.w.calls.length = 0;
+    let declined = false;
+    try { await r.ctl.commit(30); } catch (e) { declined = true; }
+    check("7C: 'no' saves nothing and the row reports it (nothing reaches the hub)", declined && r.writes().length === 0 && r.w.calls.filter((c) => c.url === "/api/tools/preview").length === 0);
+
+    r = await mkR();
+    r.w.calls.length = 0;
+    await r.ctl.commit(120);
+    check("7C: raising it asks nothing of its own and saves", r.w.confirms.length === 0 && r.writes().length === 1);
+    r = await mkR();
+    await r.ctl.commit(0);
+    check("7C: 0 (keep everything) asks nothing of its own and saves", r.w.confirms.length === 0 && r.writes().length === 1);
+    r = await mkR({ settings: { retention: { keep_history_days: 0, auto_delete_files: false } } });
+    r.w.calls.length = 0;
+    await r.ctl.commit(60);
+    check("7C: setting a number where there was 0 asks first", r.w.confirms.length === 1 && /older than 60 days/.test(r.w.confirms[0].body) && r.writes().length === 1);
+    r = await mkR({ settings: { retention: { keep_history_days: 0, auto_delete_files: false } } });
+    r.w.calls.length = 0;
+    await r.page.rowFor(KEY).reset();
+    check("7C: Reset from 0 back to the default 90 asks too (it sets a number where there was 0)", r.w.confirms.length === 1 && r.writes().length === 1);
+    r = await mkR({ settings: { retention: { keep_history_days: 30, auto_delete_files: false } } });
+    r.w.calls.length = 0;
+    await r.page.rowFor(KEY).reset();
+    check("7C: Reset from 30 up to 90 asks nothing of its own", r.w.confirms.length === 0 && r.writes().length === 1);
+
+    r = await mkR({ confirmRequired: true, confirmAnswer: true });
+    r.w.calls.length = 0;
+    await r.ctl.commit(30);
+    check("7C: the hub's own dl_settings question still comes after ours (two questions, the second says what is being changed)",
+      r.w.confirms.length === 2 && /older than 30 days/.test(r.w.confirms[0].body) && new RegExp(KEY.replace(/\./g, "\\.")).test(r.w.confirms[1].body));
+
+    r = await mkR();
+    r.w.historyReply = (url) => ({ ok: true, status: 200, statusText: "OK", json: async () => ({ ok: true, summary: { count: 12 }, items: [] }) });
+    r = await (async () => { const x = await mkR(); x.w.historyReply = (url) => ({ ok: true, status: 200, statusText: "OK", json: async () => ({ ok: true, summary: { count: 12 }, items: [] }) }); return x; })();
+    await r.ctl.commit(30);
+    check("7C: when History can count, the question says how many ('up to 12') and asks for rows older than the cutoff only",
+      /Up to 12 finished downloads/.test(r.w.confirms[0].body) && r.w.history.length === 1 && /limit=1/.test(r.w.history[0]) && /until=\d{9,}/.test(r.w.history[0]));
+    r = await mkR();
+    r.w.historyReply = () => ({ ok: true, status: 200, statusText: "OK", json: async () => ({ ok: true, summary: { count: 99 }, summary_truncated: true, items: [] }) });
+    await r.ctl.commit(30);
+    check("7C: a truncated count is not shown as a number", /couldn't count/.test(r.w.confirms[0].body) && !/Up to 99/.test(r.w.confirms[0].body));
+
+    // ---- the file that overrides qBittorrent keys
+    const QB = ["qbittorrent.category", "qbittorrent.tag", "qbittorrent.stall_minutes"];
+    const mkQ = async (overridden) => {
+      const w = world({ settings: { qbittorrent: { category: "movies", tag: "jarvis", stall_minutes: 30 } }, writable: QB, prefsWritable: ["qbittorrent.stall_minutes"],
+        overriddenBy: overridden });
+      const page = (await w.section.build({ ui: w.ui }))[0].__dls;
+      return { w, page };
+    };
+    const q = await mkQ({ "qbittorrent.category": "qbittorrent.json", "qbittorrent.stall_minutes": "qbittorrent.json" });
+    const lockedShell = q.w.shells.find((x) => /category/.test(x.label));
+    const freeShell = q.w.shells.find((x) => /\btag\b/.test(x.label));
+    check("7C: an overridden key's row says, in the owner's words, that the file wins",
+      !!lockedShell && lockedShell.help.endsWith("Set in qbittorrent.json: that value is used instead of the one saved here."));
+    check("7C: ...and it has no control (read-only): no box, no Reset, nothing to commit",
+      !q.w.controls.some((c) => c.spec.path === "qbittorrent.category" || c.spec.path === "qbittorrent.stall_minutes") && q.page.rowFor("qbittorrent.category").readonly === true
+      && q.page.rowFor("qbittorrent.stall_minutes").readonly === true && q.page.rowFor("qbittorrent.category").info().differs === false);
+    check("7C: a key the file does NOT set keeps its normal editable row, with no such text",
+      !!freeShell && !/qbittorrent\.json/.test(freeShell.help) && q.w.controls.some((c) => c.spec.path === "qbittorrent.tag") && !q.page.rowFor("qbittorrent.tag").readonly);
+    check("7C: the read-only row shows what is saved in the hub, and nothing else (no value from the file reaches the page)",
+      lockedShell.el.attrs.text === "movies" && lockedShell.el.attrs["data-readonly"] === "1");
+    const q2 = await mkQ(undefined);
+    check("7C: with no overridden_by in the answer (an older hub, or no file) every row is as before",
+      q2.w.controls.some((c) => c.spec.path === "qbittorrent.category") && !q2.w.shells.some((x) => /qbittorrent\.json/.test(x.help)));
+    const q3 = await mkQ({ "retention.keep_history_days": "qbittorrent.json" });
+    check("7C: an override for a key that has no row on the page changes nothing", q3.w.controls.some((c) => c.spec.path === "qbittorrent.tag"));
+  }
+
   // ---- safety greps
   check("the page still writes only through the three allowed tools and never assigns HTML", /RUNNABLE = \{ dl_prefs: 1, dl_settings: 1, dl_provider_prefs: 1 \}/.test(src) && !/innerHTML|insertAdjacentHTML|eval\(/.test(src));
   check("the new row has no limit or range of its own", !/Number\.isInteger|throw new Error\("[^"]*(must be|between)/.test(src));
   check("the row is found by Settings search", /steam update size threshold gb/.test(src));
-
   console.log("\n" + passed + " passed, " + failed + " failed");
   process.exit(failed ? 1 : 0);
 })().catch((e) => { console.error(e); process.exit(2); });

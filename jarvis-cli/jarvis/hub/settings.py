@@ -133,7 +133,8 @@ PREFS_WRITABLE = {
 # Behaviour that deletes data or moves files, or changes which torrents count as the hub's own, goes
 # through dl_settings (which asks first), like library_root.
 WRITABLE = PREFS_WRITABLE | {"library_root", "allow_private_hosts"} \
-    | {"qbittorrent." + k for k in QBITTORRENT_CONFIRM}
+    | {"qbittorrent." + k for k in QBITTORRENT_CONFIRM} \
+    | {"retention.keep_history_days"}       # brief 7C: deletes History rows, so dl_settings (asks first), never dl_prefs
 
 
 def _deep_merge(base, over):
@@ -187,6 +188,19 @@ def _check_root(value):
     if len(path.parts) <= 1:
         return None, "library_root can't be a drive or filesystem root"
     return str(path), None
+
+
+KEEP_HISTORY_MAX_DAYS = 3650
+
+
+def _check_keep_history_days(value):
+    """retention.keep_history_days: a whole number of days, 0 (keep everything) to KEEP_HISTORY_MAX_DAYS.
+    1.5 is refused, not cut to 1 (`_int_in` alone would cut it); True and text like "ten" are refused too."""
+    if isinstance(value, float):
+        if value != value or value in (float("inf"), float("-inf")) or value != int(value):
+            return None, "retention.keep_history_days must be a whole number"
+        value = int(value)
+    return _int_in(value, 0, KEEP_HISTORY_MAX_DAYS, "retention.keep_history_days")
 
 
 def _check_hosts(value):
@@ -534,6 +548,7 @@ _CHECKS = {
     "notify.min_seconds": lambda v: _int_in(v, 0, 86400, "notify.min_seconds"),
     "notify.coalesce_s": lambda v: _int_in(v, 0, 600, "notify.coalesce_s"),
     "unknown_settle_hours": lambda v: _int_in(v, 1, 720, "unknown_settle_hours"),
+    "retention.keep_history_days": _check_keep_history_days,
 }
 for _kind in FOLDER_KINDS:
     _CHECKS["folders." + _kind] = _check_kind_folder("folders." + _kind)

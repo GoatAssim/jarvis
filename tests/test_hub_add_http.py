@@ -67,6 +67,11 @@ check("segments None leaves it unset", norm({"segments": None}) == ({}, None))
 for bad in (0, 17, -1, "many", True, 2.5, [4]):
     out, problem = norm({"segments": bad})
     check("segments %r is refused" % (bad,), out == {} and bool(problem))
+check("brief 7C pin: filename and referer are on the allow-list, for the http engine only",
+      set(service.ITEM_OPTION_CHECKS) == {"segments", "filename", "referer"}
+      and all(service.ITEM_OPTION_CHECKS[k][0] == ("http",) for k in ("segments", "filename", "referer")))
+check("brief 7C pin: filename and referer are accepted by the allow-list",
+      norm({"filename": "a.iso", "referer": "https://example.com/p"})[0] == {"filename": "a.iso", "referer": "https://example.com/p"})
 out, problem = norm({"headers": {"Authorization": "Bearer x"}})
 check("headers are not an item option (an unknown key is an error naming the known ones)",
       out == {} and "headers" in problem and "segments" in problem)
@@ -100,9 +105,11 @@ check("...and the note says the other links ignored it", "ignored" in r.get("not
 
 # ---------------------------------------------------------------- dl_add_http
 sch = next(s for s in dah.TOOL_SCHEMAS if s["name"] == "dl_add_http")
-check("the schema offers segments 1..16 and the shared few",
-      set(sch["parameters"]["properties"]) == {"url", "urls", "segments", "dest", "group", "start_paused", "start_at", "dry_run"}
+check("the schema offers segments 1..16, filename, referer and the shared few (brief 7C added the two)",
+      set(sch["parameters"]["properties"]) == {"url", "urls", "segments", "filename", "referer", "dest", "group", "start_paused", "start_at", "dry_run"}
       and sch["parameters"]["properties"]["segments"]["maximum"] == 16)
+check("brief 7C pin: there is still NO headers argument (an Authorization value would be stored in clear text)",
+      "headers" not in sch["parameters"]["properties"] and "headers" not in json.dumps(sch["parameters"]["properties"]).lower().replace("referer", ""))
 check("the schema is small", len(json.dumps(sch)) <= 2200)
 check("it has no engine argument (it is the engine)", "engine" not in sch["parameters"]["properties"])
 
