@@ -85,6 +85,9 @@ _FILES = {
     "everything.json": (GROUP_SETTINGS, "Everything search", A_FEATURE, ""),
     "playnite.json": (GROUP_SETTINGS, "Playnite", A_FEATURE, ""),
     "spotify.json": (GROUP_SETTINGS, "Spotify", A_FEATURE, "Tokens are hidden unless you reveal them."),
+    "curseforge.json": (GROUP_SETTINGS, "CurseForge API key (Minecraft mods)", "Next time a CurseForge lookup runs.",
+                        "Your own personal key from console.curseforge.com, hidden unless you reveal it. "
+                        "Without one, Modrinth and OptiFine still work."),
     "voice_config.json": (GROUP_SETTINGS, "Voice", A_FEATURE, ""),
     "mcp_config.json": (GROUP_SETTINGS, "MCP servers", A_FEATURE,
                         "Every value under env and headers is hidden unless you reveal it."),
@@ -104,6 +107,12 @@ _FILES = {
     "daemons.json": (GROUP_MANAGED, "Daemons", A_FEATURE, "Managed by the Daemons panel."),
     "backlog.json": (GROUP_MANAGED, "Backlog", A_NEXT_RUN, "Managed by the Backlog panel."),
 }
+# The Minecraft mod tools' lookup cache (modhosts/cache.json, written by jarvis/modhosts/cache.py):
+# public vendor answers only, never the key. Read-only here, like every other state file.
+_FILES["modhosts/cache.json"] = (
+    GROUP_STATE, "Mod lookup cache", A_UNKNOWN,
+    "A short-lived copy of public Modrinth and CurseForge answers that Jarvis rewrites on its own. "
+    "It never holds your key. Shown so you can look; not editable here.")
 for _state in ("key_health.json", "usage_stats.json", "notifications.json", "conversation_history.json",
                "current_conversation.json", "ambient_state.json", "calendar_cache.json", "digest_queue.json",
                "discovery_cache.json", "history_summary_cache.json", "mcp_cache.json", "memory_index.json",
@@ -146,6 +155,9 @@ _WEB_DATA_FILES = {
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]{0,80}\.json$")
 _SUBDIR = "channels"
 _WEB_SUBDIR = "web-data"   # web/data/*.json in the repo, next to the web server (gitignored)
+# ~/.jarvis/modhosts/: the Minecraft mod tools' own state. Only the files _FILES names are reachable
+# (today the lookup cache, read-only), so this is not a way into the folder in general.
+_MODHOSTS_SUBDIR = "modhosts"
 
 # Where the web console keeps those files. The web server sets JARVIS_WEB_DATA to its own data
 # folder on every settings call, so an installed jarvis.exe finds the right one; run from a
@@ -187,13 +199,15 @@ def _dir():
 
 def _split_name(name):
     """('channels', 'people.json') or ('', 'ai_config.json'); None when the name is not one
-    we will touch. Only top-level files, the channels/ folder and web-data/ (the web
-    console's web/data folder) are reachable."""
+    we will touch. Only top-level files, the channels/ folder, web-data/ (the web
+    console's web/data folder) and the one named file under modhosts/ are reachable."""
     if not isinstance(name, str):
         return None
     if "/" in name:
         head, _, tail = name.partition("/")
-        if head not in (_SUBDIR, _WEB_SUBDIR) or not _NAME_RE.match(tail):
+        if head not in (_SUBDIR, _WEB_SUBDIR, _MODHOSTS_SUBDIR) or not _NAME_RE.match(tail):
+            return None
+        if head == _MODHOSTS_SUBDIR and name not in _FILES:
             return None
         return head, tail
     if not _NAME_RE.match(name):
@@ -595,7 +609,22 @@ def _validate_console_filter(doc, problems):
             seen.add(kind)
 
 
+def _validate_curseforge(doc, problems):
+    """curseforge.json: ``api_key`` is one run of ordinary characters, because it travels as an HTTP
+    header value. The text of the key is never put in a message."""
+    key = doc.get("api_key", "")
+    if not isinstance(key, str):
+        problems.append("api_key must be text.")
+        return
+    from .modhosts import config
+    cleaned = config.clean(key)
+    if cleaned and not config.looks_valid(cleaned):
+        problems.append("The CurseForge key must be one run of ordinary characters (no spaces or line breaks, "
+                        "at most %d long). Paste just the key." % config.MAX_KEY_LENGTH)
+
+
 _VALIDATORS = {"ai_config.json": _validate_ai_config, "commands.json": _validate_commands,
+               "curseforge.json": _validate_curseforge,
                "web-data/ask-console-filter.json": _validate_console_filter}
 # Files whose top level is a list. Kept apart because the validators above all expect an object.
 _LIST_VALIDATORS = {"web-data/favorites.json": _validate_favorites,
@@ -603,7 +632,7 @@ _LIST_VALIDATORS = {"web-data/favorites.json": _validate_favorites,
 # The top level a file must have, whatever it held before (so a file that does not exist yet
 # cannot be created in the wrong shape).
 _ROOT_TYPE = {"web-data/favorites.json": list, "web-data/favorite-daemons.json": list,
-              "web-data/ask-console-filter.json": dict}
+              "web-data/ask-console-filter.json": dict, "curseforge.json": dict}
 
 
 def validate(name, new_doc, old_doc, check_types=True):
@@ -733,6 +762,8 @@ def _known_names():
         except OSError:
             pass
         names.update(_WEB_SUBDIR + "/" + n for n, v in _WEB_DATA_FILES.items() if v[0] in EDITABLE_GROUPS)
+    # modhosts/ holds one state file we know by name; listed once it exists, like the other state files.
+    names.update(n for n in _FILES if n.startswith(_MODHOSTS_SUBDIR + "/") and (d / n).is_file())
     # Files Jarvis knows by name are listed even before they exist, so a setting file that
     # has not been created yet can still be created from here.
     names.update(n for n, v in _FILES.items() if v[0] in EDITABLE_GROUPS)
@@ -995,6 +1026,7 @@ _DEFAULT_SOURCES = {
     "calendar.json": ("actions.calendar_tools", "DEFAULT_CONFIG"),
     "mcp_config.json": ("mcp_client", "DEFAULT_CONFIG"),
     "policy.json": ("policy", "DEFAULT_POLICY"),
+    "curseforge.json": ("modhosts.config", "DEFAULT_CONFIG"),
 }
 
 

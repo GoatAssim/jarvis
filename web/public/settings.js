@@ -349,6 +349,125 @@
     return out;
   }
 
+  // ---- Minecraft mods (Settings > Integrations) ---------------------------------------------
+  // Three things, none of them stored by this page:
+  //  * the CurseForge API key, in ~/.jarvis/curseforge.json. The page only ever learns "set" or
+  //    "not set": the file is read through /api/settings/file/read WITHOUT reveal (the server masks
+  //    the key), a typed key goes out once through /api/settings/file/set and is cleared from the
+  //    box at once, and nothing here ever puts a key (typed or read) back on the page;
+  //  * Contact and Default folder, which belong to the Minecraft lookup tool file
+  //    (TOOL_SETTINGS in actions/minecraft_lookup.py). They are drawn with toolSettingRow, the same
+  //    rows and the same /api/settings/tools/set the Tool settings section uses, so there is one
+  //    place they are stored. If that tool file is not loaded, a link to Tool settings stands in.
+  const CF_FILE = "curseforge.json";
+  const MC_TOOL_STEM = "minecraft_lookup";
+  const MC_TOOL_KEYS = ["contact", "default_dest"];
+  const CF_HELP = "Your own personal key, free from console.curseforge.com (it cannot be shared). It is saved in ~/.jarvis/curseforge.json and this page only ever shows whether one is set, never the key. If this is empty Jarvis falls back to the CURSEFORGE_API_KEY environment variable. Without a key, Modrinth and OptiFine still work.";
+
+  const keyIsSet = (doc) => { const v = getAt(doc, ["api_key"]); return typeof v === "string" && v !== ""; };
+
+  function curseforgeKeyRow(st) {
+    const status = h("span", { class: "prefs-row__status" });
+    const holder = h("div", { class: "prefs-row" });
+    // One save at a time, each carrying the version the previous one produced (same as fileRow).
+    const writeKey = (value) => {
+      const job = async () => {
+        try {
+          const r = await api("POST", "/api/settings/file/set", { name: CF_FILE, path: ["api_key"], value, base_version: st.version });
+          st.version = r.version;
+          // Remember only that a key exists; the typed text is never kept.
+          setAt(st.doc, ["api_key"], value === "" ? "" : "set");
+          return r;
+        } catch (err) {
+          if (err.data && err.data.code === "stale") {
+            const fresh = await readDoc(CF_FILE);
+            st.doc = fresh.doc;
+            st.version = fresh.version;
+            err.message = "That file changed on disk, so it was reloaded. Try again.";
+          }
+          throw err;
+        }
+      };
+      const run = st.queue.then(job);
+      st.queue = run.catch(() => {});
+      return run;
+    };
+    const render = () => {
+      const isSet = keyIsSet(st.doc);
+      const input = h("input", { type: "password", class: "prefs-input prefs-input--wide", autocomplete: "off", spellcheck: "false",
+        placeholder: isSet ? "Paste a new key to replace it" : "Paste your CurseForge key", "aria-label": "CurseForge API key" });
+      const save = h("button", { class: "btn btn--primary btn--sm", type: "button", text: isSet ? "Replace key" : "Save key" });
+      save.disabled = true;
+      input.addEventListener("input", () => { save.disabled = input.value.trim() === ""; });
+      const submit = async () => {
+        const typed = input.value.trim();
+        if (typed === "") return;
+        save.disabled = true;
+        flash(status, "Saving…", "");
+        try {
+          await writeKey(typed);
+          input.value = "";
+          render();
+          flash(status, "Saved. Applies: next time a CurseForge lookup runs.", "ok");
+        } catch (err) {
+          save.disabled = input.value.trim() === "";
+          flash(status, err.message, "err");
+        }
+      };
+      save.addEventListener("click", submit);
+      input.addEventListener("keydown", (ev) => { if (ev.key === "Enter") { ev.preventDefault(); submit(); } });
+      const clear = isSet ? h("button", { class: "btn btn--ghost btn--sm", type: "button", text: "Clear key", onclick: async () => {
+        const yes = await confirmDialog({ title: "Clear the CurseForge key?", body: "CurseForge lookups will stop working until you paste a key again. Modrinth and OptiFine are not affected. The previous version of the file stays in the settings backups until newer backups replace it.", confirmLabel: "Clear key", level: "danger", focusCancel: true });
+        if (!yes) return;
+        try {
+          await writeKey("");
+          input.value = "";
+          render();
+          flash(status, "Key cleared.", "ok");
+        } catch (err) { flash(status, err.message, "err"); }
+      } }) : null;
+      const bits = [h("span", { class: "prefs-tag" + (isSet ? " is-override" : ""), text: isSet ? "key set" : "no key set" })];
+      const fresh = rowShell("CurseForge API key", CF_HELP, h("span", { class: "prefs-inline" }, [input, save, clear]), status, bits);
+      holder.replaceChildren(...Array.from(fresh.childNodes));
+      holder.dataset.search = fresh.dataset.search;
+    };
+    render();
+    return holder;
+  }
+
+  async function minecraftToolRows() {
+    let payload = null;
+    try { payload = await api("GET", "/api/settings/tools"); } catch { payload = null; }
+    const file = payload && Array.isArray(payload.files) ? payload.files.find((f) => f.stem === MC_TOOL_STEM) : null;
+    const rows = [];
+    if (file) {
+      for (const key of MC_TOOL_KEYS) {
+        const s = (file.settings || []).find((x) => x.key === key);
+        if (s) rows.push(toolSettingRow(file, s));
+      }
+    }
+    if (rows.length < MC_TOOL_KEYS.length) {
+      rows.push(linkRow({ label: "Contact and default folder", help: "These come from the Minecraft lookup tool and show here once it is loaded; they are also in Tool settings.", button: "Open Tool settings", run: () => select("toolsettings") }));
+    }
+    return rows;
+  }
+
+  async function minecraftGroup() {
+    const rows = [];
+    let st = null;
+    try { st = await readDoc(CF_FILE); } catch (err) {
+      rows.push(h("div", { class: "prefs-note", text: "Couldn't read the CurseForge key file: " + err.message }));
+    }
+    if (st && st.parseOk === false) {
+      rows.push(h("div", { class: "prefs-note", text: "curseforge.json is not valid JSON, so the key can't be set here. Fix or delete the file in Advanced." }));
+    } else if (st) {
+      rows.push(curseforgeKeyRow(st));
+    }
+    rows.push(...(await minecraftToolRows()));
+    rows.push(linkRow({ label: "CurseForge key file", help: CF_FILE, button: "Open in Advanced", run: () => openAdvancedFile(CF_FILE) }));
+    return group("Minecraft mods", rows);
+  }
+
   function linkRow(spec) {
     return rowShell(spec.label, spec.help, h("button", { class: "btn btn--ghost btn--sm", type: "button", text: spec.button || "Open", onclick: spec.run }), h("span", { class: "prefs-row__status" }));
   }
@@ -463,7 +582,7 @@
   // Anything that is not a known section, tab or file name is ignored, so a hand-typed
   // or stale link opens Settings rather than nothing.
   const ADV_TABS = ["files", "tunables", "plumbing", "history"];
-  const FILE_NAME_RE = /^(?:(?:channels|web-data)\/)?[A-Za-z0-9][A-Za-z0-9_.\-]{0,80}\.json$/;
+  const FILE_NAME_RE = /^(?:(?:channels|web-data|modhosts)\/)?[A-Za-z0-9][A-Za-z0-9_.\-]{0,80}\.json$/;
   function parseHash(hash) {
     const m = /^#\/?settings(?:\/(.*))?$/i.exec(String(hash || ""));
     if (!m) return null;
@@ -614,7 +733,7 @@
     { id: "integrations", label: "Integrations", title: "Integrations",
       lede: "Connected services. Each opens its own panel or its settings file.",
       files: [],
-      terms: "channels discord telegram mcp spotify playnite everything voice calendar daemons",
+      terms: "channels discord telegram mcp spotify playnite everything voice calendar daemons minecraft mods curseforge modrinth optifine api key contact default folder download",
       build: async () => [group("Panels", [
         linkRow({ label: "Chat platforms", help: "Who may talk to Jarvis, and on which platform.", button: "Open", run: () => openPanel("channels") }),
         linkRow({ label: "MCP servers", help: "Add, remove and check Model Context Protocol servers.", button: "Open", run: () => openPanel("mcp") }),
@@ -625,7 +744,7 @@
         linkRow({ label: "Everything search", help: "everything.json", button: "Open in Advanced", run: () => openAdvancedFile("everything.json") }),
         linkRow({ label: "Voice", help: "voice_config.json", button: "Open in Advanced", run: () => openAdvancedFile("voice_config.json") }),
         linkRow({ label: "Calendar", help: "calendar.json", button: "Open in Advanced", run: () => openAdvancedFile("calendar.json") }),
-      ])] },
+      ]), await minecraftGroup()] },
     { id: "memory", label: "Memory & storage", title: "Memory & storage",
       lede: "What Jarvis remembers and keeps on disk.",
       files: [],
@@ -1164,7 +1283,7 @@
   // The Reveal button also appears on files that are known to hold keys even when nothing is
   // masked right now (an empty key list), so a first key can be typed in.
   function hasSecretsLikely(name) {
-    return ["ai_config.json", "mcp_config.json", "spotify.json", "channels.json"].includes(name);
+    return ["ai_config.json", "mcp_config.json", "spotify.json", "channels.json", "curseforge.json"].includes(name);
   }
 
   // ---- public ---------------------------------------------------------------------------

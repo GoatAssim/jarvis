@@ -293,6 +293,48 @@ def clean_ext(text):
     return raw
 
 
+# Places a download may never be written into: the same list as actions/path_tools._protected_reason(path,
+# writing=True).  The hub doesn't import the tool files, so the list is kept here and
+# tests/test_hub_http_verify.py compares the two (a change in one that isn't made in the other fails there).
+_POSIX_SYSTEM_DIRS = ("/etc", "/usr", "/bin", "/sbin", "/lib", "/lib64", "/boot", "/dev", "/proc", "/sys")
+_WIN_SYSTEM_DIRS = ("windows", "program files", "program files (x86)", "programdata")
+
+
+def protected_folder_reason(path):
+    """Why a download must never be written into this folder (a drive root, the home folder itself, an
+    operating-system folder, `~/.jarvis`), or None.  Pure text: nothing is touched, no link is followed."""
+    import os
+    import sys
+
+    def norm(p):
+        return os.path.normcase(os.path.abspath(str(p)))
+
+    def inside(child, parent):
+        c, par = norm(child), norm(parent)
+        return c == par or c.startswith(par.rstrip("\\/") + os.sep)
+
+    p = Path(path)
+    try:
+        home = Path.home()
+    except (RuntimeError, KeyError):
+        home = None
+    if home is not None and inside(p, home / ".jarvis"):
+        return "that is Jarvis's own settings/state folder (~/.jarvis)"
+    if p.parent == p:
+        return "that is a drive/filesystem root"
+    if home is not None and norm(p) == norm(home):
+        return "that is your home folder itself"
+    if sys.platform == "win32":
+        parts = [x.lower() for x in p.parts]
+        if len(parts) >= 2 and parts[1] in _WIN_SYSTEM_DIRS:
+            return "that is inside a Windows system folder"
+    else:
+        for d in _POSIX_SYSTEM_DIRS:
+            if inside(p, d):
+                return "that is inside an operating-system folder"
+    return None
+
+
 def abs_folder(text):
     """A full-path folder as a normalised string, or None when it isn't one (or is unusable)."""
     raw = str(text or "").strip()
@@ -303,6 +345,8 @@ def abs_folder(text):
         return None                                  # relative, or a drive / filesystem root
     if ".." in path.parts:
         return None
+    if protected_folder_reason(path):
+        return None                                  # home itself, an OS folder, ~/.jarvis: never a download folder
     return str(path)
 
 

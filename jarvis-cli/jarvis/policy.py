@@ -195,6 +195,8 @@ _SENSITIVE_PATHS = [
     ("~/.ssh", 55, "your SSH keys"),
     ("~/.aws", 50, "your AWS credentials"),
     ("~/.jarvis/ai_config.json", 45, "Jarvis's own API keys"),
+    # The list has no ~/.jarvis folder entry, so every key file is named. Same weight as ai_config.json.
+    ("~/.jarvis/curseforge.json", 45, "your CurseForge API key"),
     ("~/.jarvis/instagram_private_session.json", 50, "your Instagram login session"),
     ("~/.jarvis/tool_safety.json", 60, "Jarvis's own safety settings"),
     ("~/.jarvis/policy.json", 60, "this policy file itself"),

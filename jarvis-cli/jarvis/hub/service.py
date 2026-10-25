@@ -342,11 +342,54 @@ def _check_referer(value):
     return text, None
 
 
+VERIFY_ALGOS = {"sha1": 40, "sha256": 64, "sha512": 128}     # algorithm -> hex characters of its digest
+VERIFY_SIZE_MAX = 1 << 50
+
+
+def _check_verify(value):
+    """The checksum ONE download must match (P1): {algo: sha1 | sha256 | sha512, value: <hex>, size: <bytes, optional>}.
+
+    The shape, the algorithm, the length and the characters of the hash are all checked here; what is stored is
+    the clean form (algorithm lower case, hash lower-case hex, size a whole number) and nothing else.  The HTTP
+    engine hashes the finished `.part` against it and fails the row, deleting that one file, on a mismatch."""
+    import re
+    if not isinstance(value, dict):
+        return None, "verify must be an object like {\"algo\": \"sha256\", \"value\": \"<hex>\", \"size\": 12345}"
+    extra = sorted(str(k)[:20] for k in value if k not in ("algo", "value", "size"))
+    if extra:
+        return None, "verify can only hold algo, value and size (not %s)" % ", ".join(extra[:3])
+    algo = value.get("algo")
+    if not isinstance(algo, str):
+        return None, "verify.algo must be text: sha1, sha256 or sha512"
+    key = algo.strip().lower().replace("-", "")
+    if key not in VERIFY_ALGOS:
+        return None, "verify.algo %r isn't supported; use sha1, sha256 or sha512" % algo[:20]
+    digest = value.get("value")
+    if not isinstance(digest, str):
+        return None, "verify.value must be the hash as hex text"
+    digest = digest.strip().lower()
+    if len(digest) != VERIFY_ALGOS[key]:
+        return None, "a %s hash is %d hex characters; this one has %d" % (key, VERIFY_ALGOS[key], len(digest))
+    if not re.fullmatch(r"[0-9a-f]+", digest):
+        return None, "verify.value can only hold the characters 0-9 and a-f"
+    out = {"algo": key, "value": digest}
+    size = value.get("size")
+    if size is not None:
+        if isinstance(size, float) and size != int(size):
+            return None, "verify.size must be a whole number of bytes"       # 2.5 is not quietly cut to 2
+        num, problem = settings_mod._int_in(size, 0, VERIFY_SIZE_MAX, "verify.size")
+        if problem:
+            return None, problem
+        out["size"] = num
+    return out, None
+
+
 ITEM_OPTION_CHECKS = {
     # option -> (the engines that honour it, checker(value) -> (clean, error))
     "segments": (("http",), _check_segments),
     "filename": (("http",), _check_filename),
     "referer": (("http",), _check_referer),
+    "verify": (("http",), _check_verify),
 }
 
 

@@ -1112,6 +1112,62 @@ def check_digest():
     return out
 
 
+def check_minecraft(deep=False):
+    """The Minecraft mod tools: is a CurseForge key present and usable? Modrinth and OptiFine
+    need no key, so a missing one is `skip`, not a problem. Offline by default; `--deep` makes
+    one small CurseForge request (the class list) to see that the key is accepted. Nothing
+    here, in the detail or the fix text, ever contains the key."""
+    try:
+        from .modhosts import config
+    except Exception:  # noqa: BLE001 -- the package is not in this build: nothing to check
+        return []
+    view = config.public_view()
+    out = []
+    if view.get("file_state") in ("unreadable", "bad_shape"):
+        out.append(Check("minecraft.file", "CurseForge key file", WARN,
+                         "%s exists but cannot be read as a JSON object" % view.get("file", "curseforge.json"),
+                         "Open Settings > Advanced > curseforge.json and fix it (it should look like "
+                         "{\"api_key\": \"...\"}), or delete the file and paste the key again in "
+                         "Settings > Integrations > Minecraft mods.", "minecraft"))
+    if not view.get("api_key_set"):
+        problem = view.get("problem") or ""
+        if problem:
+            out.append(Check("minecraft.key", "CurseForge API key", WARN, problem,
+                             "Paste just the key again in Settings > Integrations > Minecraft mods.",
+                             "minecraft"))
+        else:
+            out.append(Check("minecraft.key", "CurseForge API key", SKIP,
+                             "no key set: CurseForge lookups will say how to get one; "
+                             "Modrinth and OptiFine work without it",
+                             "Get your own free key at console.curseforge.com, then paste it in "
+                             "Settings > Integrations > Minecraft mods.", "minecraft"))
+        return out
+    where = "CURSEFORGE_API_KEY" if view.get("source") == "env" else "~/.jarvis/curseforge.json"
+    if not deep:
+        out.append(Check("minecraft.key", "CurseForge API key", OK,
+                         "set (from %s); run with --deep to check CurseForge accepts it" % where,
+                         group="minecraft"))
+        return out
+    try:
+        from .modhosts import curseforge
+        result = curseforge.ping()
+    except Exception as exc:  # noqa: BLE001
+        result = {"ok": False, "reason": "unsupported", "error": "the CurseForge adapter failed (%s)" % type(exc).__name__}
+    if result.get("ok"):
+        out.append(Check("minecraft.reach", "CurseForge", OK,
+                         "answered and accepted the key (from %s)" % where, group="minecraft"))
+    elif result.get("reason") == "bad_key":
+        out.append(Check("minecraft.reach", "CurseForge", FAIL,
+                         "answered, but refused the key (from %s)" % where,
+                         "Check the key at console.curseforge.com and paste it again in "
+                         "Settings > Integrations > Minecraft mods.", "minecraft"))
+    else:
+        out.append(Check("minecraft.reach", "CurseForge", WARN,
+                         "could not be checked: %s" % str(result.get("error") or "no answer")[:140],
+                         "Check the network and run `jarvis doctor minecraft --deep` again.", "minecraft"))
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
@@ -1133,6 +1189,7 @@ _CHECKS = [
     ("daemons", "Daemons", lambda deep: check_daemons()),
     ("channels", "Chat channels", lambda deep: check_channels()),
     ("playnite", "Playnite", check_playnite),
+    ("minecraft", "Minecraft mods", check_minecraft),
     ("mcp", "MCP", check_mcp),
 ]
 

@@ -43,6 +43,7 @@ free disk space is checked before the first byte is written (refuse, never trunc
 """
 
 import errno
+import hashlib
 import os
 import re
 import shutil
@@ -63,6 +64,9 @@ USER_AGENT = "Jarvis-Hub/1"
 SEGMENT_MAX = 16                          # parallel parts, at most
 MIN_PART_BYTES = 1024 * 1024              # a part is never smaller than this (tests lower it)
 DEFAULT_SEGMENT_MIN = 32 * 1024 * 1024    # files smaller than this are never segmented
+
+VERIFY_SIZE_SLACK = 4096          # bytes a `verify` size may be exceeded by before a response is refused
+_VERIFY_ALGOS = {"sha1": 40, "sha256": 64, "sha512": 128}     # algorithm -> hex characters of its digest
 
 _REDIRECTS = (301, 302, 303, 307, 308)
 # Headers the item may carry (from an addon's proxyHeaders, phase 4).  Anything else is dropped.
@@ -269,6 +273,9 @@ def _stream_to_file(ctx, item, url, headers, resolver, session, segments, mine):
     import requests
 
     opts = item.get("options") or {}
+    verify, bad_verify = _verify_of(opts)
+    if bad_verify:
+        return Outcome.failed(bad_verify)              # before any request: never download what can't be checked
     stall = int(ctx.setting("http", "stall_seconds", default=60))
     connect_timeout = float(ctx.setting("http", "connect_timeout", default=15))
     allow = ctx.setting("allow_private_hosts", default=[])
@@ -348,6 +355,11 @@ def _stream_to_file(ctx, item, url, headers, resolver, session, segments, mine):
                 offset = 0
             length = (hdr.get("Content-Length") or "").strip()
             total = int(length) if length.isdigit() else None
+        if verify and verify.get("size") is not None and total is not None and total > verify["size"] + VERIFY_SIZE_SLACK:
+            if part:
+                _discard_own_part(ctx, part)           # a resume: only this row's own earlier .part
+            return Outcome.failed("the server announced %s but %s was expected; refused (nothing was kept)"
+                                  % (_fmt_size(total), _fmt_size(verify["size"])))
 
         if not part:
             header_name = naming.filename_from_content_disposition(hdr.get("Content-Disposition"))
@@ -458,6 +470,9 @@ def _transfer(ctx, resp, part, final, mode, offset, total, stall):
             fields["percent"] = None                 # length unknown: an indeterminate bar
         return ctx.update(**fields)
 
+    verify, _bad = _verify_of(_row_options(ctx))
+    over = (verify["size"] + VERIFY_SIZE_SLACK) if verify and verify.get("size") is not None else 0
+    too_big = False
     os.makedirs(os.path.dirname(part) or ".", exist_ok=True)     # a resumed job's folder may be gone
     with open(part, mode) as handle:
         for chunk in resp.iter_content(chunk_size=CHUNK):
@@ -466,6 +481,9 @@ def _transfer(ctx, resp, part, final, mode, offset, total, stall):
             handle.write(chunk)
             done += len(chunk)
             written += len(chunk)
+            if over and done > over:                  # no length announced, and more than `verify.size` came
+                too_big = True
+                break
             stop = ctx.stop_requested()
             if stop:
                 break
@@ -486,6 +504,9 @@ def _transfer(ctx, resp, part, final, mode, offset, total, stall):
                     break
         handle.flush()
 
+    if too_big:
+        _discard_own_part(ctx, part)
+        return Outcome.failed("more data came than the expected %s; stopped and removed the file" % _fmt_size(verify["size"]))
     if stop:
         report()
         if stop == "pause":
@@ -505,12 +526,92 @@ def _finish(ctx, part, final, done, total):
         _remove(part)
         ctx.update(source_ref={}, bytes_done=0)
         return Outcome.failed("received more data than announced; starting over", retryable=True, delay_s=1.0)
+    verify, bad_verify = _verify_of(_row_options(ctx))
+    if bad_verify:
+        return Outcome.failed(bad_verify)
+    if verify:
+        checked = _verify_part(ctx, part, verify)     # None = it matches; an Outcome = stop here
+        if checked is not None:
+            return checked
     try:
         target = _publish(part, final)                # never replaces a file; a taken name moves on
     except OSError as exc:
         return Outcome.failed("couldn't finish the file: %s" % _short(exc))
     ctx.update(dest_file=str(target), dest_dir=str(target.parent), bytes_done=done, bytes_total=done)
     return Outcome.done(str(target))
+
+
+# --------------------------------------------------------------------------- the `verify` item option (P1)
+
+def _row_options(ctx):
+    """The options of the row this context runs (a context without a row, as in some tests, has none)."""
+    return (getattr(ctx, "item", None) or {}).get("options")
+
+
+def _verify_of(options):
+    """A row's `verify` option -> (the option or None, a problem or None).  The hub checked it when the row was
+    queued (`service._check_verify`); it is looked at again here because a row written around that check must
+    never turn into a download that is quietly NOT checked: a bad one is a problem, not 'no option'."""
+    raw = (options or {}).get("verify")
+    if raw is None:
+        return None, None
+    if isinstance(raw, dict):
+        algo, value, size = raw.get("algo"), raw.get("value"), raw.get("size")
+        if (algo in _VERIFY_ALGOS and isinstance(value, str) and len(value) == _VERIFY_ALGOS[algo]
+                and re.fullmatch(r"[0-9a-f]+", value)
+                and (size is None or (isinstance(size, int) and not isinstance(size, bool) and size >= 0))):
+            return raw, None
+    return None, "the checksum stored on this download isn't usable, so it was not started; queue it again"
+
+
+def _discard_own_part(ctx, part):
+    """Delete the `.part` THIS row recorded (and no other file) and forget it, so a retry starts clean."""
+    try:
+        recorded = ((ctx.store.get_item(ctx.item_id) or {}).get("source_ref") or {}).get("part")
+    except Exception:  # noqa: BLE001 - the row may be gone; then there is nothing of ours to remove
+        recorded = None
+    if recorded and str(recorded).endswith(".part") and \
+            os.path.normcase(os.path.abspath(str(recorded))) == os.path.normcase(os.path.abspath(str(part))):
+        _remove(part)
+        ctx.update(source_ref={}, bytes_done=0)
+
+
+def _hash_file(ctx, part, algo):
+    """-> (hex digest, None), or (None, what the daemon asked for meanwhile: pause / cancel / shutdown)."""
+    digest = hashlib.new(algo)
+    with open(part, "rb") as handle:
+        while True:
+            chunk = handle.read(CHUNK)
+            if not chunk:
+                return digest.hexdigest(), None
+            digest.update(chunk)
+            stop = ctx.stop_requested()
+            if stop:
+                return None, stop
+
+
+def _verify_part(ctx, part, verify):
+    """The finished `.part` against the row's `verify`.  None = it matches, go on and publish it; otherwise the
+    Outcome that ends the run.  A mismatch is final (`retryable=False`: the same bytes would come again) and
+    removes only this row's own `.part`; the retry policy stays in daemon._finish."""
+    ctx.set_state("postprocessing", phase="checking the checksum", phase_index=None, phase_count=None,
+                  message=None, speed_bps=None, eta_s=None)
+    try:
+        got, stop = _hash_file(ctx, part, verify["algo"])
+    except OSError as exc:
+        return Outcome.failed("couldn't read the file to check it: %s" % _short(exc))
+    if stop == "pause":
+        return Outcome.paused()                         # the resume finds the whole `.part` and checks it again
+    if stop == "cancel":
+        _remove(part)
+        return Outcome.cancelled()
+    if stop:
+        return Outcome.requeue()
+    if got == verify["value"]:
+        return None
+    _discard_own_part(ctx, part)
+    return Outcome.failed("checksum mismatch: expected %s %s..., got %s...; the downloaded file was deleted"
+                          % (verify["algo"], verify["value"][:12], got[:12]))
 
 
 # --------------------------------------------------------------------------- segmented download
