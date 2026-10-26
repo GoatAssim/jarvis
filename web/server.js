@@ -3986,7 +3986,7 @@ app.post("/api/json/organize", requireJarvis, async (req, res) => {
 // log) and only reveal them when the body says reveal.
 // ---------------------------------------------------------------------------
 
-const SETTINGS_NAME_RE = /^((channels|web-data)\/)?[A-Za-z0-9][A-Za-z0-9_.\-]{0,80}\.json$/;
+const SETTINGS_NAME_RE = /^((channels|web-data|modhosts)\/)?[A-Za-z0-9][A-Za-z0-9_.\-]{0,80}\.json$/;
 // web-data/<name>.json is this server's own data folder (favorites, console filter, ...). The CLI
 // cannot know where an installed jarvis.exe's web server lives, so every settings call tells it.
 const SETTINGS_WEB_DATA_DIR = path.join(__dirname, "data");

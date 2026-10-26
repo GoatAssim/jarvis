@@ -749,7 +749,6 @@ TOOL_KEYWORDS = {
     "server_cache": {"stremio cache": 8, "what's in the stremio cache": 10, "stremio cache usage": 10, "how big is the stremio cache": 10},
     "server_cache_clear": {"clear the stremio cache": 10, "clear stremio cache": 10, "empty the stremio cache": 10,
                            "delete the stremio cache": 10},
-    "stremio": {"stremio":10}
 }
 
 TOOL_PACK_INSTRUCTION = (

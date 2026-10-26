@@ -429,7 +429,8 @@ def split_dest(dest, root, allow_absolute=False):
             return {}, "needs_absolute"
         full = settings_mod.abs_folder(dest)
         if full is None:
-            return {}, "that isn't a usable full path (no drive roots, no '..')"
+            return {}, ("that isn't a usable full path (not a drive root, your home folder itself, an OS folder "
+                        "or ~/.jarvis; no '..')")
         return {"dest_abs": full}, None
     if naming.safe_subdir(root, dest) is None:
         return {}, ("dest must be a sub-folder of the library root (%s) or a full path, not '..' "

@@ -502,7 +502,6 @@ TOOL_KEYWORDS = {
                       "streams for": 8, "stream options": 7, "pick a stream": 7},
     "stremio_library": {"stremio library": 10, "continue watching": 10, "what have i watched": 9, "my library": 6},
     "stremio_mark_watched": {"mark as watched": 10, "mark watched": 10, "mark it watched": 10, "mark unwatched": 10},
-        "stremio": {"stremio":10}
 
 }
 

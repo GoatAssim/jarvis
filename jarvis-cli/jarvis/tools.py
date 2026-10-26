@@ -701,10 +701,12 @@ OWNER_ONLY_TOOLS = frozenset({
     # are not in this set. NOTE: only play_control's handler refuses a guest; these five are hidden, not refused.
     "play_local", "play_episode", "stack_start", "stack_stop", "server_cache_clear",
     # Minecraft mod lookups (actions/minecraft_lookup.py): a guest could spend the owner's CurseForge quota and the
-    # shared Modrinth rate limit, so they are not offered to one (the handlers refuse a guest too).  The other four
-    # tools of the group (list_optifine_versions, download_mc_file, download_optifine, make_modpack_file) join this
-    # set in the patch that adds them: a name here must be a loaded tool (tests/test_l28b_followups.py checks it).
-    "search_mc_mods", "get_mc_project",
+    # shared Modrinth rate limit, so they are not offered to one (the handlers refuse a guest too).  The OptiFine
+    # pair (actions/minecraft_optifine.py) is the same: it reaches optifine.net and, for download_optifine, writes
+    # a file on the owner's PC.  The two tools of the group that are not loaded yet (download_mc_file,
+    # make_modpack_file) join this set in the patch that adds them: a name here must be a loaded tool
+    # (tests/test_l28b_followups.py checks it).
+    "search_mc_mods", "get_mc_project", "list_optifine_versions", "download_optifine",
 })
 
 
