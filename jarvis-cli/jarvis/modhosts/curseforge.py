@@ -806,3 +806,81 @@ def ping(*, fetch=None):
         return {"ok": True}
     except Exception as exc:  # noqa: BLE001
         return _failure("vendor_changed", "CurseForge's answer could not be read (%s)." % type(exc).__name__)
+
+
+# ============================================================================================
+# Additions for cross-platform matching (agent S1).  Nothing above this line was changed; crossmatch.py is the
+# only caller.
+#
+# NOT VERIFIED.  CurseForge documents a fingerprint lookup (POST /v1/fingerprints/{gameId}, body {"fingerprints":
+# [int, ...]}, answer {"data": {"exactMatches": [{"id": <mod id>, "file": <file>, "latestFiles": [..]}],
+# "exactFingerprints": [..], "unmatchedFingerprints": [..], ...}}), but the owner's probe never called it and the
+# swagger summary it saved (44 paths) lists NO fingerprint route.  So the route, the body and the answer's shape
+# below come from CurseForge's published documentation as remembered, not from a recorded answer.  Everything that
+# could be wrong is in FINGERPRINT_PATH and in the reading code, and every doubt is answered with `vendor_changed`
+# and a plain sentence, never with a guess.  `fingerprint_matches([FINGERPRINT_PROBE])` is a cheap way to find out
+# whether the route works for the owner's key BEFORE any mod file is downloaded.
+# ============================================================================================
+FINGERPRINT_PATH = "/fingerprints/%d"
+FINGERPRINT_CHUNK = 100                # fingerprints per request (a cautious guess; no limit is documented)
+FINGERPRINT_PROBE = 1                  # a fingerprint nobody has: used only to ask "does this route answer?"
+_FP_MAX = 0xFFFFFFFF
+
+
+def _fp_failure(bad):
+    """Say what went wrong with THIS route in terms that do not blame the key unfairly."""
+    reason = bad.get("reason")
+    if reason in ("not_found", "vendor_changed"):
+        return _failure("vendor_changed", "CurseForge did not accept the fingerprint lookup (this route was never "
+                                          "seen working by the probe). A pack of Modrinth entries can't be matched "
+                                          "on CurseForge until that is checked.")
+    if reason == "bad_key":
+        return _failure("bad_key", "CurseForge refused the fingerprint lookup: the key is wrong, or this key is not "
+                                   "allowed that route.")
+    return bad
+
+
+def fingerprint_matches(fingerprints, *, fetch=None):
+    """CurseForge files whose own fingerprint (murmur2 of the file bytes) is one of `fingerprints`.
+
+    -> {"ok": True, "matches": {fingerprint: [file]}} | failure.  `file` is the contract's file record (its
+    `hashes` hold `sha1` when CurseForge gave one and `fingerprint` as a string).  A fingerprint nobody has is
+    simply absent.  A match is accepted only when the file's own `fileFingerprint` is one of the numbers asked for
+    (so a stray answer can never be attributed to the wrong one), and a server pack is never offered."""
+    try:
+        bad = _need_key()
+        if bad:
+            return bad
+        wanted = []
+        for fp in fingerprints if isinstance(fingerprints, (list, tuple, set)) else []:
+            if isinstance(fp, bool) or not isinstance(fp, int) or not 0 <= fp <= _FP_MAX:
+                continue
+            if fp not in wanted:
+                wanted.append(fp)
+        matches = {}
+        for chunk in _chunks(wanted, FINGERPRINT_CHUNK):
+            body, bad, _status = _call(fetch, FINGERPRINT_PATH % GAME_ID, json_body={"fingerprints": chunk},
+                                       method="POST")
+            if bad:
+                return _fp_failure(bad)
+            data = _data(body)
+            exact = data.get("exactMatches") if isinstance(data, dict) else None
+            if not isinstance(exact, list):
+                return _fp_failure(_failure("vendor_changed", _plain_error("vendor_changed")))
+            asked = set(chunk)
+            for item in exact:
+                raw = item.get("file") if isinstance(item, dict) else None
+                if not isinstance(raw, dict) or _is_server_pack(raw):
+                    continue
+                fp = raw.get("fileFingerprint")
+                if isinstance(fp, bool) or not isinstance(fp, int) or fp not in asked:
+                    continue
+                rec = _file(raw, project_id=item.get("id"))
+                if rec is None:
+                    continue
+                seen = matches.setdefault(fp, [])
+                if not any(r["project_id"] == rec["project_id"] and r["file_id"] == rec["file_id"] for r in seen):
+                    seen.append(rec)
+        return {"ok": True, "matches": matches}
+    except Exception as exc:  # noqa: BLE001
+        return _failure("vendor_changed", "CurseForge's answer could not be read (%s)." % type(exc).__name__)

@@ -25,6 +25,18 @@ sqlite store directly.  The promises that make that safe to call from a download
   always written at once.
 * A provider writes only rows with its own id; the store enforces it (hub/store.py).  There
   is no model-facing way to call this module: only code the owner installed does.
+
+Update findings (N23): "a newer version of X exists" is not a download, so it is not a row.  Code that is
+not a tool (a worker, a script) reports one with
+
+    hub.offer_update("model_fetch", "llama-8b-q4", title="llama-8b-q4.gguf",
+                     installed="v1.4", available="v1.5", size_bytes=4_900_000_000, source="my-registry")
+    hub.clear_update("model_fetch", "llama-8b-q4")          # it was updated (or is no longer offered)
+
+Both follow the same promises as every call here: they NEVER raise, and a finding the store can't take
+right now is spooled to the inbox and applied by the daemon later.  The hub never compares the two version
+texts; it shows them as given.  A tool that has an `update_tool` in its TOOL_DOWNLOADS entry answers with a
+list instead and needs neither call.
 """
 
 import json
@@ -37,11 +49,14 @@ from .hub import paths, states
 
 MIN_INTERVAL = 1.0          # per item, seconds
 MAX_REPORTS_PER_S = 20      # per provider, per process
+MAX_OFFERS_PER_S = 50       # update findings: a whole list arrives at once, so the burst is a provider's maximum
+MAX_OFFER_BURST = 500
 MAX_INBOX_FILES = 500
 
 _UNSET = object()
 _lock = threading.Lock()
 _buckets = {}
+_offer_buckets = {}
 _warned = set()
 _store_factory = None       # tests swap this for one pointed at a temp database
 
@@ -90,8 +105,22 @@ def _allow(provider, now):
         return True
 
 
-def _spool(provider, local_id, fields, create):
-    """Keep a report the store couldn't take, for the daemon to apply."""
+def _allow_offer(provider, now):
+    """A token bucket for update findings (separate from the row bucket): a list of up to MAX_OFFER_BURST
+    findings may arrive at once, then MAX_OFFERS_PER_S a second."""
+    with _lock:
+        tokens, last = _offer_buckets.get(provider, (float(MAX_OFFER_BURST), now))
+        tokens = min(float(MAX_OFFER_BURST), tokens + (now - last) * MAX_OFFERS_PER_S)
+        if tokens < 1.0:
+            _offer_buckets[provider] = (tokens, now)
+            return False
+        _offer_buckets[provider] = (tokens - 1.0, now)
+        return True
+
+
+def _spool(provider, local_id, fields, create, kind=None):
+    """Keep a report the store couldn't take, for the daemon to apply.  `kind` is None for a row report and
+    \"offer_update\" / \"clear_update\" for an update finding (N23)."""
     try:
         inbox = paths.inbox_dir()
         inbox.mkdir(parents=True, exist_ok=True)
@@ -99,8 +128,11 @@ def _spool(provider, local_id, fields, create):
             return False
         name = "%016d-%s.json" % (int(time.time() * 1000), uuid.uuid4().hex[:8])
         tmp = inbox / (name + ".tmp")
-        tmp.write_text(json.dumps({"provider": provider, "local_id": local_id, "fields": fields,
-                                   "create": bool(create), "ts": time.time()}, default=str), encoding="utf-8")
+        body = {"provider": provider, "local_id": local_id, "fields": fields,
+                "create": bool(create), "ts": time.time()}
+        if kind:
+            body["kind"] = kind
+        tmp.write_text(json.dumps(body, default=str), encoding="utf-8")
         tmp.replace(inbox / name)
         return True
     except Exception:  # noqa: BLE001
@@ -138,6 +170,7 @@ def drain_inbox(store=None, limit=200):
                 provider, local = data["provider"], data["local_id"]
                 fields = data.get("fields") or {}
                 create = bool(data.get("create", True))
+                kind = data.get("kind")
                 ts = float(data.get("ts") or time.time())
             except (OSError, ValueError, KeyError, TypeError):
                 _unlink(path)                       # unreadable: nothing to retry
@@ -146,7 +179,12 @@ def drain_inbox(store=None, limit=200):
                 _unlink(path)
                 continue
             try:
-                store.upsert_provider_row(provider, local, fields, create=create, now=ts)
+                if kind == "offer_update":
+                    store.update_offer(provider, local, fields, now=ts)
+                elif kind == "clear_update":
+                    store.update_clear(provider, local)
+                else:
+                    store.upsert_provider_row(provider, local, fields, create=create, now=ts)
             except Exception:  # noqa: BLE001 - still busy: leave the rest for next time
                 break
             _unlink(path)
@@ -269,6 +307,49 @@ def update(provider, local_id, **fields):
 def finish(provider, local_id, state="done", **fields):
     fields["state"] = state
     return _write(provider, local_id, fields, create=False, force=True)
+
+
+def _offer(provider, local_id, fields, clear=False):
+    """One update finding (or its removal).  True if it reached the store or the spool."""
+    try:
+        if not _valid_provider(provider) or not str(local_id or "").strip():
+            return False
+        if not _allow_offer(provider, time.monotonic()):
+            return False
+        local = str(local_id)
+        try:
+            store = _store()
+            if clear:
+                store.update_clear(provider, local)
+                return True
+            finding, _problems = store.update_offer(provider, local, fields)
+            return finding is not None
+        except Exception:  # noqa: BLE001 - locked, missing, corrupt: spool it
+            return _spool(provider, local, fields, False, kind="clear_update" if clear else "offer_update")
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def offer_update(provider, local_id, title="", installed=None, available=None, size_bytes=None,
+                 source=None, detail=None):
+    """Report that an update is available for `<provider>:<local_id>` (N23).  The same id again replaces
+    the finding.  `installed` and `available` are version texts exactly as the source states them: the hub
+    never parses or compares them.  `detail` is an optional list of {label, value}.  Everything is capped
+    and printable-only on the way in.  Never raises; returns True if it reached the store or the inbox."""
+    try:
+        fields = {"title": title, "installed": installed, "available": available,
+                  "size_bytes": size_bytes, "source": source, "detail": detail}
+        return _offer(provider, local_id, {k: v for k, v in fields.items() if v is not None})
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def clear_update(provider, local_id):
+    """Report that `<provider>:<local_id>` has no update any more (it was updated, or removed).  Never raises."""
+    try:
+        return _offer(provider, local_id, {}, clear=True)
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def register_provider(provider_id, label=None, mode="push", capabilities=None, controls=None,

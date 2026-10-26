@@ -462,12 +462,70 @@ PROVIDER_SETTINGS = {
 }
 
 
+# N23e: the two settings of the update checks.  They belong to EVERY provider (not one, like Steam's
+# threshold above), so they live apart from PROVIDER_SETTINGS: `owner_provider_settings` keeps returning
+# exactly what it always did, and `update_settings` below is what the Updates side reads.
+#   update_checks      True = the hub checks this provider for available updates (default), False = never
+#   update_interval_h  hours between two automatic checks (default 24; 0.5 to 720)
+UPDATE_CHECKS_DEFAULT = True
+UPDATE_INTERVAL_H_DEFAULT = 24.0
+UPDATE_INTERVAL_H_MIN = 0.5
+UPDATE_INTERVAL_H_MAX = 720.0
+
+
+def _check_hours(label):
+    """A number of hours from UPDATE_INTERVAL_H_MIN to UPDATE_INTERVAL_H_MAX, kept to 3 decimals."""
+    def check(value):
+        message = "%s must be a number of hours from %g to %g" % (label, UPDATE_INTERVAL_H_MIN, UPDATE_INTERVAL_H_MAX)
+        if isinstance(value, bool) or value is None:
+            return None, message
+        try:
+            num = float(str(value).strip())
+        except (TypeError, ValueError):
+            return None, message
+        if num != num or num in (float("inf"), float("-inf")):
+            return None, message
+        if num < UPDATE_INTERVAL_H_MIN or num > UPDATE_INTERVAL_H_MAX:
+            return None, message
+        return round(num, 3), None
+    return check
+
+
+UPDATE_SETTINGS = {
+    "update_checks": (UPDATE_CHECKS_DEFAULT, _bool("update_checks")),
+    "update_interval_h": (UPDATE_INTERVAL_H_DEFAULT, _check_hours("update_interval_h")),
+}
+
+
+def update_settings(stored, starting_interval_h=None):
+    """The effective update settings of one provider: {"update_checks": bool, "update_interval_h": float}.
+
+    A stored value that validates wins; then `starting_interval_h` (what the tool file declared as
+    `update_interval_h`: a starting value the owner then owns), when it validates; then the default.  A
+    stored value that no longer validates never stops a check or makes one run too often."""
+    stored = stored if isinstance(stored, dict) else {}
+    out = {}
+    for key, (default, check) in UPDATE_SETTINGS.items():
+        value = None
+        if key in stored:
+            value, err = check(stored[key])
+            if err:
+                value = None
+        if value is None and key == "update_interval_h" and starting_interval_h is not None:
+            value, err = check(starting_interval_h)
+            if err:
+                value = None
+        out[key] = default if value is None else value
+    return out
+
+
 def validate_provider_settings(provider_id, settings):
     """{\"notify_min_update_gb\": \"2.5\"} -> (clean, errors) for one provider's settings block.
 
     Keys the hub knows for THIS provider are range-checked and normalised.  A key that belongs to
     another provider is an error (a setting that silently does nothing looks like success).  Any
     other key is passed through unchanged, which keeps Steam's `root` and tool-defined keys working.
+    `update_checks` and `update_interval_h` are known for every provider (UPDATE_SETTINGS).
     """
     known = PROVIDER_SETTINGS.get(str(provider_id or ""), {})
     foreign = {k: pid for pid, block in PROVIDER_SETTINGS.items() if pid != provider_id for k in block}
@@ -475,6 +533,12 @@ def validate_provider_settings(provider_id, settings):
     for key, value in (settings or {}).items():
         if key in known:
             checked, err = known[key][1](value)
+            if err:
+                errors.append(err)
+            else:
+                clean[key] = checked
+        elif key in UPDATE_SETTINGS:
+            checked, err = UPDATE_SETTINGS[key][1](value)
             if err:
                 errors.append(err)
             else:

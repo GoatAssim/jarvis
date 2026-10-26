@@ -141,6 +141,53 @@ def _ensure_columns(conn, db_path):
         _COLUMNS_CHECKED.add(key)
 
 
+# Tables added after SCHEMA_VERSION 2 shipped (N23, update findings).  A database that is already at the
+# current user_version never runs `_SCHEMA` again, so these are created on the first connection in which
+# they are missing (one cheap lookup per connection, then nothing).  Additive only: no existing table or
+# column is touched, so no SCHEMA_VERSION bump and an older Jarvis simply never looks at them.
+#   updates        one row per available update a source reported: "<provider> has a newer <thing>".  It
+#                  is a CURRENT list, not a log.  `available` / `installed` are the source's own words and
+#                  are never compared.  dismissed_* = "Ignore this version" (hidden until `available` differs)
+#   update_checks  one row per provider: what the update runner knows about it (its update tool, when it
+#                  was last checked, whether that worked, what failed) plus the two flags a tool call or
+#                  the panel uses to ask the daemon for a check (requested_at) and to be held to the
+#                  manual-check limit (manual_at).  Kept apart from `providers` so a poll's health line and a
+#                  check's never overwrite each other.
+_LATE_TABLES = (
+    """CREATE TABLE IF NOT EXISTS updates(
+        provider TEXT NOT NULL, local_id TEXT NOT NULL, title TEXT NOT NULL DEFAULT '',
+        installed TEXT NOT NULL DEFAULT '', available TEXT NOT NULL DEFAULT '', size_bytes INTEGER,
+        source TEXT NOT NULL DEFAULT '', detail_json TEXT,
+        checked_at REAL NOT NULL, first_seen_at REAL NOT NULL,
+        dismissed_at REAL, dismissed_version TEXT,
+        PRIMARY KEY(provider, local_id)
+    )""",
+    "CREATE INDEX IF NOT EXISTS updates_provider ON updates(provider)",
+    """CREATE TABLE IF NOT EXISTS update_checks(
+        provider TEXT PRIMARY KEY, update_tool TEXT, start_interval_h REAL,
+        running_since REAL, requested_at REAL, manual_at REAL, started_at REAL,
+        checked_at REAL, ok_at REAL, error TEXT, problems_json TEXT
+    )""",
+)
+MAX_UPDATES_PER_PROVIDER = 500          # findings per provider (the same cap as polled rows)
+_CHECK_FIELDS = frozenset((
+    "update_tool", "start_interval_h", "running_since", "requested_at", "manual_at", "started_at",
+    "checked_at", "ok_at", "error", "problems_json"))
+
+
+def _ensure_tables(conn):
+    have = {r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('updates','update_checks')").fetchall()}
+    if len(have) == 2:
+        return
+    for statement in _LATE_TABLES:
+        try:
+            conn.execute(statement)
+        except sqlite3.OperationalError as exc:         # another process created it a moment ago
+            if "already exists" not in str(exc).lower():
+                raise
+
+
 def _dest_kind(dest):
     """1 if `dest` is a folder on disk, 0 if a file, None if it is not there (or cannot be asked)."""
     if not dest:
@@ -190,6 +237,18 @@ def _row_to_provider(row):
     return prov
 
 
+def _row_to_update(row):
+    """sqlite row -> the finding dict.  `hidden` = the owner chose "Ignore this version" for exactly the
+    `available` text this row holds now (a different text shows it again: the store clears the mark)."""
+    item = dict(row)
+    item["detail"] = _loads(item.pop("detail_json", None), [])
+    item["provider_label"] = item.pop("provider_label", None) or item["provider"]
+    item["provider_enabled"] = item.pop("provider_enabled", None)
+    item["provider_settings"] = _loads(item.pop("provider_settings_json", None), {})
+    item["hidden"] = item.get("dismissed_at") is not None and (item.get("dismissed_version") or "") == (item.get("available") or "")
+    return item
+
+
 def _like(text):
     return "%" + str(text).lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
 
@@ -224,6 +283,7 @@ class Store:
                 conn.execute("ROLLBACK")
                 raise
         _ensure_columns(conn, self.path)
+        _ensure_tables(conn)
         return conn
 
     @contextlib.contextmanager
@@ -931,6 +991,201 @@ class Store:
     @staticmethod
     def _provider_error(conn, pid, message):
         conn.execute("UPDATE providers SET last_error=? WHERE id=?", (states.clean_text(message, 200), pid))
+
+    # ------------------------------------------------------------------ update findings (N23)
+
+    _FINDING_SELECT = ("SELECT u.*, p.label AS provider_label, p.enabled AS provider_enabled, "
+                       "p.settings_json AS provider_settings_json FROM updates u "
+                       "LEFT JOIN providers p ON p.id = u.provider ")
+
+    @staticmethod
+    def _update_put(conn, pid, local, f, now):
+        """Write one clean finding (see updates.clean_finding).  'new', 'replaced' or 'full'.
+
+        The same id again REPLACES the row (its first_seen_at stays).  A finding the owner ignored stays
+        ignored only while `available` is the very text they ignored; any other text clears the mark."""
+        available = f.get("available") or ""
+        row = conn.execute("SELECT dismissed_at, dismissed_version FROM updates WHERE provider=? AND local_id=?",
+                           (pid, local)).fetchone()
+        detail = _dumps(f["detail"]) if f.get("detail") else None
+        if row is None:
+            count = conn.execute("SELECT COUNT(*) FROM updates WHERE provider=?", (pid,)).fetchone()[0]
+            if count >= MAX_UPDATES_PER_PROVIDER:
+                return "full"
+            conn.execute(
+                "INSERT INTO updates(provider, local_id, title, installed, available, size_bytes, source, "
+                "detail_json, checked_at, first_seen_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (pid, local, f["title"], f.get("installed") or "", available, f.get("size_bytes"),
+                 f.get("source") or "", detail, now, now))
+            return "new"
+        keep = row["dismissed_at"] is not None and (row["dismissed_version"] or "") == available
+        conn.execute(
+            "UPDATE updates SET title=?, installed=?, available=?, size_bytes=?, source=?, detail_json=?, "
+            "checked_at=?, dismissed_at=?, dismissed_version=? WHERE provider=? AND local_id=?",
+            (f["title"], f.get("installed") or "", available, f.get("size_bytes"), f.get("source") or "",
+             detail, now, row["dismissed_at"] if keep else None, row["dismissed_version"] if keep else None,
+             pid, local))
+        return "replaced"
+
+    def update_offer(self, provider_id, local_id, fields, *, now=None):
+        """One finding from a provider (hub_client.offer_update, an update tool's answer goes through
+        `update_apply`).  Returns (finding or None, problems).  Sanitised by updates.clean_finding; a
+        switched-off provider is ignored; at most MAX_UPDATES_PER_PROVIDER findings; one answer at most
+        `provider_limits.max_report_kb`."""
+        from . import updates as updates_mod
+        pid = str(provider_id or "")
+        if not states.PROVIDER_ID_RE.match(pid):
+            return None, ["invalid provider id"]
+        raw = dict(fields) if isinstance(fields, dict) else {}
+        raw["id"] = local_id
+        local, cleaned = updates_mod.clean_finding(raw)
+        if local is None:
+            return None, [cleaned]
+        now = self.now() if now is None else now
+        with self._write() as conn:
+            prow = conn.execute("SELECT enabled FROM providers WHERE id=?", (pid,)).fetchone()
+            if prow is not None and not prow["enabled"]:
+                return None, ["provider %s is switched off" % pid]
+            limits = self._settings_in(conn)["provider_limits"]
+            if len(_dumps(raw)) > int(limits["max_report_kb"]) * 1024:
+                return None, ["report too large"]
+            state = self._update_put(conn, pid, local, cleaned, now)
+            if state == "full":
+                return None, ["over %d findings for this provider; new ones dropped" % MAX_UPDATES_PER_PROVIDER]
+            row = conn.execute(self._FINDING_SELECT + "WHERE u.provider=? AND u.local_id=?", (pid, local)).fetchone()
+        return _row_to_update(row), []
+
+    def update_apply(self, provider_id, raw_items, *, complete=False, failed_sources=(), now=None):
+        """One update tool's answer, in one transaction.  Returns {"applied", "dropped", "cleared", "problems"}.
+
+        Every item is replaced by id.  `complete=True` means "this is every update I know of": a finding
+        the hub holds that the answer no longer lists is CLEARED, with two exceptions that keep a partial
+        answer from erasing good data: a finding whose `source` is one of `failed_sources` (that source
+        could not be asked), and every finding when any item of the answer was dropped as unusable (the
+        hub cannot tell what the dropped item was).  A switched-off provider is ignored."""
+        from . import updates as updates_mod
+        pid = str(provider_id or "")
+        out = {"applied": 0, "dropped": 0, "cleared": 0, "problems": []}
+        if not states.PROVIDER_ID_RE.match(pid):
+            out["problems"].append("invalid provider id")
+            return out
+        items = list(raw_items) if isinstance(raw_items, (list, tuple)) else []
+        now = self.now() if now is None else now
+        failed = {states.clean_text(x, 40).lower() for x in failed_sources if states.clean_text(x, 40)}
+        with self._write() as conn:
+            prow = conn.execute("SELECT enabled FROM providers WHERE id=?", (pid,)).fetchone()
+            if prow is not None and not prow["enabled"]:
+                out["problems"].append("provider %s is switched off" % pid)
+                return out
+            seen = set()
+            for raw in items[:MAX_UPDATES_PER_PROVIDER]:
+                local, cleaned = updates_mod.clean_finding(raw)
+                if local is None:
+                    out["dropped"] += 1
+                    continue
+                if self._update_put(conn, pid, local, cleaned, now) == "full":
+                    out["dropped"] += 1
+                    continue
+                seen.add(local)
+                out["applied"] += 1
+            out["dropped"] += max(0, len(items) - MAX_UPDATES_PER_PROVIDER)
+            if complete:
+                if out["dropped"]:
+                    out["problems"].append("%d item(s) of the answer were unusable, so nothing was cleared this time"
+                                           % out["dropped"])
+                else:
+                    for row in conn.execute("SELECT local_id, source FROM updates WHERE provider=?", (pid,)).fetchall():
+                        if row["local_id"] in seen or (row["source"] or "").lower() in failed:
+                            continue
+                        conn.execute("DELETE FROM updates WHERE provider=? AND local_id=?", (pid, row["local_id"]))
+                        out["cleared"] += 1
+        return out
+
+    def update_clear(self, provider_id, local_id):
+        """Remove one finding (the source says it is gone).  True if there was one."""
+        local = states.clean_text(local_id, 120)
+        if not local:
+            return False
+        with self._write() as conn:
+            return conn.execute("DELETE FROM updates WHERE provider=? AND local_id=?",
+                                (str(provider_id or ""), local)).rowcount > 0
+
+    def update_dismiss(self, provider_id, local_id, now=None):
+        """\"Ignore this version\": hide the finding until a DIFFERENT `available` arrives.  The finding or None."""
+        local = states.clean_text(local_id, 120)
+        if not local:
+            return None
+        now = self.now() if now is None else now
+        pid = str(provider_id or "")
+        with self._write() as conn:
+            row = conn.execute("SELECT available FROM updates WHERE provider=? AND local_id=?", (pid, local)).fetchone()
+            if row is None:
+                return None
+            conn.execute("UPDATE updates SET dismissed_at=?, dismissed_version=? WHERE provider=? AND local_id=?",
+                         (now, row["available"] or "", pid, local))
+            out = conn.execute(self._FINDING_SELECT + "WHERE u.provider=? AND u.local_id=?", (pid, local)).fetchone()
+        return _row_to_update(out)
+
+    def list_updates(self, provider=None, include_hidden=False):
+        """Findings, newest first.  Those of a switched-off provider are never listed.  `include_hidden`
+        adds the ones the owner ignored (they carry `hidden: True`).  A provider with no row in
+        `providers` is listed (a tool that used hub_client without registering)."""
+        sql = self._FINDING_SELECT + "WHERE (p.id IS NULL OR p.enabled=1)"
+        args = []
+        if provider:
+            sql += " AND u.provider=?"
+            args.append(str(provider))
+        sql += " ORDER BY u.first_seen_at DESC, u.title COLLATE NOCASE LIMIT 5000"
+        with self._read() as conn:
+            rows = conn.execute(sql, args).fetchall()
+        found = [_row_to_update(r) for r in rows]
+        return found if include_hidden else [f for f in found if not f["hidden"]]
+
+    def update_check_state(self):
+        """{provider id: state} for every provider the update runner knows (see _LATE_TABLES)."""
+        with self._read() as conn:
+            rows = conn.execute("SELECT * FROM update_checks").fetchall()
+        out = {}
+        for row in rows:
+            st = dict(row)
+            st["problems"] = _loads(st.pop("problems_json", None), [])
+            out[st["provider"]] = st
+        return out
+
+    def update_check_put(self, provider_id, **fields):
+        """Set some columns of a provider's check state (created when missing).  Only the known columns."""
+        pid = str(provider_id or "")
+        bad = set(fields) - _CHECK_FIELDS
+        if bad:
+            raise ValueError("unknown update_checks column(s): %s" % ", ".join(sorted(bad)))
+        with self._write() as conn:
+            conn.execute("INSERT OR IGNORE INTO update_checks(provider) VALUES(?)", (pid,))
+            for column, value in fields.items():
+                conn.execute("UPDATE update_checks SET %s=? WHERE provider=?" % column, (value, pid))
+
+    def update_check_reset_running(self):
+        """The daemon has just started: no check of an earlier run is still going."""
+        with self._write() as conn:
+            conn.execute("UPDATE update_checks SET running_since=NULL")
+
+    def update_check_claim(self, provider_id, *, now, limit_s, stale_s):
+        """A person asks for a check now (the tool, the panel).  One transaction, so two asks can't both
+        win.  Returns (status, seconds): "requested" (flag set), "checking" (one is running: seconds
+        since it began) or "limited" (asked too recently: seconds until it is allowed)."""
+        pid = str(provider_id or "")
+        with self._write() as conn:
+            conn.execute("INSERT OR IGNORE INTO update_checks(provider) VALUES(?)", (pid,))
+            row = conn.execute("SELECT running_since, manual_at, requested_at FROM update_checks "
+                               "WHERE provider=?", (pid,)).fetchone()
+            running = row["running_since"]
+            if running is not None and now - float(running) < stale_s:
+                return "checking", now - float(running)
+            if row["requested_at"] is not None:   # asked a moment ago; the runner clears it when it begins
+                return "checking", 0.0
+            if row["manual_at"] is not None and now - float(row["manual_at"]) < limit_s:
+                return "limited", limit_s - (now - float(row["manual_at"]))
+            conn.execute("UPDATE update_checks SET requested_at=?, manual_at=? WHERE provider=?", (now, now, pid))
+            return "requested", 0.0
 
     # ------------------------------------------------------------------ notices (notify.py)
 

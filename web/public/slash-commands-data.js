@@ -2,7 +2,7 @@
  * slash-commands-data.js — the registry behind the "/" command palette
  * (Menu-free: typed straight into the Ask composer). Master plan Part I.2.
  *
- * THIS FILE IS THE REGISTRY. One entry per typeable verb (40 of them — see
+ * THIS FILE IS THE REGISTRY. One entry per typeable verb (41 of them — see
  * `verbs`), plus a disposition for every OTHER canonical name
  * `jarvis-cli/jarvis/reserved_names.py` reserves (`passthrough` + `notExposed`,
  * 159 total) so the palette can show and risk-tier every CLI subcommand
@@ -67,7 +67,7 @@
  * with a risk tier, rather than a curated subset. Every one of the reserved
  * names (159, counting skills-loaded) therefore lands in EXACTLY ONE of:
  *
- *   verbs[].covers   reached through a typed verb (the 40 in `verbs`) —
+ *   verbs[].covers   reached through a typed verb (the 41 in `verbs`) —
  *                    a panel opener, a picker, or a direct action. Most
  *                    of the 98 names here are the plumbing a panel already
  *                    drives; the verb is how a user gets to them.
@@ -602,6 +602,21 @@ window.JARVIS_SLASH_COMMANDS = /*JSON-BEGIN*/
       "covers": [],
       "example": "/guides",
       "preview": "Open Guides."
+    },
+    {
+      "verb": "minecraft",
+      "aliases": [],
+      "group": "panels",
+      "menu": "menu-item-minecraft",
+      "summary": "Open the Minecraft panel: search mods, queue a download, fetch OptiFine, make a pack",
+      "riskTier": "safe",
+      "instant": true,
+      "whileReplying": true,
+      "confirm": false,
+      "args": [],
+      "covers": [],
+      "example": "/minecraft",
+      "preview": "Open the Minecraft panel."
     },
     {
       "verb": "debug",

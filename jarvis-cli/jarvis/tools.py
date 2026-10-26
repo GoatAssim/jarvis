@@ -703,10 +703,12 @@ OWNER_ONLY_TOOLS = frozenset({
     # Minecraft mod lookups (actions/minecraft_lookup.py): a guest could spend the owner's CurseForge quota and the
     # shared Modrinth rate limit, so they are not offered to one (the handlers refuse a guest too).  The OptiFine
     # pair (actions/minecraft_optifine.py) is the same: it reaches optifine.net and, for download_optifine, writes
-    # a file on the owner's PC.  The two tools of the group that are not loaded yet (download_mc_file,
-    # make_modpack_file) join this set in the patch that adds them: a name here must be a loaded tool
-    # (tests/test_l28b_followups.py checks it).
+    # a file on the owner's PC.  The other Minecraft tools are the owner's as well: download_mc_file
+    # (actions/minecraft_download.py) queues a file in Downloads, make_modpack_file (actions/minecraft_packs.py)
+    # writes a pack file, and check_mc_updates (actions/minecraft_updates.py) reads the owner's mods folder.  Every
+    # name here must be a loaded tool (tests/test_l28b_followups.py checks it).
     "search_mc_mods", "get_mc_project", "list_optifine_versions", "download_optifine",
+    "download_mc_file", "make_modpack_file", "check_mc_updates",
 })
 
 

@@ -9,6 +9,9 @@
             "icon": "M",                      # optional, 1-4 characters
             "poll_tool": "model_fetch_list",  # required for poll / both: a read-only tool of THIS file
             "interval_s": 3,                  # poll cadence
+            "update_tool": "check_model_updates",   # optional, any mode: a read-only tool of THIS file that
+                                              # answers {"updates": [...], "complete": bool}  (N23)
+            "update_interval_h": 24,          # optional: starting hours between two checks (0.5 to 720)
             "capabilities": ["pause", "resume", "cancel", "retry", "open", "reveal"],
             "controls": {"pause": "model_fetch_pause", ...},    # capability -> a tool of THIS file
             "open_roots": ["D:/Models"],      # open / reveal / play only inside these folders
@@ -24,6 +27,14 @@ What the tool controls (id, label, mode, capabilities, controls, roots, poll too
 whenever the file changes; what the owner may change (enabled, polling interval, settings) is
 written once and never overwritten (hub/store.py register_provider).
 
+An `update_tool` (N23) lets a provider say "an update is available" without it being a download: the hub's
+update runner calls it on its own thread (never in the poll), at start-up plus a few minutes and then every
+`update_interval_h`, and keeps the answer as a list of findings (hub/updates.py).  It follows the SAME load
+rules as `poll_tool`: it must be a tool of this file, must not be confirm-gated, must have a name the risk
+policy scores as a read (get_ / list_ / check_), and must not be a control tool; it also must not be the
+`poll_tool` (the two answer in different shapes, and a poll is given 5 seconds while a check may take 60).
+`update_interval_h` is only a starting value, written once: the owner owns it afterwards.  Valid in any mode.
+
 Trust: declaring a provider is the owner's code on the owner's machine, the same trust as
 TOOL_UI and DAEMONS.  There is no model-facing way to create one.  A `poll_tool` must be
 read-only: it is rejected when it is listed in TOOL_CONFIRM_REQUIRED or when the risk policy
@@ -37,13 +48,18 @@ from pathlib import Path
 MAX_PER_FILE = 8
 MAX_SETTINGS_BYTES = 4096
 ALLOWED_KEYS = frozenset(("id", "label", "mode", "kind", "icon", "poll_tool", "interval_s", "capabilities",
-                          "controls", "open_roots", "settings"))
+                          "controls", "open_roots", "settings", "update_tool", "update_interval_h"))
 MAX_READ_RISK = 10          # policy._base_risk of a get_/list_/search_/read_/check_ name is 5
 
 
 def _states():
     from .hub import states
     return states
+
+
+def _hours():
+    from .hub import settings
+    return settings
 
 
 def _read_risk(name):
@@ -142,6 +158,33 @@ def validate_downloads(raw, filename, tool_names, confirm_required=()):
             errors.append("%s: 'poll_tool' is only used with mode poll or both - dropped" % where)
             continue
 
+        update_tool = item.get("update_tool")
+        update_hours = item.get("update_interval_h")
+        if update_tool is not None:
+            if not isinstance(update_tool, str) or update_tool not in names:
+                errors.append("%s: 'update_tool' %r must be a tool of this file - dropped" % (where, update_tool))
+                continue
+            if update_tool in confirm or _read_risk(update_tool) > MAX_READ_RISK:
+                errors.append("%s: update_tool %r must be a read-only tool (not confirm-gated, and a name the risk "
+                              "policy scores as a read, like get_/list_/check_) - dropped" % (where, update_tool))
+                continue
+            if update_tool in (controls_raw or {}).values():
+                errors.append("%s: update_tool %r is also a control tool - dropped" % (where, update_tool))
+                continue
+            if update_tool == poll_tool:
+                errors.append("%s: update_tool %r is also the poll_tool - dropped" % (where, update_tool))
+                continue
+            if update_hours is not None:
+                hours, bad = _hours().UPDATE_SETTINGS["update_interval_h"][1](update_hours)
+                if bad:
+                    errors.append("%s: 'update_interval_h' must be a number of hours from %g to %g - dropped"
+                                  % (where, _hours().UPDATE_INTERVAL_H_MIN, _hours().UPDATE_INTERVAL_H_MAX))
+                    continue
+                update_hours = hours
+        elif update_hours is not None:
+            errors.append("%s: 'update_interval_h' is only used with an 'update_tool' - dropped" % where)
+            continue
+
         interval = item.get("interval_s", 3)
         if isinstance(interval, bool) or not isinstance(interval, (int, float)) or not 0.5 <= float(interval) <= 3600:
             errors.append("%s: 'interval_s' must be a number from 0.5 to 3600 - dropped" % where)
@@ -182,5 +225,6 @@ def validate_downloads(raw, filename, tool_names, confirm_required=()):
             "poll_tool": poll_tool if mode in ("poll", "both") else None, "interval_s": float(interval),
             "capabilities": caps, "controls": {c: t for c, t in (controls_raw or {}).items()},
             "open_roots": roots, "settings": dict(settings), "source_file": filename,
+            "update_tool": update_tool, "update_interval_h": update_hours if update_tool else None,
         })
     return entries, errors

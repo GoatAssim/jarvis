@@ -387,6 +387,7 @@ for path in src.rglob("*.py"):
                      "stremio_stack.py",    # ships its own fixed palette command (/stack) and
                      "play_media.py",       # (/play), like download_hub.py: a constant list, nothing a model writes;
                                             # test_hub_stremio_tools.py validates both lists
+                     "minecraft_lookup.py",  # ships three fixed lookup commands (/mcsearch /mcfind /mcproject); test_minecraft_panel.py validates them
                      "tool_downloads.py"):  # download_hub.py ships its own fixed palette commands (test_hub_commands.py
         continue                            # pins them); tool_downloads.py only mentions the name in a docstring
     if "TOOL_COMMANDS" in path.read_text(encoding="utf-8", errors="replace"):

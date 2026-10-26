@@ -216,7 +216,7 @@ def test_owner_only_set_is_exactly_what_the_handlers_gate():
     check("it is send_dm + recent_dms + recent_spaces (S10c) + the L.21-L.23 person tools + the Download Hub's "
           "add / dismiss / season / Stremio-library tools + play_control (brief 31) + the three Steam tools (N22b/c) + "
           "play_local, play_episode, stack_start, stack_stop, server_cache_clear (7A) + the two Minecraft lookups "
-          "+ the two OptiFine tools",
+          "+ the two OptiFine tools + download_mc_file, make_modpack_file and check_mc_updates",
           system_tools.OWNER_ONLY_TOOLS == {
               "send_dm", "recent_dms", "recent_spaces", "person_remember", "person_forget",
               "person_instruct", "person_recall", "person_review", "await_reply",
@@ -224,7 +224,8 @@ def test_owner_only_set_is_exactly_what_the_handlers_gate():
               "bulk_plan", "bulk_run", "stremio_library", "stremio_mark_watched", "play_control",
               "steam_library", "steam_install_game", "steam_update_game",
               "play_local", "play_episode", "stack_start", "stack_stop", "server_cache_clear",
-              "search_mc_mods", "get_mc_project", "list_optifine_versions", "download_optifine"},
+              "search_mc_mods", "get_mc_project", "list_optifine_versions", "download_optifine",
+              "download_mc_file", "make_modpack_file", "check_mc_updates"},
           sorted(system_tools.OWNER_ONLY_TOOLS))
 
 

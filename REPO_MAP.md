@@ -455,6 +455,28 @@ jarvis-cli/jarvis/
         workspace_tools.py    NEW — daemons, log search, backlog as AI tools
         path_tools.py         NEW — move/copy/rename/make_dir/delete-to-trash
                               (`files` group; confirm-gated via TOOL_CONFIRM_REQUIRED)
+        minecraft_lookup.py   `search_mc_mods`, `get_mc_project` (owner-only; Modrinth and CurseForge lookups). Owns the
+                              `minecraft` group's ONE `TOOL_PACK_INSTRUCTION` and its nine `TOOL_SETTINGS`.
+        minecraft_download.py `download_mc_file` (owner-only, confirm-gated): one file into Downloads through
+                              `download_hub._queue()` with `filename` + `verify`; never installs
+        minecraft_packs.py    `make_modpack_file` (owner-only, confirm-gated): one `.mrpack` or CurseForge `.zip`
+        minecraft_optifine.py `list_optifine_versions`, `download_optifine` (owner-only; the download is confirm-gated and
+                              does NOT go through the hub: jar shape check, atomic `.part` write)
+    modhosts/             the Minecraft mod sources (the `minecraft` tool group's engine; see AGENTS.md invariants)
+        net.py                the one network door: allow-listed https, redirects by hand, netguard per hop, size/time caps,
+                              the CurseForge key header for api.curseforge.com only, scrubbing. Fake seams: TRANSPORT,
+                              RESOLVER, SLEEP, CONTACT_PROVIDER
+        hosts.py              host allow-lists (constants only, four blocks)
+        config.py             the CurseForge key (`~/.jarvis/curseforge.json` / `CURSEFORGE_API_KEY`): the only reader
+        cache.py              `~/.jarvis/modhosts/cache.json`: public vendor answers only, never anything holding the key
+        sources.py            `sources.get("modrinth" | "curseforge")` and `has_curseforge_key()`
+        modrinth.py, curseforge.py   the two adapters (same contract: search, get_project, list_files, get_file, bulk_*)
+        resolve.py            file choice (exact Minecraft version, strict loaders, channel order, Quilt-to-Fabric `via`),
+                              the never-guess project rule, required dependencies
+        loaders.py            latest loader version per Minecraft version (Fabric, Quilt, Forge, NeoForge meta hosts)
+        packs.py, outdir.py   pack planning/writing and the guarded folder write (links, protected folders, temp `.part`)
+        optifine.py           optifine.net parser and the hop-by-hop download link
+        untrusted.py          clip / strip / mark vendor text
 
 web/
     server.js             Express + WS; shells out to `jarvis` for everything
@@ -623,6 +645,8 @@ Everything is under `~/.jarvis/`:
 | `ambient.json`, `ambient_state.json` | ambient.py | monitor config + memory |
 | `onboarding.json` | onboarding.py | setup state and the UI layout |
 | `discovery_cache.json` | discovery_cache.py | recent search_tools hits |
+| `curseforge.json` | modhosts/config.py | the CurseForge API key `{"api_key": ...}`; read only by config.py; masked in Settings > Integrations > Minecraft mods |
+| `modhosts/cache.json` | modhosts/cache.py | short-lived (about 10 minutes) public Modrinth and loader-meta answers (CurseForge answers are not cached); never holds the key; Settings > Advanced > Files, read-only |
 
 ---
 
@@ -1047,6 +1071,12 @@ silently never runs.
 | `test_c29b_desktop_deps.py` | C29b: `desktop_tools` still loads when pygetwindow / pyautogui raise something other than ImportError; `jarvis doctor` has a `pygetwindow` row (skip, Windows-only note and no pip advice elsewhere); every desktop tool has a `tool_diagnosis._TOOL_DEPS` entry and its not-installed error names the right pip package |
 | `verify_bridge_client.js` (`node`) | `web/bridge.js` against a fake worker: never blocks/queues, reuse, confirm round trip, `refuse`/`retire`/death-before-start fall back, death after start is a crash not a re-run, kill, breaker after three failed warm-ups, recycling without cutting off a chained request; no npm install |
 | `verify_app_icon.js` (`node`) | L.48: `app-icon.js` pure helpers and a fake-DOM run (skin/colour change picked up, busy swaps the icon, ticker stops with Animations off) |
+| `test_minecraft_guards.py` | the Minecraft group's cross-file promises: owner-only (all six names; fails for `download_mc_file` / `make_modpack_file` until tools.py lists them), handlers refuse a guest before any network call, writers confirm-gated, no "install" in a name, no shared routing phrase, only net.py imports a network library, host lists are plain constants, key-name and `get_key()` allow-lists, key in no result and on disk in its own file only, stranger text clipped and marked |
+| `test_minecraft_integration.py` | real adapters + real `net.py` over a fake transport (inline data): CurseForge download (sha1 on the row, key header to one host), blocked file refused, Modrinth download then pack (same sha512 in the row and the index), CurseForge pack (blocked project skipped), dry runs leave nothing |
+| `test_minecraft_glue.py` | wave-1 glue: OptiFine pair owner-only, `modhosts/` settings name, the pack-instruction sentence, `split_dest` wording |
+| `test_modhosts_net.py` / `test_modhosts_config.py` / `test_modhosts_modrinth.py` / `test_modhosts_curseforge.py` / `test_modhosts_resolve.py` / `test_modhosts_loaders.py` / `test_modhosts_packs.py` | the `modhosts/` package, one file per module group (the Modrinth, CurseForge, loaders and packs files need `tests/data/modhosts/` fixtures, git-ignored: `git add -f` them) |
+| `test_optifine.py` / `test_minecraft_lookup_tools.py` / `test_minecraft_download.py` / `test_minecraft_packs_tool.py` | the OptiFine pair, the two lookup tools, `download_mc_file` and `make_modpack_file` |
+| helpers (not tests): `_modhosts_fake_servers.py`, `_modhosts_fake_curseforge.py`, `_modhosts_fake_optifine.py`, `_modhosts_fake_loader_meta.py`, `modhosts_checks.py` | in-process fake vendors |
 
 
 ---

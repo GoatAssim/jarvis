@@ -542,6 +542,59 @@ things that were already fixed once.
   not become ones.** The `/api/settings/*` routes require a loopback Host, a same-origin `Origin` when present and the
   `X-Jarvis-Settings: 1` header; don't weaken that, and don't point the page at `/api/config/*` for new work.
 
+- **Minecraft mod sources (the `minecraft` tool group: `search_mc_mods`, `get_mc_project`, `download_mc_file`,
+  `make_modpack_file`, `list_optifine_versions`, `download_optifine`; code in `jarvis/modhosts/` and
+  `actions/minecraft_*.py`).** Nothing here is ever "installed": no tool name says install, and a result says
+  "queued", "written" or "downloaded, not installed". `tests/test_minecraft_guards.py` pins everything below;
+  `tests/test_minecraft_integration.py` runs the real adapters and the real `net.py` over a fake transport.
+  - *Owner only, asked first.* Every tool of the group is in `tools.OWNER_ONLY_TOOLS`, AND each handler refuses a chat
+    guest itself before any network call (an unreadable sender counts as a guest). The three that write a file,
+    `download_mc_file`, `make_modpack_file` and `download_optifine`, are confirm-gated by name
+    (`TOOL_CONFIRM_REQUIRED`). A new tool of the group joins both lists; the guard test loops over the whole group and
+    does not pin "exactly six". In jarvis-main_181_ `download_mc_file` and `make_modpack_file` are loaded tools that
+    are not yet in `OWNER_ONLY_TOOLS` (only their handler check protects them), so the guard test's owner-only checks
+    for those two names fail until they are added together with their entry in `tests/test_l28b_followups.py`; delete
+    this sentence when that is done.
+  - *One door.* Only `modhosts/net.py` opens a connection (it holds the one `requests` import). It allows https only,
+    follows redirects by hand, checks every hop against the host lists in `modhosts/hosts.py` and against the SSRF guard
+    (`netguard`), and caps size and time. The host lists are constants: never read from config or the environment, so a
+    hand-edit cannot send the key elsewhere. A new vendor host is a deliberate edit of `hosts.py` (its blocks are kept
+    12+ lines apart so separate patches do not collide).
+  - *The CurseForge key.* It lives in `~/.jarvis/curseforge.json` as `{"api_key": ...}` (or the environment variable
+    `CURSEFORGE_API_KEY`) and is read ONLY by `modhosts/config.py`. `config.get_key()` has exactly four callers:
+    `net.py` (puts it in the `x-api-key` header for `api.curseforge.com` only, and drops a key header a caller supplies),
+    `cache.py` (refuses to cache anything that holds it), `sources.py` (a yes/no "is one set") and `curseforge.py`
+    (scrubs it from messages, says "no key" before any request). It is never in a result, a Downloads row, the cache or
+    a log; the Settings gate masks it on read. The guard test keeps allow-lists of the files that may name
+    `curseforge.json` or call `get_key()`; a new reader or namer is a decision to make on purpose (add it to the list
+    and say why here), or use `config.py`. The environment variable is readable by a shell command the model runs, like
+    other env keys, so the file is the safer home.
+  - *Stranger text.* Project names, summaries and file names come from the mod sites. They are markup-stripped, clipped
+    and the result is marked with `untrusted.mark()` (`untrusted_note`, plus `text_flagged` when a line reads like an
+    instruction to an AI). OptiFine results carry no such note because only file names that match a strict pattern are
+    accepted there: there is no free text.
+  - *Downloads.* `download_mc_file` queues through `download_hub._queue()` with `item_options = {filename, verify}`:
+    Modrinth verifies with sha512 (else sha1), CurseForge with sha1 (never its fingerprint, never md5). The hub honours
+    `verify` only on the `http` engine and says so in the add result's `note`. **A caller that needs integrity must read
+    that `note` before it says "checked": if the note says `verify` was ignored, the file was not checked** (the tool
+    reports `verify.applied` and says "not verified" in words). A file whose author blocked distribution (no link) is
+    refused and never worked around: the `download-url` route is not asked. `download_optifine` does NOT use the hub: it
+    downloads inside the call (optifine.net publishes no checksum, so it checks the jar's shape), writes
+    `<name>.part` exclusively and renames it, never overwrites, and asks its own "Save outside the downloads library?"
+    question; no row appears in Downloads.
+  - *Packs.* `make_modpack_file` writes ONE `.mrpack` or CurseForge `.zip` per call, from one platform's own lookups; an
+    entry that is not found, ambiguous, blocked or without a compatible file is reported and skipped, never swapped.
+    `loader_version` given is used exactly; omitted, `modhosts/loaders.py` finds the latest (the loader-meta hosts) and the
+    answer says which; with neither the pack is refused. A folder packed into `overrides/` is read without following
+    links and is refused if it is, or contains, `~/.jarvis`. Quilt may use a Fabric-tagged file only when it is labelled
+    `via`. Files are written by `modhosts/outdir.py` (temp `.part`, then rename).
+  - *Settings and routing.* `web/server.js` `SETTINGS_NAME_RE` accepts one folder level: `channels/`, `web-data/` or
+    `modhosts/`; `settings_admin._split_name` is the real gate, and `modhosts/` reaches only the files `_FILES` names
+    (today `modhosts/cache.json`, read-only). `curseforge.json` is a top-level Settings file with a validator and a
+    masked key. The group has ONE `TOOL_PACK_INSTRUCTION` (in `minecraft_lookup.py`; the OptiFine sentence is its last
+    sentence) and ONE `TOOL_SETTINGS` list (`minecraft_lookup.py`, nine settings); the other three action files declare
+    neither. No routing phrase is shared between two tools of the group, and none weighs less than 5.
+
 ## Testing
 
 No framework dependency — plain `assert` throughout (also valid as
@@ -675,6 +728,20 @@ actually render Markdown):
                                             # against a fake DOM + fake JarvisHost
     node tests/verify_panel_open_guard.js   # I-B18(c): openScriptPanel() says so when a panel's script didn't load; no npm install
     python3 tests/verify_panel_open_guard.py  # same, in a real browser with daemons.js blocked; needs `playwright` (Python) + Chromium, prints SKIP without them
+    python3 tests/test_minecraft_glue.py     # Minecraft wave-1 glue: OptiFine tools owner-only, modhosts/ settings name, pack-instruction sentence, split_dest refusal wording
+    python3 tests/test_minecraft_guards.py   # the Minecraft group's cross-file promises: owner-only, confirm-gated, no "install" in a name, no shared routing phrase, one network door, key allow-lists, key stays in its file, stranger text marked (the owner-only checks for download_mc_file / make_modpack_file fail until tools.py lists them)
+    python3 tests/test_minecraft_integration.py  # real adapters + real net.py over a fake transport: CurseForge download, blocked file, Modrinth download then pack (same checksum), CurseForge pack, dry runs; inline data, no tests/data files
+    python3 tests/test_modhosts_net.py       # modhosts/net.py, hosts.py, cache.py: allow-lists, redirects, netguard, key header, scrubbing
+    python3 tests/test_modhosts_config.py    # the CurseForge key: config.py, Settings entries, policy, doctor, settings.js
+    python3 tests/test_modhosts_modrinth.py  # Modrinth adapter + untrusted.py against the in-process fake (needs hand_*.json fixtures)
+    python3 tests/test_modhosts_curseforge.py  # CurseForge adapter against a fake fetch (needs hand_p3_*.json fixtures)
+    python3 tests/test_modhosts_resolve.py   # resolve.py: file choice, Quilt fallback, never-guess rule, dependencies
+    python3 tests/test_modhosts_loaders.py   # loaders.py: latest loader version per loader (needs hand_loader_*.json fixtures)
+    python3 tests/test_modhosts_packs.py     # packs.py / outdir.py: golden .mrpack index and CurseForge manifest (needs golden_*.json fixtures)
+    python3 tests/test_optifine.py           # OptiFine parser, build choice, hop-by-hop link, jar check and both tools
+    python3 tests/test_minecraft_lookup_tools.py  # search_mc_mods / get_mc_project end to end (needs hand_*.json fixtures)
+    python3 tests/test_minecraft_download.py # download_mc_file against fake adapters and the real hub store (needs hand_p4_catalog.json)
+    python3 tests/test_minecraft_packs_tool.py   # make_modpack_file end to end
 
 Two things that will waste your time if nobody tells you:
 

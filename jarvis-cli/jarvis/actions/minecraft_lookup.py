@@ -503,3 +503,23 @@ TEST_CHECKLIST = {
                   "A name that fits several projects returns the candidates; the model must ask, not pick."],
     },
 }
+
+
+# Palette twins of the two lookups ("/" in the Ask box; tool_commands.py validates them against the schemas above).
+# Lookups only: they read from Modrinth / CurseForge and change nothing, so they are "safe".  Downloads and packs
+# are NOT commands: they need the folder question and the confirmation the Minecraft panel / the tool gate give them.
+TOOL_COMMANDS = [
+    {"name": "mcsearch", "tool": "search_mc_mods", "riskTier": "safe",
+     "summary": "search Modrinth (and CurseForge with a key) for a mod",
+     "args": [{"name": "query", "arg": "query", "required": True, "rest": True, "hint": "a mod name, or a few words"}]},
+    {"name": "mcfind", "tool": "search_mc_mods", "riskTier": "safe",
+     "summary": "search for a mod that fits one Minecraft version and loader",
+     "args": [{"name": "mc_version", "arg": "mc_version", "required": True, "hint": "for example 1.20.1"},
+              {"name": "loader", "arg": "loader", "required": True, "hint": "fabric, forge, neoforge or quilt"},
+              {"name": "query", "arg": "query", "required": True, "rest": True, "hint": "a mod name, or a few words"}]},
+    {"name": "mcproject", "tool": "get_mc_project", "riskTier": "safe",
+     "summary": "show a project's files (newest compatible first)",
+     "args": [{"name": "project", "arg": "project", "required": True, "hint": "a slug or id, for example sodium"},
+              {"name": "mc_version", "arg": "mc_version", "required": False, "hint": "optional, for example 1.20.1"},
+              {"name": "loader", "arg": "loader", "required": False, "hint": "optional: fabric, forge, neoforge or quilt"}]},
+]

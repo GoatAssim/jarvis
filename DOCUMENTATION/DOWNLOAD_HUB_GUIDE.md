@@ -290,6 +290,7 @@ These are the keys the hub reports as writable (`hub_admin.py`, `settings` op: `
 - **Needs:** nothing installed.
 - **Can:** download a `http` or `https` file in the background, resume it after a pause or a daemon restart, and name and place it safely (nothing is ever written outside the download folder or a folder you chose). Parallel parts are available but off (`http.segments`).
 - **Cannot:** fetch from a private or loopback address unless you allow it (`allow_private_hosts`); that guard checks every redirect too.
+- **Checksum (`verify`).** A caller may queue a link with the item option `verify = {"algo": "sha1" | "sha256" | "sha512", "value": "<hex>", "size": <bytes, optional>}` (the Minecraft tools use it). Only the `http` engine honours it: it hashes the finished `.part`, and a mismatch fails the row without retry and deletes only that row's own file; `size` is a ceiling (a response announcing more than it, give or take 4 KB, is refused, and so is a stream that runs past it). If another engine takes the link the option is not stored, the add still succeeds, and the add result's `note` says `verify` was ignored; a link already queued keeps the options it was queued with (the note says so). **A caller that needs integrity must read that `note` before it says "checked".**
 - **Limits:** tested only against local servers.
 
 ### Video sites (yt-dlp)
@@ -460,6 +461,7 @@ node tests/verify_hub_panel.js
 | Stremio | `test_hub_stremio_engine.py`, `test_hub_stremio_links.py`, `test_hub_stremio_tools.py`, `test_hub_stremio_detect.py`, `test_hub_stremio_torrentfile.py`, `test_hub_stremio_mpv.py`, `test_hub_stremio_pack_instruction.py`, `test_hub_stremio_discovery.py`, `test_hub_stremio_ranking.py`, `test_hub_stremio_real_cinemeta.py`, `test_hub_bulk.py` |
 | Providers, Steam, Playnite | `test_hub_providers.py`, `test_hub_provider_lifecycle.py`, `test_hub_steam_alive.py` (needs a fixture the shared copy leaves out), `test_hub_steam_threshold.py`, `test_steam_checks.py`, `test_hub_store_checks.py` |
 | Panel back end and picker | `test_hub_admin.py`, `test_hub_browse.py`, `test_download_status_card.py`, `test_hub_reveal.py`, `test_hub_demo_controls.py` |
+| Minecraft mod sources (queue with `verify`) | `test_minecraft_download.py`, `test_minecraft_integration.py` (the checksum on the stored row), `test_minecraft_guards.py` |
 | Guest gates and pack text | `test_hub_guest_gates.py`, `test_channels_pack_instruction.py`, `test_l28b_followups.py` |
 | Panel and Settings pages (Node) | `verify_hub_panel.js`, `verify_hub_settings.js`, `verify_hub_add_form.js`, `verify_path_picker.js`, `verify_hub_browse_routes.js` |
 

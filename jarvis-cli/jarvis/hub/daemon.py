@@ -25,6 +25,10 @@ Provider poll mode (phase 5): each tick also asks `providers.PollRunner` which p
 due (a `poll_tool` of a TOOL_DOWNLOADS tool, or the built-in Steam / Playnite watchers) and applies
 their answers; the declared providers are (re)registered at start and every minute, on a thread.
 
+Update checks (N23): `updates.UpdateRunner` runs on a thread of its own, started in `start_up` and stopped in
+`stop` (set JARVIS_HUB_NO_UPDATES=1 to not start it).  It never runs in the tick, so a one-minute check can't
+delay a poll or a download.
+
 Run as `python <tool dir>/_hub_daemon.py` (what DAEMONS declares) or `python -m jarvis.hub.daemon`.
 """
 
@@ -37,7 +41,7 @@ import sys
 import threading
 import time
 
-from . import engines, notify, paths, providers, service, settings as settings_mod, states
+from . import engines, notify, paths, providers, service, settings as settings_mod, states, updates
 from .engines.base import EngineContext, Outcome
 from .store import Store
 
@@ -122,6 +126,7 @@ class HubDaemon:
         self._last_provider_sync = 0.0
         self._provider_sync_running = False
         self.declared_providers = None       # tests: a list instead of reading the tool files
+        self._updates = updates.UpdateRunner(self.store, clock=clock, declared=self._declared_for_updates)
 
     # ------------------------------------------------------------------ settings
 
@@ -204,6 +209,21 @@ class HubDaemon:
             log.error("engine module %s failed to load: %s", name, why)
         self._sync_providers()
         self._prune_history()
+        self._start_updates()
+
+    def _declared_for_updates(self):
+        """The TOOL_DOWNLOADS entries the update runner reads (the same list `sync_declared` registers)."""
+        if self.declared_providers is not None:
+            return self.declared_providers
+        return updates._declared_default()      # noqa: SLF001 - reads tools.AUTO_DOWNLOADS, on the runner's thread
+
+    def _start_updates(self):
+        if os.environ.get("JARVIS_HUB_NO_UPDATES"):
+            return
+        try:
+            self._updates.start()
+        except Exception:  # noqa: BLE001 - update checks are never allowed to stop the downloads
+            log.exception("starting the update runner failed")
 
     def tick(self):
         self._reap()
@@ -243,6 +263,10 @@ class HubDaemon:
             worker.join(max(0.1, deadline - time.monotonic()))
         self._reap()
         self._poller.close()
+        try:
+            self._updates.stop()
+        except Exception:  # noqa: BLE001
+            log.exception("stopping the update runner failed")
         try:
             self._finish_pass()                              # whatever finished while stopping
             self._notifier.flush_now(self.settings())        # and anything still being held back

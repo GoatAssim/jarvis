@@ -82,6 +82,8 @@ A file can also declare downloads of its own for Menu > Downloads:
     TOOL_DOWNLOADS = [ {"id": ..., "label": ..., "mode": "push" | "poll" | "both", ...}, ... ]
 
 ...see tool_downloads.py for the fields. Registered by the hub daemon; a bad entry is dropped.
+    An entry may also carry `update_tool` (a read-only tool of the same file that lists available updates)
+    and `update_interval_h`; the loader passes both through as validated (N23, hub/updates.py runs them).
     An entry may carry an `add` block; the loader then GENERATES a `dl_add_<id>` tool from it
     (tool_download_add.py), which exists exactly as long as the file does.
 

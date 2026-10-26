@@ -471,3 +471,80 @@ def bulk_get_files(pairs):
         return {"ok": True, "files": out}
     except Exception:  # noqa: BLE001
         return fail(VENDOR_CHANGED, "The Modrinth versions could not be read.")
+
+
+# =====================================================================================================
+# Additions for cross-platform matching (agent S1).  Nothing above this line was changed; crossmatch.py
+# is the only caller.  One new function, kept apart from the contract's seven.
+#
+#   POST /version_files  {"hashes": [..], "algorithm": "sha1" | "sha512"}  -> an object keyed by hash, each value
+#   a version.  VERIFIED by the owner's probe (25 Oct 2026, tests/data/modhosts/modrinth_version_files.json).
+#   What the probe did NOT show: how many hashes one request may carry (HASH_BATCH is a cautious guess; Modrinth
+#   states no number) and what a version with several files looks like in the answer (the code below does not
+#   assume the matched file is the primary one: it picks the file whose own hash matched and says whether that
+#   file is the version's main file).
+# =====================================================================================================
+HASH_BATCH = 100
+_HASH_PATTERN = {"sha1": re.compile(r"^[0-9a-f]{40}$"), "sha512": re.compile(r"^[0-9a-f]{128}$")}
+
+
+def _file_with_hash(version, algorithm, wanted):
+    """The contract file record of the ONE file of `version` whose `algorithm` hash is `wanted`, and whether that
+    file is the version's main (primary) file -> (file, is_primary) | None.  `_file` builds the record from a
+    version's primary file, so the version is handed to it with only the matching file left (marked primary)."""
+    if not isinstance(version, dict):
+        return None
+    files = [f for f in version.get("files") or [] if isinstance(f, dict)]
+    if not files:
+        return None
+    main = next((f for f in files if f.get("primary")), files[0])
+    for one in files:
+        hashes = one.get("hashes") if isinstance(one.get("hashes"), dict) else {}
+        if str(hashes.get(algorithm) or "").lower() == wanted:
+            shown = dict(one)
+            shown["primary"] = True
+            narrowed = dict(version)
+            narrowed["files"] = [shown]
+            record = _file(narrowed)
+            return (record, one is main) if record and record["file_id"] else None
+    return None
+
+
+def versions_by_hashes(hashes, algorithm="sha1"):
+    """Which Modrinth files have exactly these hashes?  `hashes` are hex strings (sha1 by default).
+
+    -> {"ok": True, "files": {hash: file}, "primary": {hash: bool}} | failure.
+    A hash Modrinth does not know is simply absent.  `file` is the contract's file record of the file that matched
+    (its `file_id` is the Modrinth VERSION id, its `project_id` the project); `primary` says whether that file is the
+    version's main file (a pack lists a version's main file only, so a caller must not use a secondary one).
+    One POST per HASH_BATCH hashes; nothing is cached (a POST)."""
+    try:
+        algo = str(algorithm or "sha1").strip().lower()
+        pattern = _HASH_PATTERN.get(algo)
+        if pattern is None:
+            return fail(UNSUPPORTED, "Modrinth looks files up by sha1 or sha512, not %r." % str(algorithm)[:20])
+        wanted = []
+        for raw in hashes or []:
+            text = str(raw or "").strip().lower()
+            if pattern.match(text) and text not in wanted:
+                wanted.append(text)
+        files, primary = {}, {}
+        for chunk in _chunks(wanted, HASH_BATCH):
+            reply = net.fetch(VENDOR, BASE + "/version_files", method="POST",
+                              json_body={"hashes": chunk, "algorithm": algo})
+            if not reply.get("ok"):
+                return reply
+            body = reply.get("body")
+            if not isinstance(body, dict):
+                return fail(VENDOR_CHANGED, "Modrinth's hash lookup is not in the shape Jarvis expects.")
+            asked = set(chunk)
+            for key, version in body.items():
+                text = str(key or "").lower()
+                if text not in asked:
+                    continue                                    # only ever what was asked for
+                found = _file_with_hash(version, algo, text)
+                if found:
+                    files[text], primary[text] = found
+        return {"ok": True, "files": files, "primary": primary}
+    except Exception:  # noqa: BLE001
+        return fail(VENDOR_CHANGED, "The Modrinth hash lookup could not be read.")
