@@ -59,6 +59,33 @@ def _provider(request):
     return raw if _PROVIDER_RE.match(raw) else None
 
 
+def provider_update_settings(store=None):
+    """READ: the two update settings of every provider the Settings tab should show them for, with the limits.
+
+    A provider is listed when it has an update check, or when its update checks are switched OFF (the Updates tab
+    leaves a provider whose checks are off out completely, so this list is the owner's only way back to the switch).
+    Switched-off providers are listed too.  Never raises: {"providers": [], "limits": {...}} on any trouble."""
+    from . import settings as settings_mod
+    out = {"providers": [], "limits": {"interval_h_min": settings_mod.UPDATE_INTERVAL_H_MIN,
+                                       "interval_h_max": settings_mod.UPDATE_INTERVAL_H_MAX,
+                                       "interval_h_default": settings_mod.UPDATE_INTERVAL_H_DEFAULT}}
+    try:
+        store = _store(store)
+        checks = store.update_check_state()
+        for p in store.list_providers():
+            row = checks.get(p["id"]) or {}
+            cfg = settings_mod.update_settings(p.get("settings"), row.get("start_interval_h"))
+            has_check = bool(row.get("update_tool"))
+            if not has_check and cfg["update_checks"]:
+                continue
+            out["providers"].append({"provider": p["id"], "label": str(p.get("label") or p["id"])[:60],
+                                     "has_check": has_check, "update_checks": bool(cfg["update_checks"]),
+                                     "update_interval_h": cfg["update_interval_h"]})
+    except Exception:  # noqa: BLE001 - the Settings tab must still open
+        out["providers"] = []
+    return out
+
+
 def updates(request=None, store=None):
     """READ: the Updates tab's data.  Never raises."""
     try:

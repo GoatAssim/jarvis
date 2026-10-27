@@ -2986,6 +2986,18 @@ app.post("/api/hub/torrent/add", requireHubWrite, requireJarvis, (req, res) => h
 app.post("/api/hub/dismiss", requireHubWrite, requireJarvis, (req, res) => hubAdmin(res, "dismiss", {
   id: hubText(req.body?.id, 120), finished: req.body?.finished === true,
 }));
+// Updates (N23 part f): the stored update findings (read), Check now and Ignore this version (writes: the owner's own
+// button only). Nothing here installs or changes anything; a check only lists what is out of date. The provider id and the
+// finding id are length-capped here and checked again by hub_admin / hub/updates_admin.
+app.get("/api/hub/updates", requireHubRead, requireJarvis, (req, res) => hubAdmin(res, "updates", {
+  provider: hubText(req.query.provider, 40), include_hidden: req.query.include_hidden === "1",
+}));
+app.post("/api/hub/updates/check", requireHubWrite, requireJarvis, (req, res) => hubAdmin(res, "updates_check", {
+  provider: hubText(req.body?.provider, 40),
+}));
+app.post("/api/hub/updates/dismiss", requireHubWrite, requireJarvis, (req, res) => hubAdmin(res, "updates_dismiss", {
+  provider: hubText(req.body?.provider, 40), id: hubText(req.body?.id, 120),
+}));
 // Stremio (N9, brief 12): the status block (read) and the Locate... button's save (write: the owner's own
 // button only -- loopback Host, same-origin, X-Jarvis-Hub header, and hub_admin refuses an unattended process).
 // The browser sends paths the owner picked; hub_admin / hub/stremio/config.py check both files exist before saving.

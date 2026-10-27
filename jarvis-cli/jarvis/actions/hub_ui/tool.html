@@ -18,10 +18,11 @@
   </header>
   <div class="banner" id="banner" role="status" hidden></div>
 
-  <!-- the three views: Downloads (the three panes below), Sources, History; built by tool.js -->
+  <!-- the four views: Downloads (the three panes below), Sources, Updates, History; built by tool.js -->
   <nav class="tabs" id="tabs" role="tablist" aria-label="Download views">
     <button type="button" class="tab" role="tab" id="tabDownloads" aria-selected="true" aria-controls="body" data-tab="downloads" tabindex="0">Downloads</button>
     <button type="button" class="tab" role="tab" id="tabSources" aria-selected="false" aria-controls="sourcesPane" data-tab="sources" tabindex="-1">Sources<span class="tab__n" id="srcCount"></span></button>
+    <button type="button" class="tab" role="tab" id="tabUpdates" aria-selected="false" aria-controls="updatesPane" data-tab="updates" tabindex="-1">Updates<span class="tab__n" id="updCount"></span></button>
     <button type="button" class="tab" role="tab" id="tabHistory" aria-selected="false" aria-controls="historyPane" data-tab="history" tabindex="-1">History</button>
     <span class="livetag" id="liveTag" role="status" aria-live="polite" style="margin-left:auto;align-self:center"></span>
   </nav>
@@ -154,6 +155,16 @@
       <button type="button" class="btn btn--sm src-check" id="srcRefresh" title="Ask every engine again. This only looks; it never starts or changes anything.">Check now</button>
     </div>
     <div class="pane-scroll" id="srcList"></div>
+  </section>
+
+  <!-- UPDATES (N23 part f): what the hub found out of date, grouped by program. It only tells you: nothing here installs or upgrades anything -->
+  <section class="tabpane" id="updatesPane" role="tabpanel" aria-labelledby="tabUpdates" hidden>
+    <div class="hist__bar">
+      <span class="hist__count" id="updSummary" aria-live="polite">reading the updates&hellip;</span>
+      <span style="margin-left:auto"></span>
+      <button type="button" class="btn btn--sm" id="updCheck" title="Ask every program that has an update check to look again. This only looks; it never installs or changes anything.">Check now</button>
+    </div>
+    <div class="pane-scroll" id="updList"></div>
   </section>
 
   <!-- HISTORY: finished, failed and cancelled downloads -->

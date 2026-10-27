@@ -403,12 +403,12 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
   // ---- static wiring of the new tabs
   const htmlT = fs.readFileSync(path.join(ui, "tool.html"), "utf8");
-  check("the tab strip is a real tablist: three tabs, one selected, each controls a pane", /role="tablist"/.test(htmlT) && (htmlT.match(/role="tab"/g) || []).length === 3
-    && (htmlT.match(/aria-selected="true"/g) || []).length === 1 && /role="tabpanel"/.test(htmlT) && /aria-controls="sourcesPane"/.test(htmlT) && /aria-controls="historyPane"/.test(htmlT));
+  check("the tab strip is a real tablist: four tabs, one selected, each controls a pane", /role="tablist"/.test(htmlT) && (htmlT.match(/role="tab"/g) || []).length === 4
+    && (htmlT.match(/aria-selected="true"/g) || []).length === 1 && /role="tabpanel"/.test(htmlT) && /aria-controls="sourcesPane"/.test(htmlT) && /aria-controls="updatesPane"/.test(htmlT) && /aria-controls="historyPane"/.test(htmlT));
   check("the arrow keys, Home and End move between tabs", /ArrowRight/.test(source) && /ArrowLeft/.test(source) && /"Home"/.test(source) && /"End"/.test(source));
   check("the writes to the hub's web routes carry the header the server requires, and removing history asks first",
     /"X-Jarvis-Hub": "1"/.test(source) && /askFirst\("Remove from the history\?"/.test(source) && /askFirst\("Clear old history\?"/.test(source) && /dry_run: true/.test(source));
-  check("the panel only talks to /api/hub/ routes it knows", [...source.matchAll(/["'`]\/api\/([a-z\/\-]+)/g)].every((m) => /^hub\/(stream|list|sources|dismiss|history|history\/remove|history\/clear|redownload|reorder|torrent\/(files|add)|thumb\/|file\/)/.test(m[1])));
+  check("the panel only talks to /api/hub/ routes it knows", [...source.matchAll(/["'`]\/api\/([a-z\/\-]+)/g)].every((m) => /^hub\/(stream|list|sources|updates|dismiss|history|history\/remove|history\/clear|redownload|reorder|torrent\/(files|add)|thumb\/|file\/)/.test(m[1])));
   check("the live stream falls back to polling: errors, a silent stream and a `down` message all hand over", /es\.onerror = liveDown/.test(source) && /addEventListener\("down", liveDown\)/.test(source) && /45000/.test(source));
   check("while the stream is live the poll only refreshes the summary", /streaming \? \{ limit: 1, summary: true \}/.test(source));
   check("a row drag, or a whole-group drag, doesn't turn into 'links dropped on the panel'", /if \(S\.dragId \|\| S\.dragGroup\) return;/.test(source));
@@ -610,28 +610,28 @@ check("Clear finished takes cancelled hub rows but leaves failed ones (they may 
 
   // ---- dragging a whole group (the Batch header): the pure helper, then the wiring on the source
   const G = (id, gid, pr, at, o) => Object.assign({ id: id, group_id: gid, owner: "hub", state: "queued", priority: pr, created_at: at }, o || {});
-  const grows = [G("a1", "A", 0, 1), G("a2", "A", 0, 2), G("b1", "B", 0, 3), G("b2", "B", 0, 4), G("c1", "C", 0, 5), G("x", null, 0, 6),
+  const dragRows = [G("a1", "A", 0, 1), G("a2", "A", 0, 2), G("b1", "B", 0, 3), G("b2", "B", 0, 4), G("c1", "C", 0, 5), G("x", null, 0, 6),
     G("d1", "D", 0, 7, { state: "downloading" })];
   const gorder = ["a1", "a2", "b1", "b2", "c1", "x"];
   check("the key of a section is g:<id>; anything else is no group", pure.groupIdOf("g:abc") === "abc" && pure.groupIdOf("loose") === "" && pure.groupIdOf("g:") === "" && pure.groupIdOf(null) === "");
-  check("a group's waiting rows, in the order the queue has them", eq(pure.groupWaiting(gorder, grows, "g:B"), ["b1", "b2"]) && eq(pure.groupWaiting(gorder, grows, "g:D"), []) && eq(pure.groupWaiting(gorder, grows, "g:zzz"), []));
+  check("a group's waiting rows, in the order the queue has them", eq(pure.groupWaiting(gorder, dragRows, "g:B"), ["b1", "b2"]) && eq(pure.groupWaiting(gorder, dragRows, "g:D"), []) && eq(pure.groupWaiting(gorder, dragRows, "g:zzz"), []));
   check("dropping group C on the TOP half of A puts C's block before A's first waiting row",
-    eq(pure.moveGroupInOrder(gorder, grows, "g:C", "g:A", false), ["c1", "a1", "a2", "b1", "b2", "x"]));
+    eq(pure.moveGroupInOrder(gorder, dragRows, "g:C", "g:A", false), ["c1", "a1", "a2", "b1", "b2", "x"]));
   check("dropping group A on the BOTTOM half of B puts A's block after B's last waiting row, A's own order kept",
-    eq(pure.moveGroupInOrder(gorder, grows, "g:A", "g:B", true), ["b1", "b2", "a1", "a2", "c1", "x"]));
+    eq(pure.moveGroupInOrder(gorder, dragRows, "g:A", "g:B", true), ["b1", "b2", "a1", "a2", "c1", "x"]));
   const mixed = ["a2", "b1", "a1", "x", "b2"];            // a group whose waiting rows are not next to each other still travels as one block, in its own order
-  check("a group split by other rows moves as one block and keeps its own order", eq(pure.moveGroupInOrder(mixed, grows, "g:A", "g:B", true), ["b1", "x", "b2", "a2", "a1"]));
-  const keep = gorder.slice(); pure.moveGroupInOrder(keep, grows, "g:C", "g:A", false); pure.stepGroupInOrder(keep, grows, "g:B", -1);
+  check("a group split by other rows moves as one block and keeps its own order", eq(pure.moveGroupInOrder(mixed, dragRows, "g:A", "g:B", true), ["b1", "x", "b2", "a2", "a1"]));
+  const keep = gorder.slice(); pure.moveGroupInOrder(keep, dragRows, "g:C", "g:A", false); pure.stepGroupInOrder(keep, dragRows, "g:B", -1);
   check("moving a group never changes the list it was given", eq(keep, gorder));
   check("an unknown key, the same group twice, a loose row and a group with no waiting rows leave the order as it was",
-    eq(pure.moveGroupInOrder(gorder, grows, "g:nope", "g:A", false), gorder) && eq(pure.moveGroupInOrder(gorder, grows, "g:A", "g:nope", false), gorder)
-    && eq(pure.moveGroupInOrder(gorder, grows, "g:A", "g:A", true), gorder) && eq(pure.moveGroupInOrder(gorder, grows, "loose", "g:A", false), gorder)
-    && eq(pure.moveGroupInOrder(gorder, grows, "g:D", "g:A", false), gorder) && eq(pure.moveGroupInOrder(gorder, grows, "g:A", "g:D", true), gorder)
-    && eq(pure.moveGroupInOrder(null, grows, "g:A", "g:B", true), []));
-  check("the groups are listed in the order their first waiting row comes", eq(pure.groupOrderKeys(gorder, grows), ["g:A", "g:B", "g:C"]));
+    eq(pure.moveGroupInOrder(gorder, dragRows, "g:nope", "g:A", false), gorder) && eq(pure.moveGroupInOrder(gorder, dragRows, "g:A", "g:nope", false), gorder)
+    && eq(pure.moveGroupInOrder(gorder, dragRows, "g:A", "g:A", true), gorder) && eq(pure.moveGroupInOrder(gorder, dragRows, "loose", "g:A", false), gorder)
+    && eq(pure.moveGroupInOrder(gorder, dragRows, "g:D", "g:A", false), gorder) && eq(pure.moveGroupInOrder(gorder, dragRows, "g:A", "g:D", true), gorder)
+    && eq(pure.moveGroupInOrder(null, dragRows, "g:A", "g:B", true), []));
+  check("the groups are listed in the order their first waiting row comes", eq(pure.groupOrderKeys(gorder, dragRows), ["g:A", "g:B", "g:C"]));
   check("one group up or down, and nothing at either end or for a group that isn't waiting",
-    eq(pure.stepGroupInOrder(gorder, grows, "g:B", -1), ["b1", "b2", "a1", "a2", "c1", "x"]) && eq(pure.stepGroupInOrder(gorder, grows, "g:B", 1), ["a1", "a2", "c1", "b1", "b2", "x"])
-    && pure.stepGroupInOrder(gorder, grows, "g:A", -1) === null && pure.stepGroupInOrder(gorder, grows, "g:C", 1) === null && pure.stepGroupInOrder(gorder, grows, "g:D", 1) === null);
+    eq(pure.stepGroupInOrder(gorder, dragRows, "g:B", -1), ["b1", "b2", "a1", "a2", "c1", "x"]) && eq(pure.stepGroupInOrder(gorder, dragRows, "g:B", 1), ["a1", "a2", "c1", "b1", "b2", "x"])
+    && pure.stepGroupInOrder(gorder, dragRows, "g:A", -1) === null && pure.stepGroupInOrder(gorder, dragRows, "g:C", 1) === null && pure.stepGroupInOrder(gorder, dragRows, "g:D", 1) === null);
   check("a group can be dragged only when one of its rows is waiting and the live order is known",
     pure.canReorderGroup([G("a", "A", 0, 1)], true) && !pure.canReorderGroup([G("a", "A", 0, 1)], false) && !pure.canReorderGroup([G("a", "A", 0, 1, { state: "downloading" })], true)
     && !pure.canReorderGroup([], true) && pure.canReorderGroup([G("a", "A", 0, 1, { state: "done" }), G("b", "A", 0, 2)], true));

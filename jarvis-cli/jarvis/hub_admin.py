@@ -10,7 +10,11 @@ One verb serves three front-end pieces, the way `calendar-admin` serves the Cale
   * the Stremio status block (`stremio_status`, read-only), the Locate... button's save
     (`stremio_save`: the owner's paths into ~/.jarvis/stremio.json; N9, brief 12) and the Start button
     (`stremio_start`: the server only, through `tool_stack_start`; brief 19);
-  * hiding a finished or lost provider row (`dismiss`; brief 19).  It hides, it deletes no row and no file.
+  * hiding a finished or lost provider row (`dismiss`; brief 19).  It hides, it deletes no row and no file;
+  * the Updates tab (N23 part f): `updates` (read: the stored findings and how each provider's checks are going),
+    `updates_check` (Check now: sets a flag the daemon's runner picks up; nothing is started here) and
+    `updates_dismiss` (Ignore this version: hides one finding).  The logic is `hub/updates_admin.py`; nothing
+    here installs, upgrades or removes anything.
 
 It is NOT a command to type.  The request is one JSON object on stdin, the answer is one JSON
 object on stdout (`watch` prints one JSON object per line until it is stopped).  `{"ok": false,
@@ -44,10 +48,10 @@ _UNATTENDED_VARS = ("JARVIS_CHANNEL", "JARVIS_CHANNEL_SENDER", "JARVIS_SCHEDULED
 _UNATTENDED_MESSAGE = "The Download Hub's History and queue controls can only be used from the Jarvis page itself."
 
 # `sources` (brief 24) is the Sources tab: every engine and every provider with an honest status.  Read-only.
-READ_OPS = ("card", "list", "settings", "history", "file", "thumb", "stremio_status", "sources", "qbittorrent_status")
+READ_OPS = ("card", "list", "settings", "history", "file", "thumb", "stremio_status", "sources", "qbittorrent_status", "updates")
 # `dismiss` (brief 19) hides a provider row that is unknown or finished; `stremio_start` (brief 19) is the Start button.
 WRITE_OPS = ("history_remove", "history_clear", "redownload", "reorder", "stremio_save", "dismiss", "stremio_start", "stremio_account",
-             "qbittorrent_save")
+             "qbittorrent_save", "updates_check", "updates_dismiss")
 OPS = READ_OPS + WRITE_OPS
 # N14 (the path picker, jarvis/hub_browse.py): list one folder, and make one new folder.  Neither reads a file's
 # contents.  Both are for the Jarvis page's own picker, so both refuse an unattended process (below).
@@ -409,6 +413,11 @@ def _overridden_by():
         return {}
 
 
+def _update_settings(store):
+    from .hub import updates_admin
+    return updates_admin.provider_update_settings(store)
+
+
 def settings_payload(store=None):
     """What the Settings tab's Downloads section needs and nothing more: the merged settings, which
     keys `dl_prefs` / `dl_settings` may write (read from hub/settings.py, never copied), the
@@ -426,7 +435,10 @@ def settings_payload(store=None):
                 "writable": sorted(settings_mod.WRITABLE), "prefs_writable": sorted(settings_mod.PREFS_WRITABLE),
                 "events": list(settings_mod.EVENTS), "open_modes": list(settings_mod.OPEN_MODES),
                 "overridden_by": _overridden_by(),
-                "providers": service.list_providers(store).get("providers", [])}
+                "providers": service.list_providers(store).get("providers", []),
+                # N23: the two update settings of the providers that have an update check (read-only here; they are
+                # written with dl_provider_prefs like the other provider settings)
+                "update_settings": _update_settings(store)}
     except Exception as exc:  # noqa: BLE001
         return _err("couldn't read the settings: %s" % exc)
 
@@ -1301,6 +1313,9 @@ def admin(op, request=None, store=None):
             return torrent_files(request, store)
         if op == "torrent_add":
             return torrent_add(request, store)
+        if op in ("updates", "updates_check", "updates_dismiss"):
+            from .hub import updates_admin
+            return getattr(updates_admin, op)(request, store=store)
         if op == "browse":
             from . import hub_browse
             return hub_browse.browse(request, store=store)

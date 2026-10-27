@@ -162,6 +162,26 @@
   }
   function providerSettingArgs(id, key, value) { return { id: id, settings: { [key]: value } }; }
 
+  // N23 part e / f: the two update settings of a provider that has an update check, or has its checks switched OFF (the Updates tab
+  // leaves such a provider out completely, so this row is the way back).  They come from the settings answer's `update_settings`
+  // (hub_admin.settings_payload), not from the provider's own `settings`, and are written with dl_provider_prefs like the rows above;
+  // the hub's validator owns the range (`min` is only an input hint).  A provider the hub did not list gets no rows.
+  function updateSettingRows(p, info) {
+    const list = info && Array.isArray(info.providers) ? info.providers : [];
+    const mine = p ? list.find((u) => u && u.provider === p.id) : null;
+    if (!mine) return [];
+    const lim = (info && info.limits) || {};
+    const name = String(p.label || p.id);
+    const rows = [{ key: "update_checks", label: name + ": look for updates", type: "bool", value: mine.update_checks === true,
+      help: "When off, the Updates tab does not list this program and nothing checks it. A check only looks; it never installs anything." }];
+    if (typeof mine.update_interval_h === "number") {
+      rows.push({ key: "update_interval_h", label: name + ": look for updates every", type: "float", unit: "hours", value: mine.update_interval_h,
+        min: typeof lim.interval_h_min === "number" ? lim.interval_h_min : 0.5,
+        help: "Hours between two automatic checks. Check now in the Updates tab works at any time." });
+    }
+    return rows;
+  }
+
   // ---- the qBittorrent connection card: pure half (the DOM half is below) ---------------------------------------------------
   // The card edits only the CONNECTION in ~/.jarvis/qbittorrent.json through GET / POST /api/hub/qbittorrent (hub_admin
   // qbittorrent_status / qbittorrent_save): the switch, the Web UI address, the user name and the password.  The hub's validator
@@ -1559,7 +1579,7 @@
           ui.flash(onStatus, "Saved", "ok");
         }, onStatus);
         kids.push(plainRow(p.label || p.id, p.read_only ? "Shows its downloads here; has no controls." : "", on.el, onStatus, mark, "switch on off enabled").node);
-        providerSettingRows(p).forEach((f) => {
+        providerSettingRows(p).concat(updateSettingRows(p, payload.update_settings)).forEach((f) => {
           const stStatus = h("span", { class: "prefs-row__status" });
           const ctl = ui.makeControl({ type: f.type, min: f.min, unit: f.unit }, f.value, async (v) => {
             await runHubTool(PROVIDER_TOOL, providerSettingArgs(p.id, f.key, v));       // the hub's own error text reaches the row as it is
@@ -1705,7 +1725,7 @@
     FIELDS: FIELDS, planRows: planRows, extraRows: extraRows, toolFor: toolFor, getPath: getPath, hostsToText: hostsToText,
     textToHosts: textToHosts, anchorOf: anchorOf, daysChoice: daysChoice, windowsToModel: windowsToModel, modelToWindows: modelToWindows,
     extToModel: extToModel, modelToExt: modelToExt, isEventPath: isEventPath,
-    PROVIDER_SETTING_FIELDS: PROVIDER_SETTING_FIELDS, providerSettingRows: providerSettingRows, providerSettingArgs: providerSettingArgs,
+    PROVIDER_SETTING_FIELDS: PROVIDER_SETTING_FIELDS, providerSettingRows: providerSettingRows, providerSettingArgs: providerSettingArgs, updateSettingRows: updateSettingRows,
     overrideOf: overrideOf, retentionNeedsConfirm: retentionNeedsConfirm, retentionCutoff: retentionCutoff, retentionWarning: retentionWarning,
     OVERRIDE_TEXT: OVERRIDE_TEXT, RETENTION_PATH: RETENTION_PATH,
     stremioModel: stremioModel, stremioFacts: stremioFacts, diagnosticFor: diagnosticFor, folderOf: folderOf, pickOptions: pickOptions,
