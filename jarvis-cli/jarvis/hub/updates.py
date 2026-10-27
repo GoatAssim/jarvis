@@ -87,11 +87,14 @@ def clean_finding(raw):
     if not local:
         return None, "a finding needs an id"
     title = states.clean_text(raw.get("title"), MAX_TITLE) or local
+    size = states.clean_int(raw.get("size_bytes"), 0, None)      # clean_int clamps to `hi`; an absurd size is no size
+    if size is not None and size > MAX_SIZE:
+        size = None
     return local, {
         "title": title,
         "installed": states.clean_text(_text(raw.get("installed")), MAX_VERSION) or "",
         "available": states.clean_text(_text(raw.get("available")), MAX_VERSION) or "",
-        "size_bytes": states.clean_int(raw.get("size_bytes"), 0, MAX_SIZE),
+        "size_bytes": size,
         "source": states.clean_text(_text(raw.get("source")), MAX_SOURCE) or "",
         "detail": states.clean_detail(raw.get("detail"))[:MAX_DETAIL_ROWS],
     }
@@ -223,8 +226,11 @@ def age_words(seconds):
 
 
 def _is_running(row, now):
+    """Shown as 'checking' only while the check is inside its timeout.  After that the runner has given up on
+    it (the mark is kept so a manual request still says 'already checking' until the hung thread ends), and
+    the health line must say what happened, not 'checking'."""
     running = (row or {}).get("running_since")
-    return running is not None and now - float(running) < RUNNING_STALE_S
+    return running is not None and now - float(running) < CHECK_TIMEOUT_S
 
 
 def _finding_out(f, now, with_hidden=False):

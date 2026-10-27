@@ -14,7 +14,10 @@ What it checks (N15, N16, N17):
     accepted, the stored priorities follow, and the order survives a reload;
   * a row that cannot be reordered says why in its tooltip;
   * the toggle and Cancel measure the same height, on one line, on every state that shows both;
-  * the Sources tab lists every engine and every provider with its state.
+  * the Sources tab lists every engine and every provider with its state;
+  * (N24) a whole group can be dragged by its header (grip, drop on the top or bottom half, "Move group up / down"), a
+    group with nothing waiting has no grip and says why, and a torrent group's header offers Pause / Resume / Cancel and
+    "Add more files", which opens the file picker (here with no Stremio server: it must say so in words, not break).
 
 If anything it needs is missing (Playwright, a browser engine, node, web/node_modules) it PRINTS a line saying
 so and exits 0.  A skip is never silent, and it is not a pass: nothing was seen in a browser.
@@ -658,6 +661,128 @@ def section_history(page):
     check("Clear filters brings the list back", ok, st)
 
 
+# --------------------------------------------------------------------------- N24: a whole group, and the torrent picker
+
+GROUP_KEYS = {}
+
+
+def seed_groups():
+    """Two ordinary groups with waiting rows, one group with nothing waiting, and a torrent group of three chosen files."""
+    from jarvis.hub.store import Store
+
+    st = Store()
+    for name, count in (("G1 batch", 2), ("G2 batch", 2)):
+        gid = st.ensure_group(name)
+        GROUP_KEYS[name] = gid
+        for i in range(count):
+            st.add_item(engine="http", source_url="http://example.invalid/%s-%d.bin" % (name[:2], i), title="%s file %d" % (name[:2], i + 1), group_id=gid)
+            time.sleep(0.05)
+    done_gid = st.ensure_group("G3 finished")
+    GROUP_KEYS["G3 finished"] = done_gid
+    item = st.add_item(engine="http", source_url="http://example.invalid/g3.bin", title="G3 file 1", group_id=done_gid)[0]
+    con = sqlite3.connect(str(st.path))
+    con.execute("UPDATE items SET state='done', finished_at=? WHERE id=?", (time.time(), item["id"]))
+    con.commit()
+    con.close()
+    digest = "ab" * 20
+    tid = st.ensure_group("Show S01", kind="torrent", meta={"infohash": digest, "name": "Show S01", "files": 23, "folder": "Show S01", "single": False})
+    GROUP_KEYS["Show S01"] = tid
+    for i in range(3):
+        st.add_item(engine="stremio", source_url="magnet:?xt=urn:btih:%s&so=%d" % (digest, i), title="Show S01E0%d.mkv" % (i + 1), group_id=tid,
+                    options={"subdir": "Show S01", "filename": "Show S01E0%d.mkv" % (i + 1)})
+        time.sleep(0.05)
+
+
+def header(page, text):
+    return page.locator(".section[data-group]", has_text=text).first
+
+
+def group_titles():
+    """The waiting rows of the seeded groups, in the order the hub will run them."""
+    from jarvis.hub.store import Store
+
+    rows = Store().list_items(order="queue", owner="hub", states_in=("queued",))
+    return [r["title"] for r in rows if r["title"][:2] in ("G1", "G2")]
+
+
+def wait_group_order(page, want, ms=4000):
+    deadline = time.time() + ms / 1000.0
+    got = None
+    while time.time() < deadline:
+        got = group_titles()
+        if got == want:
+            return True, got
+        page.wait_for_timeout(100)
+    return got == want, got
+
+
+def synthetic_group_drag(page, source, target, after):
+    page.evaluate("""([src, dst, after]) => {
+        const find = (t) => Array.from(__hubRoot().querySelectorAll('.section[data-group]')).find((h) => h.textContent.indexOf(t) !== -1);
+        const a = find(src), b = find(dst);
+        const dt = new DataTransfer();
+        const box = b.getBoundingClientRect();
+        const y = after ? box.top + box.height * 0.8 : box.top + box.height * 0.2;
+        const ev = (type, target) => target.dispatchEvent(new DragEvent(type, { bubbles: true, cancelable: true, dataTransfer: dt, clientX: box.left + 20, clientY: y }));
+        ev('dragstart', a); ev('dragenter', b); ev('dragover', b); ev('drop', b); ev('dragend', a);
+    }""", [source, target, after])
+
+
+def section_groups(page):
+    print("\n-- N24: dragging a whole group, and the torrent picker --")
+    seed_groups()
+    page.wait_for_selector(".section[data-group]", timeout=10000)
+    page.wait_for_timeout(1500)
+    ok, got = wait_group_order(page, ["G1 file 1", "G1 file 2", "G2 file 1", "G2 file 2"], 3000)
+    check("two groups with waiting rows start in the order they were queued", ok, got)
+    info = page.evaluate("""() => Array.from(__hubRoot().querySelectorAll('.section[data-group]')).map((h) => ({
+        text: h.textContent, draggable: h.getAttribute('draggable'), title: h.getAttribute('title') || '', grip: !!h.querySelector('.section__grip'),
+        buttons: Array.from(h.querySelectorAll('.section__acts button')).map((b) => (b.getAttribute('aria-label') || b.textContent))}))""")
+    g1 = next(i for i in info if "G1 batch" in i["text"])
+    g3 = next(i for i in info if "G3 finished" in i["text"])
+    check("a group with waiting rows has a grip, is draggable and has both Move group buttons", g1["draggable"] == "true" and g1["grip"]
+          and any(b.startswith("Move group up") for b in g1["buttons"]) and any(b.startswith("Move group down") for b in g1["buttons"]), g1)
+    check("a group with nothing waiting has no grip, is not draggable and says why in the wording of the rows",
+          g3["draggable"] == "false" and not g3["grip"] and "Only downloads that are still waiting can be put in a different order" in g3["title"], g3)
+    check("the first group's Move group up is off", header(page, "G1 batch").get_by_role("button", name="Move group up", exact=False).is_disabled())
+
+    synthetic_group_drag(page, "G2 batch", "G1 batch", False)
+    ok, got = wait_group_order(page, ["G2 file 1", "G2 file 2", "G1 file 1", "G1 file 2"])
+    check("dropping group 2 on the TOP half of group 1 moves its rows as one block, in their own order, before group 1's", ok, got)
+    synthetic_group_drag(page, "G2 batch", "G1 batch", True)
+    ok, got = wait_group_order(page, ["G1 file 1", "G1 file 2", "G2 file 1", "G2 file 2"])
+    check("dropping it on the BOTTOM half puts it after group 1's last waiting row", ok, got)
+    synthetic_group_drag(page, "G1 batch", "G3 finished", True)
+    page.wait_for_timeout(600)
+    check("dropping on a group with nothing waiting changes nothing", group_titles() == ["G1 file 1", "G1 file 2", "G2 file 1", "G2 file 2"], group_titles())
+    header(page, "G1 batch").get_by_role("button", name="Move group down", exact=False).click()
+    ok, got = wait_group_order(page, ["G2 file 1", "G2 file 2", "G1 file 1", "G1 file 2"])
+    check("the keyboard route: Move group down puts group 1 after group 2", ok, got)
+    page.reload()
+    open_panel(page)
+    ok, got = wait_group_order(page, ["G2 file 1", "G2 file 2", "G1 file 1", "G1 file 2"], 1500)
+    check("and the order survives a reload", ok, got)
+
+    tor = page.evaluate("""() => { const h = Array.from(__hubRoot().querySelectorAll('.section[data-group]')).find((x) => x.textContent.indexOf('Show S01') !== -1);
+        return h ? { text: h.textContent, buttons: Array.from(h.querySelectorAll('.section__acts button')).map((b) => b.textContent) } : null; }""")
+    check("a torrent group's header says how many files were chosen out of how many the torrent has", tor and "3 of 23 files" in tor["text"], tor)
+    check("and offers Pause, Resume, Cancel and Add more files (an ordinary batch keeps Retry)", tor and all(w in tor["buttons"] for w in ("Pause", "Resume", "Cancel", "Add more files")) and "Retry" not in tor["buttons"], tor)
+    header(page, "Show S01").get_by_role("button", name="Add more files", exact=False).click()
+    page.wait_for_selector("#picker:not([hidden])", timeout=5000)
+    deadline = time.time() + 30
+    text = ""
+    while time.time() < deadline:
+        text = page.evaluate("(__hubRoot().querySelector('.picker__status') || {}).textContent || ''")
+        if text and not text.startswith("Reading the file list"):
+            break
+        page.wait_for_timeout(300)
+    check("the picker opens and, with no Stremio server here, answers in words instead of breaking", text and "stack_start" in text or "isn't running" in text or "couldn't" in text, text)
+    check("the add form is hidden while the picker is open", page.evaluate("__hubRoot().querySelector('#addForm').hidden"))
+    page.evaluate("Array.from(__hubRoot().querySelectorAll('#picker button')).find((b) => b.textContent === 'Back').click()")
+    page.wait_for_timeout(300)
+    check("Back closes it", page.evaluate("__hubRoot().querySelector('#picker').hidden"))
+
+
 def main():
     start_server()
     time.sleep(6)                       # the scheduler's startup tick autostarts daemons a moment after the server answers
@@ -679,6 +804,7 @@ def main():
         section_sources(page, ids)
         section_settings(page)
         section_history(page)
+        section_groups(page)
         check("no page error was raised in the whole run", not errors, errors[:3])
         browser.close()
     print("\nengine: %s; server: the real web/server.js on %s; back end: the real hub_admin and store in %s" % (engine, BASE, HOME))

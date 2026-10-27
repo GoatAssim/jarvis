@@ -397,6 +397,8 @@ function groupRows(rows, mode) {
   sections.forEach((s) => {
     const done = s.rows.filter((r) => r.state === "done").length;
     s.meta = s.rows.length > 1 || mode === "group" ? done + "/" + s.rows.length + " done" : "";
+    const tor = mode === "group" ? s.rows.find((r) => r.torrent) : null;     // N24: the files chosen from one torrent
+    if (tor) { s.torrent = tor.torrent; s.meta = torrentGroupMeta(s.rows, tor.torrent); }
   });
   if (loose.length) sections.push({ key: "loose", title: "Single downloads", meta: "", rows: loose });
   return sections;
@@ -1026,6 +1028,157 @@ function reorderNote(row, live) {
   return "";
 }
 
+
+// ---- dragging a whole group (the "Group by: Batch" header) --------------------------------------------------
+// A section key is "g:<group id>".  A group moves as ONE block of its waiting rows; `ids` is the waiting queue in
+// the order it will run (queueOrder), `rows` the panel's rows (they say which group a row is in).  All pure.
+
+function groupIdOf(key) {
+  const m = /^g:(.+)$/.exec(String(key || ""));
+  return m ? m[1] : "";
+}
+// The ids of the waiting rows of one group, in the order `ids` has them.
+function groupWaiting(ids, rows, key) {
+  const gid = groupIdOf(key);
+  if (!gid) return [];
+  const mine = {};
+  (rows || []).forEach((r) => { if (r && r.group_id === gid) mine[r.id] = true; });
+  return (ids || []).filter((id) => mine[id] === true);
+}
+// The groups that have waiting rows, in the order their first waiting row comes.
+function groupOrderKeys(ids, rows) {
+  const by = {};
+  (rows || []).forEach((r) => { if (r && r.group_id) by[r.id] = r.group_id; });
+  const out = [];
+  (ids || []).forEach((id) => { const g = by[id]; if (g && out.indexOf("g:" + g) === -1) out.push("g:" + g); });
+  return out;
+}
+// `ids` with group `groupKey`'s waiting rows moved, as one block and in their own order, before the first waiting row of
+// `targetKey` (or after its last one when `after`).  A key that isn't a group, the same group twice, a group with no
+// waiting rows on either side: the order comes back unchanged.  Never mutates `ids`.
+function moveGroupInOrder(ids, rows, groupKey, targetKey, after) {
+  const list = (ids || []).slice();
+  if (!groupIdOf(groupKey) || !groupIdOf(targetKey) || groupKey === targetKey) return list;
+  const block = groupWaiting(list, rows, groupKey);
+  const target = groupWaiting(list, rows, targetKey);
+  if (!block.length || !target.length) return list;
+  const rest = list.filter((id) => block.indexOf(id) === -1);
+  const at = rest.indexOf(after ? target[target.length - 1] : target[0]);
+  if (at === -1) return list;
+  rest.splice.apply(rest, [after ? at + 1 : at, 0].concat(block));
+  return rest;
+}
+// One group up (-1) or down (+1) among the groups that are waiting, or null at the end / for a group that isn't waiting.
+function stepGroupInOrder(ids, rows, groupKey, delta) {
+  const keys = groupOrderKeys(ids, rows);
+  const i = keys.indexOf(groupKey);
+  const j = i + delta;
+  if (i === -1 || j < 0 || j >= keys.length) return null;
+  const next = moveGroupInOrder(ids, rows, groupKey, keys[j], delta > 0);
+  return JSON.stringify(next) === JSON.stringify(ids) ? null : next;
+}
+// A group may be dragged only when one of its rows may (canReorder): waiting, the hub's own, the live order known.
+function canReorderGroup(rows, live) {
+  return (rows || []).some((r) => canReorder(r, live));
+}
+// Why a group header has no grip and no arrows, in the wording of reorderNote.  "" when it has them.
+function groupReorderNote(rows, live) {
+  if (canReorderGroup(rows, live)) return "";
+  if (!live) return "Moving a waiting download needs the live connection to the hub, and it is not up right now. It comes back by itself.";
+  return "Only downloads that are still waiting can be put in a different order. Nothing in this group is waiting.";
+}
+
+// ---- the torrent file picker (N24) ---------------------------------------------------------------------------
+// The hub sends a torrent's files as [{index, path, size, video?, sample?, refused?, in_group?}] (paths are already cleaned
+// and cut; they are still only DATA here: everything is drawn with textContent, never as HTML).  All pure.
+
+const PICK_MAX = 100;
+const PICK_MARGIN = 1.1;
+
+// The text of the add box as ONE torrent source (a magnet, a 40-letter hash, a .torrent link or the full path of a
+// .torrent file on this PC), else "".
+function torrentSource(text) {
+  let t = String(text || "").trim();
+  if (!t || t.length > 4096 || /[\r\n]/.test(t)) return "";
+  t = t.replace(/^"(.*)"$/, "$1");
+  if (/^magnet:\?\S+$/i.test(t) || /^[0-9a-f]{40}$/i.test(t)) return t;
+  if (/^https?:\/\/\S+\.torrent(\?\S*)?$/i.test(t)) return t;
+  if (/^(?:[A-Za-z]:[\\/]|\/|~[\\/]|\\\\).+\.torrent$/i.test(t)) return t;
+  return "";
+}
+// A file the person may tick: not refused (an unsafe name), not already in the group, not empty.
+function selectableFile(f) {
+  return !!f && !f.refused && !f.in_group && (num(f.size) || 0) > 0;
+}
+// The files as folders: {name, path, dirs: [], files: [], ids: [selectable indexes below], count, size}.  Folder names come
+// from the swarm: the lookup table has NO prototype, so a folder called "__proto__" or "constructor" is just a name.
+function torrentTree(files) {
+  const mk = (name, path) => ({ name: name, path: path, dirs: [], files: [], ids: [], count: 0, size: 0, map: Object.create(null) });
+  const root = mk("", "");
+  (files || []).forEach((f) => {
+    const parts = String(f.path || "").split("/");
+    const leaf = parts.pop();
+    let node = root;
+    parts.forEach((part) => {
+      let child = node.map[part];
+      if (!child) { child = mk(part, node.path ? node.path + "/" + part : part); node.map[part] = child; node.dirs.push(child); }
+      node = child;
+    });
+    node.files.push(Object.assign({}, f, { leaf: leaf }));
+  });
+  (function total(node) {
+    node.files.forEach((f) => { node.count += 1; node.size += num(f.size) || 0; if (selectableFile(f)) node.ids.push(f.index); });
+    node.dirs.forEach((d) => { total(d); node.count += d.count; node.size += d.size; d.ids.forEach((i) => node.ids.push(i)); });
+  })(root);
+  return root;
+}
+// The quick choices: which indexes each one ticks.
+const PICK_QUICK = [["videos", "All videos"], ["biggest", "Biggest video"], ["nosample", "All but samples"], ["all", "Everything"], ["none", "None"]];
+function pickerQuick(files, kind) {
+  const ok = (files || []).filter(selectableFile);
+  const videos = ok.filter((f) => f.video && !f.sample);
+  if (kind === "videos") return videos.map((f) => f.index);
+  if (kind === "nosample") return ok.filter((f) => !f.sample).map((f) => f.index);
+  if (kind === "all") return ok.map((f) => f.index);
+  if (kind === "biggest") {
+    const pool = videos.length ? videos : ok;
+    if (!pool.length) return [];
+    return [pool.reduce((a, b) => ((num(b.size) || 0) > (num(a.size) || 0) ? b : a)).index];
+  }
+  return [];
+}
+function pickerFilter(files, query) {
+  const q = String(query || "").trim().toLowerCase();
+  const list = (files || []).slice();
+  return q ? list.filter((f) => String(f.path || "").toLowerCase().indexOf(q) !== -1) : list;
+}
+// What is ticked: how many, how big, and whether it breaks a limit (100 files a go; the free space with the hub's margin).
+function pickerTotals(files, selected, free) {
+  const sel = selected || {};
+  let count = 0;
+  let bytes = 0;
+  (files || []).forEach((f) => { if (sel[f.index] && selectableFile(f)) { count += 1; bytes += num(f.size) || 0; } });
+  const room = num(free);
+  return { count: count, bytes: bytes, free: room, tooMany: count > PICK_MAX, tooBig: room !== null && bytes * PICK_MARGIN > room };
+}
+function pickerTotalText(t) {
+  if (!t.count) return "Nothing chosen yet";
+  return t.count + (t.count === 1 ? " file" : " files") + DOT + fmtBytes(t.bytes) + (t.free !== null ? " of " + fmtBytes(t.free) + " free" : "");
+}
+// "" when Add may go; else the reason it may not (shown under the total, and the button is off).
+function pickerBlock(t) {
+  if (!t.count) return "Tick at least one file.";
+  if (t.tooMany) return "That is more than " + PICK_MAX + " files. Untick some; add the rest in a second go.";
+  if (t.tooBig) return "These files need more room than is free. Untick some, or free some space.";
+  return "";
+}
+// The header of a torrent group: how many files were chosen out of how many the torrent has.
+function torrentGroupMeta(rows, info) {
+  const done = (rows || []).filter((r) => r.state === "done").length;
+  const of = info && num(info.files) !== null && info.files > rows.length ? DOT + rows.length + " of " + info.files + " files" : "";
+  return done + "/" + rows.length + " done" + of;
+}
+
 const pure = {
   ACTIVE, FINAL, VIEWS, KIND_ICON, fmtBytes, fmtSpeed, fmtEta, fmtAgo, percentText, speedText, etaText,
   sizeText, statusText, barLook, rowActions, sourceKey, sourceLabel, viewMatches, viewCounts,
@@ -1040,6 +1193,8 @@ const pure = {
   cardNote, DISMISSABLE, DISMISS_TIP, CLEAR_TIP, SHOW_AGAIN_TIP, SHOW_HIDDEN_TIP, isHidden, canDismiss, isDimmed, dismissableRows, mergeHidden, dismissNotice,
   HISTORY_STATES, HISTORY_SORTS, HISTORY_PAGE, HISTORY_REDOWNLOAD_MAX, historyGroup, historyGroups, historyRange, historyQuery, historyFiltersActive, historySummaryText, fmtTook, historyDuration, historyDestName, historyReason, historyRowModel, selectionRange, historyRemoveText, historyRedownloadText, historyRetentionNote, historyEmpty, csvCell, historyCsv, historyJson, historyMeta, providerTone, providerFacts, providerBadge, ENGINE_WORDS, ENGINE_TONES, CONFIGURE_ANCHORS, engineWord, engineTone, engineLine, engineConfigure, engineSettingsNote, sourcesSummary,
   queueOrder, moveInOrder, stepInOrder, canReorder, reorderNote, applyOrder,
+  groupIdOf, groupWaiting, groupOrderKeys, moveGroupInOrder, stepGroupInOrder, canReorderGroup, groupReorderNote,
+  PICK_MAX, PICK_QUICK, torrentSource, selectableFile, torrentTree, pickerQuick, pickerFilter, pickerTotals, pickerTotalText, pickerBlock, torrentGroupMeta,
 };
 if (host && host.__hubPureOnly) return pure;
 
@@ -1057,7 +1212,7 @@ const S = {
   acting: {},                       // id -> { from, doing, until }: a Pause / Resume / Retry just pressed
   hubPrefs: null,
   saving: false,
-  tab: "downloads", live: false, liveAt: 0, es: null, liveTimer: 0, dragId: "",
+  tab: "downloads", live: false, liveAt: 0, es: null, liveTimer: 0, dragId: "", dragGroup: "", picker: null,
   sources: null, srcTimer: 0, srcLoaded: false, srcBusy: false,
   // History (brief 25): the rows loaded so far (a page at a time), the cursor of the next page, the hub's summary of the whole
   // filtered set, the filters, the selected ids and how much of the list is already drawn.
@@ -1348,14 +1503,40 @@ function sectionHeader(section) {
     }),
     el("span", { cls: "section__t", text: label, on: { click: flip } }),
   ];
+  let head = null;
   // Batch headers get the group-wide controls: the same tools, aimed at the whole batch.
   if (S.groupBy === "group" && /^g:/.test(section.key)) {
     const gid = section.key.slice(2);
+    const reorderable = canReorderGroup(section.rows, S.live);
     const acts = el("span", { cls: "section__acts" });
-    [["pause", "Pause"], ["resume", "Resume"], ["retry", "Retry"]].forEach((a) => {
+    const verbs = section.torrent ? [["pause", "Pause"], ["resume", "Resume"], ["cancel", "Cancel"]] : [["pause", "Pause"], ["resume", "Resume"], ["retry", "Retry"]];
+    verbs.forEach((a) => {
       acts.appendChild(el("button", { cls: "btn", text: a[1], attrs: { type: "button" }, on: { click: () => groupAction(gid, a[0], a[1]) } }));
     });
+    if (section.torrent) {
+      acts.appendChild(el("button", {
+        cls: "btn", text: "Add more files", title: "Choose more files of this torrent",
+        attrs: { type: "button" }, on: { click: () => openTorrentGroup(section) },
+      }));
+    }
+    if (reorderable) {
+      const order = groupOrderKeys(queueOrder(S.rows), S.rows);
+      const at = order.indexOf(section.key);
+      [["\u2191", -1, "Move group up"], ["\u2193", 1, "Move group down"]].forEach((m) => {
+        const attrs = { type: "button", "aria-label": m[2] + ": " + section.title };
+        if (at === -1 || at + m[1] < 0 || at + m[1] >= order.length) attrs.disabled = "disabled";
+        acts.appendChild(el("button", { cls: "btn", text: m[0], title: m[2], attrs: attrs,
+          on: { click: (e) => { e.stopPropagation(); e.preventDefault(); moveGroup(section.key, m[1]); } } }));
+      });
+      kids.unshift(el("span", { cls: "section__grip", text: "\u22EE\u22EE", title: "Drag to change the order this group starts in", attrs: { "aria-hidden": "true" } }));
+    }
     kids.push(acts);
+    head = el("div", {
+      cls: "section", title: reorderable ? "" : groupReorderNote(section.rows, S.live),
+      attrs: { draggable: reorderable ? "true" : "false", "data-group": section.key },
+    }, kids);
+    wireGroupDrag(head, section.key, reorderable);
+    return head;
   }
   return el("div", { cls: "section" }, kids);
 }
@@ -1506,9 +1687,11 @@ function buildDetail(row, full) {
 
 function renderMid() {
   const row = selectedRow();
-  $("#addForm").hidden = !!row;
+  const picking = !!S.picker && !row;
+  $("#addForm").hidden = !!row || picking;
   $("#detail").hidden = !row;
-  $("#midTitle").textContent = row ? "Download" : "Add a download";
+  $("#picker").hidden = !picking;
+  $("#midTitle").textContent = row ? "Download" : (picking ? "Choose files" : "Add a download");
   renderAddExtras();
   renderDetailPrefs();
   if (!row) { S.sig.detail = ""; return; }
@@ -1687,9 +1870,11 @@ async function runAction(row, action) {
 }
 
 async function groupAction(gid, verb, label) {
+  // Cancel is asked about by the tool itself (dl_cancel confirms); on a torrent group it only touches unfinished files.
   const r = verb === "pause" ? await callTool("dl_pause", { group: gid })
     : verb === "resume" ? await callTool("dl_resume", { group: gid })
-      : await callTool("dl_retry", { group: gid });
+      : verb === "cancel" ? await callTool("dl_cancel", { group: gid })
+        : await callTool("dl_retry", { group: gid });
   reportControl(r, label);
   schedule(300);
 }
@@ -1774,6 +1959,7 @@ async function demoAction(action) {
 }
 
 function select(id) {
+  S.picker = null;
   S.selected = id;
   S.detail = null;
   render();
@@ -1781,6 +1967,7 @@ function select(id) {
 }
 
 function newDownload() {
+  S.picker = null;
   S.selected = null;
   S.detail = null;
   render();
@@ -1883,6 +2070,12 @@ async function submitAdd(ev) {
       const one = await callTool(c.tool, c.args);
       results.push(one);
       if (one && one.declined) break;
+      if (one && one.needs_clarification && one.torrent && c.args.magnet) {
+        // N24: a torrent with several files asked which to take: nothing was queued; the list opens instead
+        openPicker(c.args.magnet, "");
+        setHint(one.message || "This torrent has several files: choose which ones.", false);
+        return;
+      }
     }
     const r = mergeAddResults(results);
     if (r.declined) { setHint("Cancelled", false); return; }
@@ -2122,6 +2315,7 @@ function openSettings(anchor) {
 $("#addForm").addEventListener("submit", submitAdd);
 $("#addInput").addEventListener("input", () => {
   clearTimeout(hintTimer);
+  $("#addChoose").hidden = !torrentSource($("#addInput").value);       // N24: a torrent can be opened as a list of files
   const urls = extractInputs($("#addInput").value);
   if (!urls.length) { hintSeq++; setHint("", false); return; }
   hintTimer = setTimeout(() => previewHint(urls), 400);
@@ -2223,7 +2417,7 @@ const hub = $("#hub");
 hub.addEventListener("dragover", (e) => { e.preventDefault(); });
 hub.addEventListener("drop", (e) => {
   e.preventDefault();
-  if (S.dragId) return;                         // a queued row being reordered, not links being dropped
+  if (S.dragId || S.dragGroup) return;          // a queued row or a whole group being reordered, not links being dropped
   const dt = e.dataTransfer;
   const text = dt ? (dt.getData("text/uri-list") || dt.getData("text/plain")) : "";
   const urls = extractInputs(text);
@@ -2864,6 +3058,238 @@ function wireDrag(rowEl, row) {
     sendOrder(next);
   });
 }
+
+// ---- dragging a whole group, or moving it with the arrows (the Batch headers)
+
+function moveGroup(key, delta) {
+  const next = stepGroupInOrder(queueOrder(S.rows), S.rows, key, delta);
+  if (next) sendOrder(next);
+}
+
+// Every Batch header takes a drop; only a header with waiting rows can be picked up.  The drop goes to the same
+// reorder route a row's does (sendOrder): the group's waiting rows travel as one block (moveGroupInOrder).
+function wireGroupDrag(head, key, draggable) {
+  const clear = () => head.classList.remove("drop-before", "drop-after", "is-dragging");
+  if (draggable) {
+    head.addEventListener("dragstart", (e) => {
+      if (S.dragId) return;
+      S.dragGroup = key;
+      S.hold = Date.now() + 60000;                // don't rebuild the list under the drag
+      try { e.dataTransfer.setData("application/x-jarvis-hub-group", key); e.dataTransfer.effectAllowed = "move"; } catch (err) { /* old browser */ }
+      head.classList.add("is-dragging");
+    });
+    head.addEventListener("dragend", () => {
+      S.dragGroup = "";
+      S.hold = 0;
+      $("#list").querySelectorAll(".drop-before,.drop-after,.is-dragging").forEach((n) => n.classList.remove("drop-before", "drop-after", "is-dragging"));
+      render();
+    });
+  }
+  head.addEventListener("dragover", (e) => {
+    if (!S.dragGroup || S.dragGroup === key) return;
+    e.preventDefault();
+    const box = head.getBoundingClientRect();
+    const after = e.clientY > box.top + box.height / 2;
+    head.classList.toggle("drop-after", after);
+    head.classList.toggle("drop-before", !after);
+  });
+  head.addEventListener("dragleave", () => head.classList.remove("drop-before", "drop-after"));
+  head.addEventListener("drop", (e) => {
+    if (!S.dragGroup || S.dragGroup === key) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const after = head.classList.contains("drop-after");
+    const moving = S.dragGroup;
+    const order = queueOrder(S.rows);
+    clear();
+    S.dragGroup = "";
+    S.hold = 0;
+    if (!groupWaiting(order, S.rows, key).length) { toast("Drop it on a group that still has downloads waiting.", "warn"); render(); return; }
+    sendOrder(moveGroupInOrder(order, S.rows, moving, key, after));
+  });
+}
+
+// ---- the torrent file picker (N24): a folder tree with tick boxes, search, quick choices and a running total
+
+function openTorrentGroup(section) {
+  const info = section.torrent || {};
+  if (!/^[0-9a-f]{40}$/i.test(String(info.infohash || ""))) { toast("I can't tell which torrent this group came from.", "warn"); return; }
+  openPicker("magnet:?xt=urn:btih:" + info.infohash, section.key.slice(2), section.title);
+}
+
+function openPicker(source, group, name) {
+  const seq = (S.picker ? S.picker.seq : 0) + 1;
+  S.picker = { seq: seq, source: String(source || ""), group: group || "", name: name || "", loading: true, error: "", data: null,
+    sel: {}, search: "", open: {}, busy: false, shell: null };
+  S.selected = null;
+  S.detail = null;
+  render();
+  buildPickerShell();
+  drawPicker();
+  loadPicker(seq);
+}
+
+async function loadPicker(seq) {
+  const P = S.picker;
+  try {
+    const data = await hubFetch("/api/hub/torrent/files", { source: P.source });
+    if (!S.picker || S.picker.seq !== seq) return;
+    P.data = data;
+    P.loading = false;
+    if (!P.group && data.group) P.group = data.group;            // this torrent already has a group: the files join it
+    P.name = P.name || data.name || "";
+  } catch (err) {
+    if (!S.picker || S.picker.seq !== seq) return;
+    P.loading = false;
+    P.error = message(err);
+  }
+  drawPicker();
+}
+
+function closePicker() {
+  S.picker = null;
+  S.sig.detail = "";
+  render();
+}
+
+function buildPickerShell() {
+  const P = S.picker;
+  const box = $("#picker");
+  box.textContent = "";
+  const search = el("input", { cls: "search__input", attrs: { type: "search", spellcheck: "false", autocomplete: "off", "aria-label": "Search the files", placeholder: "Search the files\u2026" },
+    on: { input: (e) => { P.search = e.target.value; drawPickerTree(); } } });
+  const quick = el("span", { cls: "picker__quick", attrs: { role: "group", "aria-label": "Quick choices" } });
+  PICK_QUICK.forEach((q) => quick.appendChild(el("button", { cls: "btn btn--sm", text: q[1], attrs: { type: "button" }, on: { click: () => {
+    P.sel = {};
+    pickerQuick(P.data ? P.data.files : [], q[0]).forEach((i) => { P.sel[i] = true; });
+    drawPickerTree(); drawPickerFoot();
+  } } })));
+  P.shell = {
+    head: el("div", { cls: "picker__head" }),
+    status: el("div", { cls: "picker__status", attrs: { "aria-live": "polite" } }),
+    bar: el("div", { cls: "picker__bar" }, [search, quick]),
+    tree: el("div", { cls: "picker__tree", attrs: { role: "tree", "aria-label": "Files of the torrent" } }),
+    foot: el("div", { cls: "picker__foot" }),
+    search: search,
+  };
+  [P.shell.head, P.shell.status, P.shell.bar, P.shell.tree, P.shell.foot].forEach((n) => box.appendChild(n));
+}
+
+function drawPicker() {
+  const P = S.picker;
+  if (!P || !P.shell) return;
+  P.shell.head.textContent = "";
+  P.shell.head.appendChild(el("span", { cls: "picker__name", text: P.name || "A torrent", title: P.name || "" }));
+  P.shell.head.appendChild(el("button", { cls: "btn btn--sm", text: "Back", attrs: { type: "button" }, on: { click: closePicker } }));
+  const D = P.data;
+  P.shell.status.className = "picker__status" + (P.error ? " bad" : "");
+  P.shell.status.textContent = P.loading ? "Reading the file list\u2026 a magnet link can take up to half a minute while the torrent finds peers."
+    : P.error ? P.error
+      : D ? D.count + (D.count === 1 ? " file" : " files") + DOT + fmtBytes(D.size) + (D.hidden ? DOT + D.hidden + " more not shown" : "") + (P.group ? DOT + "adding to the group already on the list" : "") : "";
+  P.shell.bar.hidden = !D;
+  drawPickerTree();
+  drawPickerFoot();
+}
+
+function drawPickerTree() {
+  const P = S.picker;
+  if (!P || !P.shell) return;
+  const tree = P.shell.tree;
+  tree.textContent = "";
+  if (!P.data) return;
+  const files = P.data.files || [];
+  const tick = (ids, on) => { ids.forEach((i) => { if (on) P.sel[i] = true; else delete P.sel[i]; }); drawPickerTree(); drawPickerFoot(); };
+  const fileRow = (f, depth, name) => {
+    const ok = selectableFile(f);
+    const box = el("input", { attrs: { type: "checkbox", "aria-label": "Choose " + name } });
+    box.checked = !!P.sel[f.index] && ok;
+    box.disabled = !ok;
+    box.addEventListener("change", () => tick([f.index], box.checked));
+    const flags = [];
+    if (f.video) flags.push("video");
+    if (f.sample) flags.push("sample");
+    if (f.in_group) flags.push("already added");
+    return el("label", { cls: "pk pk--file" + (ok ? "" : " is-off"), attrs: { role: "treeitem", style: "padding-left:" + (6 + depth * 14) + "px" }, title: f.refused ? "Not downloadable: " + f.refused : "" }, [
+      box,
+      el("span", { cls: "pk__n", text: name }),
+      el("span", { cls: "pk__f", text: f.refused ? "unsafe name: skipped" : flags.join(DOT) }),
+      el("span", { cls: "pk__s", text: fmtBytes(f.size) }),
+    ]);
+  };
+  const query = P.search.trim();
+  if (query) {
+    const hits = pickerFilter(files, query);
+    if (!hits.length) tree.appendChild(el("div", { cls: "empty", text: "No file matches that." }));
+    hits.slice(0, 500).forEach((f) => tree.appendChild(fileRow(f, 0, f.path)));
+    return;
+  }
+  const walk = (node, depth) => {
+    node.dirs.forEach((d) => {
+      const isOpen = P.open[d.path] === undefined ? depth < 1 : P.open[d.path];
+      const on = d.ids.length > 0 && d.ids.every((i) => P.sel[i]);
+      const some = !on && d.ids.some((i) => P.sel[i]);
+      const box = el("input", { attrs: { type: "checkbox", "aria-label": "Choose every file in " + d.name } });
+      box.checked = on;
+      box.indeterminate = some;
+      box.disabled = !d.ids.length;
+      box.addEventListener("change", () => tick(d.ids, box.checked));
+      tree.appendChild(el("div", { cls: "pk pk--dir", attrs: { role: "treeitem", "aria-expanded": isOpen ? "true" : "false", style: "padding-left:" + (6 + depth * 14) + "px" } }, [
+        el("button", { cls: "section__toggle", text: isOpen ? "\u25BE" : "\u25B8", attrs: { type: "button", "aria-label": (isOpen ? "Collapse " : "Expand ") + d.name },
+          on: { click: () => { P.open[d.path] = !isOpen; drawPickerTree(); } } }),
+        box,
+        el("span", { cls: "pk__n", text: d.name, title: d.path }),
+        el("span", { cls: "pk__f", text: d.count + (d.count === 1 ? " file" : " files") }),
+        el("span", { cls: "pk__s", text: fmtBytes(d.size) }),
+      ]));
+      if (isOpen) walk(d, depth + 1);
+    });
+    node.files.forEach((f) => tree.appendChild(fileRow(f, depth, f.leaf)));
+  };
+  walk(torrentTree(files), 0);
+}
+
+function drawPickerFoot() {
+  const P = S.picker;
+  if (!P || !P.shell) return;
+  const foot = P.shell.foot;
+  foot.textContent = "";
+  if (!P.data) return;
+  const t = pickerTotals(P.data.files, P.sel, P.data.free_bytes);
+  const block = pickerBlock(t);
+  const btn = el("button", { cls: "btn btn--primary", text: t.count ? "Add " + t.count + (t.count === 1 ? " file" : " files") : "Add files", attrs: { type: "button" }, on: { click: () => submitPicker() } });
+  btn.disabled = !!block || P.busy;
+  foot.appendChild(el("span", { cls: "picker__total" + (t.tooMany || t.tooBig ? " bad" : ""), text: pickerTotalText(t), attrs: { "aria-live": "polite" } }));
+  if (block && t.count) foot.appendChild(el("span", { cls: "picker__why bad", text: block }));
+  foot.appendChild(btn);
+}
+
+async function submitPicker() {
+  const P = S.picker;
+  if (!P || !P.data || P.busy) return;
+  const t = pickerTotals(P.data.files, P.sel, P.data.free_bytes);
+  if (pickerBlock(t)) return;
+  const indexes = P.data.files.filter((f) => P.sel[f.index] && selectableFile(f)).map((f) => f.index);
+  P.busy = true;
+  drawPickerFoot();
+  try {
+    const r = await hubFetch("/api/hub/torrent/add", { source: P.source, indexes: indexes, group: P.group });
+    toast("Queued " + r.count + (r.count === 1 ? " file" : " files") + " of " + (r.group_title || "the torrent"), "success");
+    if (r.refused && r.refused.length) toast(r.refused.length + " file(s) skipped: their names in the torrent aren't safe to save.", "warn");
+    if (r.skipped && r.skipped.length) toast(r.skipped.length + " already in the group.", "info");
+    if (r.note) toast(r.note, "warn");
+    closePicker();
+    schedule(200);
+  } catch (err) {
+    P.busy = false;
+    toast(message(err), "warn");
+    drawPickerFoot();
+  }
+}
+
+$("#addChoose").addEventListener("click", () => {
+  const source = torrentSource($("#addInput").value);
+  if (source) openPicker(source, "");
+});
 
 host.onClose(() => {
   S.closed = true; clearTimeout(S.timer); clearTimeout(S.holdTimer); clearTimeout(hintTimer);

@@ -16,6 +16,13 @@
 //     nothing else
 //   - relayBridgeEvent: an ask gets `ask-media`; a direct run keeps the stderr line; an event
 //     outside the whitelist is shown as the plain line it would have been, never as a card
+//   - a typed `ui` event (a tool's blocking question) reaches the browser as `ui-request` for an
+//     ask AND for a direct run; an ask used to print it as plain text nobody could answer
+//   - the no-bridge ask parser relays a JARVIS_UI_REQUEST line the same way, and `ui-response`
+//     is answered for either kind
+//   - app.js's `ui-request` case reads the message it was given (`msg.request`; it once read an
+//     undefined `data` and threw, so no dialog ever opened), and the embedded Ask panel
+//     (ask-embed.js) answers a `ui-request` too
 //   - a plain `out` event is shown as text and never offered to onStdoutLine (the marker parser)
 //   - the no-bridge path (spawnProcessAndStream) hands each process a nonce and believes only
 //     lines tagged with it: `ask-media` for an ask, the marker parser for stdout; bare or
@@ -145,6 +152,68 @@ const ws = { activeChild: null, activeKind: null };
   sandbox.relayBridgeEvent(ws, "ask", ASK, { id: "r1", t: "err", line: "trace", cat: "tool-call" }, null, null);
   check("ordinary stderr events are untouched (cat still rides along)",
     show(sent) === show([{ type: "ask-stderr", line: "trace", cat: "tool-call" }]), show(sent));
+}
+
+// ---- a tool's blocking question (`ui`) is relayed for a chat ask, not printed --------------
+{
+  const { sandbox, sent } = streamSandbox();
+  const logged = [];
+  const onLine = (stream, line) => logged.push([stream, line]);
+  const request = { kind: "confirm", id: "confirm-1", title: "Save outside the downloads library?",
+    confirmLabel: "Save there", cancelLabel: "Don't", timeout: 120 };
+  const raw = "JARVIS_UI_REQUEST " + JSON.stringify(request);
+  const ev = { id: "r1", t: "ui", request, raw };
+
+  sandbox.relayBridgeEvent(ws, "ask", ASK, ev, null, onLine);
+  check("an ask relays a typed ui event as ONE ui-request message (not ask-stdout text)",
+    show(sent) === show([{ type: "ui-request", request }]), show(sent));
+  check("...and the run log still keeps the legacy line", show(logged) === show([["out", raw]]), show(logged));
+
+  sent.length = 0;
+  sandbox.relayBridgeEvent(ws, "run", RUN, ev, null, null);
+  check("a direct run still gets the same ui-request message",
+    show(sent) === show([{ type: "ui-request", request }]), show(sent));
+}
+
+// ---- the same, read from server.js: the no-bridge ask parser and the answer path ------------
+{
+  const a = src.indexOf("const onStdoutLine = (line) => {");
+  const b = src.indexOf('spawnAndStream(ws, "ask"');
+  check("server.js still has the ask's onStdoutLine .. spawnAndStream(ask) markers", a > 0 && b > a, `a=${a} b=${b}`);
+  const askParser = a > 0 && b > a ? src.slice(a, b) : "";
+  check("the ask's marker parser relays JARVIS_UI_REQUEST as a ui-request",
+    /startsWith\(UI_MARKER\)/.test(askParser) && /type:\s*"ui-request"/.test(askParser));
+  check("...and a malformed payload is let through as plain text, not swallowed",
+    /catch\s*\{\s*return false;\s*\}/.test(askParser.slice(askParser.indexOf("UI_MARKER"))));
+
+  const c = src.indexOf('if (msg.type === "ui-response") {');
+  const d = src.indexOf('if (msg.type === "ask-confirm-response"');
+  check("server.js still has the ui-response .. ask-confirm-response markers", c > 0 && d > c, `c=${c} d=${d}`);
+  const answer = c > 0 && d > c ? src.slice(c, d) : "";
+  check("ui-response answers whichever child is running (not gated on ask vs run)",
+    /ws\.activeChild\.stdin\.write/.test(answer) && !/activeKind/.test(answer));
+}
+
+// ---- the browser side: the dialog actually opens, in both Ask panels -------------------------
+{
+  const app = fs.readFileSync(path.join(ROOT, "web", "public", "app.js"), "utf8");
+  const a = app.indexOf('case "ui-request": {');
+  const b = app.indexOf('case "confirm-request":', a);
+  check("app.js still has the ui-request .. confirm-request markers", a > 0 && b > a, `a=${a} b=${b}`);
+  const body = a > 0 && b > a ? app.slice(a, b) : "";
+  check("app.js's ui-request case reads msg.request (the handler's own argument)",
+    /msg\.request/.test(body), body.slice(0, 120));
+  check("...and no longer reads an undefined `data`", !/\bdata\b/.test(body), body.slice(0, 120));
+  check("...and answers with a ui-response", /type:\s*"ui-response"/.test(body));
+
+  const embed = fs.readFileSync(path.join(ROOT, "web", "public", "ask-embed.js"), "utf8");
+  const c = embed.indexOf('case "ui-request": {');
+  check("ask-embed.js handles ui-request", c > 0);
+  const eb = c > 0 ? embed.slice(c, embed.indexOf("break;", embed.indexOf("Promise.resolve(pending)", c))) : "";
+  check("...reading m.request and answering with a ui-response",
+    /m\.request/.test(eb) && /type:\s*"ui-response"/.test(embed.slice(c, c + 1800)));
+  check("...and falls back to the request's default when there is no dialog kit",
+    /kit\)\s*pending\s*=\s*Promise\.resolve\(req\.default/.test(embed.slice(c, c + 1800)));
 }
 
 // ---- plain `out` events are never re-parsed as markers --------------------------------------

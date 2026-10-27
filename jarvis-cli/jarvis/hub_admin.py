@@ -53,6 +53,11 @@ OPS = READ_OPS + WRITE_OPS
 # contents.  Both are for the Jarvis page's own picker, so both refuse an unattended process (below).
 PICKER_OPS = ("browse", "mkdir")
 OPS = OPS + PICKER_OPS
+# N24 (the torrent file picker): `torrent_files` reads one torrent's file list (for a magnet it asks Stremio's server
+# to register the torrent, which is why it is not a plain read); `torrent_add` queues the chosen files as one group.
+# Both are the Jarvis page's own buttons, so both refuse an unattended process (a chat reply, a scheduled job).
+TORRENT_OPS = ("torrent_files", "torrent_add")
+OPS = OPS + TORRENT_OPS
 
 MAX_CARD_IDS = 8
 MAX_IDS = 200
@@ -126,7 +131,21 @@ def _rows(store, items):
     service = _modules()[0]
     providers = service._provider_map(store)   # noqa: SLF001
     now = store.now()
-    return [present_row(i, providers, now) for i in items]
+    rows = [present_row(i, providers, now) for i in items]
+    if any(i.get("group_id") for i in items):
+        # N24: a file of a torrent group says which file it is and how many the torrent has, so the panel can
+        # draw the group card ("7 of 23 files") and offer "Add more files" without a second request.
+        try:
+            groups = service.torrent_groups(store)
+        except Exception:  # noqa: BLE001 - the list must still answer
+            groups = {}
+        if groups:
+            for item, row in zip(items, rows):
+                info = groups.get(item.get("group_id"))
+                if info:
+                    row["torrent"] = {"index": service._file_index_of(item), "files": info.get("files"),   # noqa: SLF001
+                                      "name": info.get("name"), "infohash": info.get("infohash")}
+    return rows
 
 
 def _final(states, state):
@@ -695,6 +714,88 @@ def dismiss(request, store=None):
         return _err("couldn't hide that: %s" % exc)
 
 
+# --------------------------------------------------------------------------- torrents: choose the files (N24)
+
+MAX_SOURCE = 4096
+MAX_WAIT_S = 60.0
+
+
+def _torrent_source(request):
+    """(source text, error) from a request.  Text only; what it may hold is torrent_files.lookup's business."""
+    source = (request or {}).get("source")
+    if not isinstance(source, str) or not source.strip():
+        return None, "give a magnet link, a torrent hash, a .torrent link or the path of a .torrent file"
+    if len(source) > MAX_SOURCE or "\x00" in source:
+        return None, "that is too long to be a torrent link"
+    return source.strip(), None
+
+
+def torrent_files(request, store=None):
+    """The picker's list: one torrent's files, cleaned and bounded (MAX_LIST_PANEL), with the free space and, when the
+    torrent already has a group, which files are in it.  Starts nothing.  Never raises."""
+    try:
+        service = _modules()[0]
+        store = _store(store)
+        source, problem = _torrent_source(request)
+        if problem:
+            return _err(problem)
+        from .hub.stremio import torrent_files as tfiles
+        try:
+            wait = float((request or {}).get("wait_s") or 25.0)
+        except (TypeError, ValueError):
+            wait = 25.0
+        look = tfiles.lookup(source, budget_s=max(1.0, min(wait, MAX_WAIT_S)))
+        if not look.get("ok"):
+            return _err(tfiles.clean_display(look.get("error") or "couldn't read that torrent", 300))
+        view = tfiles.compact(look, limit=tfiles.MAX_LIST_PANEL, collapse=False)
+        settings = store.get_settings()
+        root = _modules()[1].library_root(settings)
+        group, taken = None, {}
+        for gid, info in service.torrent_groups(store).items():
+            if info.get("infohash") == look.get("infohash"):
+                group = gid
+                for item in store.list_items(group_id=gid, limit=2000, include_dismissed=True, include_disabled=True):
+                    if item["state"] not in ("failed", "cancelled"):
+                        taken[service._file_index_of(item)] = item["state"]   # noqa: SLF001
+        files = []
+        for entry in view["files"]:
+            entry = dict(entry)
+            if entry["index"] in taken:
+                entry["in_group"] = taken[entry["index"]]
+            files.append(entry)
+        real = tfiles.real_files(look)
+        return {"ok": True, "name": tfiles.clean_display(look.get("name") or ""), "infohash": look.get("infohash"),
+                "single": bool(look.get("single")), "count": look["count"], "size": look["total_size"],
+                "files": files, "hidden": view["hidden"], "real_files": len(real),
+                "needs_choice": tfiles.needs_choice(look), "max_pick": tfiles.MAX_PICK,
+                "free_bytes": service._free_bytes(root), "group": group,           # noqa: SLF001
+                "read_from": "server" if look.get("origin") == "server" else "file"}
+    except Exception as exc:  # noqa: BLE001
+        return _err("couldn't read that torrent: %s" % str(exc)[:160])
+
+
+def torrent_add(request, store=None):
+    """The picker's Add button: queue the chosen files of one torrent as one group (`group` adds to an existing
+    one: "Add more files").  The rules, the per-file refusals and the free-space check are
+    `service.add_torrent_files`'s own and come back unchanged."""
+    try:
+        service = _modules()[0]
+        store = _store(store)
+        req = request if isinstance(request, dict) else {}
+        source, problem = _torrent_source(req)
+        if problem:
+            return _err(problem)
+        group = req.get("group")
+        if group not in (None, ""):
+            group = str(group).strip()
+            if not ITEM_ID_RE.match(group):
+                return _err("that isn't a group id")
+        return service.add_torrent_files(source, req.get("indexes"), group_id=group or None,
+                                         start_paused=req.get("start_paused") is True, store=store)
+    except Exception as exc:  # noqa: BLE001
+        return _err("couldn't queue those files: %s" % str(exc)[:160])
+
+
 # --------------------------------------------------------------------------- Stremio (N9, brief 12)
 
 def _stremio_wait(store=None):
@@ -1156,6 +1257,8 @@ def admin(op, request=None, store=None):
             return _err(why, code="unattended")
     if op in PICKER_OPS and unattended_reason():
         return _err("The folder picker can only be used from the Jarvis page itself.", code="unattended")
+    if op in TORRENT_OPS and unattended_reason():
+        return _err("The torrent file picker can only be used from the Jarvis page itself.", code="unattended")
     try:
         if op == "card":
             return card_payload(ids=request.get("ids"), group=request.get("group"),
@@ -1194,6 +1297,10 @@ def admin(op, request=None, store=None):
             return qbittorrent_status(request, store)
         if op == "qbittorrent_save":
             return qbittorrent_save(request, store)
+        if op == "torrent_files":
+            return torrent_files(request, store)
+        if op == "torrent_add":
+            return torrent_add(request, store)
         if op == "browse":
             from . import hub_browse
             return hub_browse.browse(request, store=store)

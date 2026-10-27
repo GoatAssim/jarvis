@@ -2966,7 +2966,7 @@
       // out of here must send exactly one ui-response — including the
       // error path, or the tool hangs until its own timeout.
       case "ui-request": {
-        const req = data.request || {};
+        const req = msg.request || {};
         const answer = (value) => wsSend({ type: "ui-response", value });
         let pending;
         try {

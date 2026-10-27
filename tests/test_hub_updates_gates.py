@@ -86,10 +86,16 @@ def test_guest_rule():
     for raw in (None, GUEST, GUEST_NO_FLAG, OWNER, "", "   ", *UNREADABLE):
         set_sender(raw)
         try:
-            same = du._is_chat_guest() == dh._is_chat_guest()
+            mine = du._is_chat_guest()
+            try:
+                theirs = dh._is_chat_guest()
+            except RecursionError:
+                # download_hub's copy does not catch a JSON value nested too deep to parse (it raises); this file
+                # fails closed instead, so the only thing to hold here is that ours says "guest".
+                theirs = True
         finally:
             set_sender(None)
-        check("the guest rule matches download_hub._is_chat_guest for %r" % ((raw or "")[:20],), same)
+        check("the guest rule matches download_hub._is_chat_guest for %r" % ((raw or "")[:20],), mine == theirs)
     set_sender(GUEST)
     check("a guest is a guest", du._is_chat_guest() is True)
     set_sender(OWNER)

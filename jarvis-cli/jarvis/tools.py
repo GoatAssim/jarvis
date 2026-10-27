@@ -690,6 +690,9 @@ OWNER_ONLY_TOOLS = frozenset({
     # dl_add_<id> tools have no fixed names, so they are not listed here: hidden_from_sender()
     # adds every loaded tool whose name starts with GENERATED_ADD_PREFIX (their handlers also refuse).
     "dl_add", "dl_add_ytdlp", "dl_add_stremio", "dl_dismiss",
+    # N24: reads a torrent's file list (its handler refuses a guest too); it can ask the owner's Stremio server
+    # to register a torrent, which a guest has no business starting.
+    "torrent_files",
     "bulk_plan", "bulk_run", "stremio_library", "stremio_mark_watched",
     # Stremio playback (brief 31): drives the mpv on the owner's PC; its handler refuses a guest too.
     "play_control",

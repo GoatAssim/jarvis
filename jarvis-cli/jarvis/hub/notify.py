@@ -131,6 +131,12 @@ def compose(event, entries, extra=None):
     n = len(entries)
     if event == "group_done":
         done, failed = extra.get("done", 0), extra.get("failed", 0)
+        if extra.get("kind") == "torrent":
+            # ONE message for the whole torrent (N24): "Show S01: 5 of 7 files finished, 1 failed, 1 cancelled."
+            bits = ["%d of %d files finished" % (done, extra.get("total", done + failed))]
+            bits += (["%d failed" % failed] if failed else []) + (["%d cancelled" % extra["cancelled"]]
+                                                                 if extra.get("cancelled") else [])
+            return ("Torrent finished", "%s: %s." % (extra.get("title") or "Torrent", ", ".join(bits)))
         bits = ["%d finished" % done] + (["%d failed" % failed] if failed else [])
         return ("Batch finished", "%s: %s." % (extra.get("title") or "Batch", ", ".join(bits)))
     if event == "queue_empty":
@@ -251,12 +257,14 @@ class Dispatcher:
         since = self.since()
         sent = 0
         queued_group_checks = []
+        self._tgroups = None                              # the torrent groups, read once per pass (N24)
 
         for state_name, event, column in (("done", "done", "finished_at"), ("failed", "failed", "finished_at")):
             for item in self.store.unclaimed(event, state_name, since=since, stamp_column=column):
                 if not self.store.claim_notice(item["id"], event, item.get(column) or 0):
                     continue
-                if not _channels_of(item) and not self._silent(event, item):
+                if (not _channels_of(item) and not self._silent(event, item)
+                        and not self._in_torrent_group(item)):
                     # a download announced elsewhere, a small Steam update nobody is told about, or a
                     # provider the owner switched off, isn't part of the queue's tally
                     self._burst[event] += 1
@@ -285,7 +293,20 @@ class Dispatcher:
 
     # ------------------------------------------------------------ per-row decision
 
+    def _in_torrent_group(self, item):
+        """Is this row one chosen file of a torrent group?  Those speak ONCE, when the whole group ends."""
+        if not item.get("group_id"):
+            return False
+        if getattr(self, "_tgroups", None) is None:
+            try:
+                self._tgroups = {gid for gid, g in self.store.list_groups().items() if g.get("kind") == "torrent"}
+            except Exception:  # noqa: BLE001 - a notice never breaks the daemon
+                self._tgroups = set()
+        return item["group_id"] in self._tgroups
+
     def _consider(self, event, item, cfg, settings, master=True):
+        if self._in_torrent_group(item):
+            return                                       # no start / done / failed / stalled line per file: the group says it once
         mine = item["owner"] == "hub"
         if not mine and (event not in ("done", "failed") or not cfg.get("providers", True)):
             return
@@ -359,8 +380,12 @@ class Dispatcher:
         enabled, level = self._event_cfg({"notify": cfg}, "group_done")
         gid = item["group_id"]
         prog = self.store.group_progress(gid)
-        if prog["total"] < 2 or prog["final"] < prog["total"] or prog["done"] + prog["failed"] == 0:
+        torrent = self._in_torrent_group(item)
+        if (prog["total"] < (1 if torrent else 2) or prog["final"] < prog["total"]
+                or prog["done"] + prog["failed"] == 0):
             return 0
+        if torrent:
+            prog = dict(prog, kind="torrent")
         if not self.store.claim_notice("group:" + gid, "group_done", prog["last_finished"]):
             return 0
         if not enabled or item["owner"] != "hub":

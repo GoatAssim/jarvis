@@ -272,7 +272,10 @@ def _stremio_source(args):
     stream = args.get("stream")
     if magnet and stream:
         return None, "give a magnet or a stream, not both"
+    chosen = args.get("file_indexes") not in (None, "", [])
     idx = args.get("file_index")
+    if chosen and idx is not None and idx != "":
+        return None, "give file_index (one file) or file_indexes (several), not both"
     if idx is not None and idx != "":
         if isinstance(idx, bool):
             return None, "file_index must be a whole number from 0"
@@ -291,11 +294,17 @@ def _stremio_source(args):
                           "to dl_add, a YouTube one to dl_add_ytdlp")
     elif magnet:
         parsed = links.parse_input(str(magnet))
+        if parsed is None and chosen:
+            # a .torrent file on this PC is only taken together with a file choice (N24): the chosen files
+            # are queued as magnets built from it, so the path itself is never stored
+            return str(magnet), None
         if not parsed or parsed.get("kind") == "server_url":
             return None, "that is not a magnet link, a 40-character infohash, a Stremio stream or a .torrent link"
     else:
         return None, None
     if parsed.get("kind") == "torrent_url":
+        if chosen:
+            return parsed["url"], None
         if idx is not None:
             return None, ("a .torrent link can't carry a file choice (its file list is only known once "
                           "it is fetched); leave file_index out")
@@ -316,9 +325,100 @@ def tool_dl_add_stremio(args):
             return {"ok": False, "error": problem}
         if not source:
             return {"needs_clarification": True, "message": "Which magnet link, infohash or stream should I download?"}
-        return _queue(args, [source], "stremio", None, "dl_add_stremio")
+        if args.get("file_indexes") not in (None, "", []):
+            return _add_chosen_files(args, source)
+        if args.get("dry_run"):
+            return _queue(args, [source], "stremio", None, "dl_add_stremio")
+        asked, note = _ask_which_files(source)
+        if asked is not None:
+            return asked
+        out = _queue(args, [source], "stremio", None, "dl_add_stremio")
+        if note and isinstance(out, dict) and out.get("ok"):
+            out["note"] = (out["note"] + " " + note) if out.get("note") else note
+        return out
     except Exception as exc:  # noqa: BLE001
         return _fail("dl_add_stremio", exc)
+
+
+# ---- a torrent with many files: ask first, then queue the chosen ones as ONE group (brief N24) ----
+
+ASK_LOOK_S = 20.0           # how long the ask-first look at a torrent's file list may take
+
+
+def _fmt_size(n):
+    n = float(n or 0)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024 or unit == "TB":
+            return ("%d %s" % (n, unit)) if unit == "B" else ("%.1f %s" % (n, unit))
+        n /= 1024.0
+    return "%d B" % n
+
+
+def _ask_which_files(source):
+    """N24b.  (answer, note).  `answer` is a question (nothing queued) when the torrent has more than one real
+    file and not exactly one real video; None when the call should go on as it always did.  A named file
+    (the magnet's so=N) and a torrent whose list can't be read now go on as before; the second says so in `note`."""
+    from ..hub.stremio import links, torrent_files as tfiles
+    parsed = links.parse_magnet(source)
+    if parsed and parsed.get("file_idx") is not None:
+        return None, ""
+    look = tfiles.lookup(source, budget_s=ASK_LOOK_S)
+    if not look.get("ok"):
+        return None, ("I couldn't read this torrent's file list (%s), so it was queued the old way: the engine "
+                      "picks the main video." % tfiles.clean_display(look.get("error"), 120).rstrip("."))
+    if not tfiles.needs_choice(look):
+        return None, ""
+    return _choice_question(look, source), ""
+
+
+def _choice_question(look, source):
+    from ..hub.stremio import torrent_files as tfiles
+    view = tfiles.compact(look)
+    real = tfiles.real_files(look)
+    name = tfiles.clean_display(look.get("name") or "this torrent")
+    message = ("%s has %d files (%s, %d of them video). Nothing is queued yet: show the owner the list and ask which "
+               "files to download, then call dl_add_stremio again with file_indexes (at most %d per call)." % (
+                   name, look["count"], _fmt_size(look["total_size"]), len([f for f in real if f["video"]]),
+                   tfiles.MAX_PICK))
+    return {"needs_clarification": True, "queued": 0, "message": message,
+            "torrent": {"name": name, "infohash": look.get("infohash"), "files": look["count"],
+                        "real_files": len(real), "size": look["total_size"]},
+            "files": view["files"], "folders": view["folders"], "hidden": view["hidden"],
+            "call": {"tool": "dl_add_stremio", "magnet": tfiles.clean_display(source, 300), "file_indexes": "[the numbers chosen]"}}
+
+
+def _add_chosen_files(args, source):
+    """file_indexes: one group, one download per chosen file (hub.service.add_torrent_files)."""
+    from ..hub.stremio import torrent_files as tfiles
+    picks, problem = tfiles.parse_indexes(args.get("file_indexes"))
+    if problem:
+        return {"ok": False, "error": problem}
+    svc = _svc()
+    if args.get("dry_run"):
+        res = svc.preview(source, engine="stremio")
+        return {"ok": True, "dry_run": True, "files": len(picks),
+                "decisions": [{"input": tfiles.clean_display(source, 120), "ok": res["ok"], "engine": res["engine"],
+                               "reason": res["reason"], "problem": res["problem"], "add_tool": "dl_add_stremio"}]}
+    dest = args.get("dest")
+    allow_abs = False
+    if dest and svc.settings_mod.is_absolute_spec(dest):
+        if not _confirm_outside(dest, len(picks)):
+            return {"ok": False, "cancelled": True, "error": "not confirmed: nothing was queued"}
+        allow_abs = True
+    limits = (svc.get_settings().get("settings") or {}).get("limits") or {}
+    if len(picks) > int(limits.get("confirm_above_items", 5)):
+        from .. import ui_bridge as ui
+        if not ui.confirm("Queue %d files of one torrent?" % len(picks), body="They become one group.",
+                          level="warn", confirm_label="Queue them", cancel_label="Cancel", default=False):
+            return {"ok": False, "cancelled": True, "error": "not confirmed: nothing was queued"}
+    res = svc.add_torrent_files(source, picks, dest=dest, title=args.get("group"),
+                                start_paused=bool(args.get("start_paused")), start_at=args.get("start_at"),
+                                allow_absolute_dest=allow_abs)
+    if isinstance(res, dict):
+        for row in res.get("added") or []:
+            if isinstance(row, dict):
+                row["add_tool"] = "dl_add_stremio"
+    return res
 
 
 def tool_dl_import_legacy(args):
@@ -577,6 +677,7 @@ _ALL_PROPS = {
     "magnet": {"type": "string", "description": "A magnet link, a 40-character infohash or a link to a .torrent file. Give this or `stream`."},
     "stream": {"type": "object", "description": "A Stremio stream object ({infoHash, fileIdx, ...}) instead of a magnet."},
     "file_index": {"type": "integer", "description": "Which file inside the torrent to download (0-based). Leave out to let Jarvis pick the main video file; same as the magnet's so=N."},
+    "file_indexes": {"type": "array", "items": {"type": "integer"}, "description": "Several files of ONE torrent (0-based numbers from torrent_files; at most 100): one group, one download per file. Not with file_index. Without it a torrent with many files asks which first."},
 }
 _CORE_NAMES = ("url", "urls", "engine", "dest", "group", "start_paused", "start_at", "dry_run")
 _SHARED_NAMES = ("dest", "group", "start_paused", "start_at", "dry_run")
@@ -622,11 +723,12 @@ TOOL_SCHEMAS = [
         "description": (
             "Queue a torrent in the Download Hub with the Stremio engine: a magnet link, a 40-character "
             "infohash, a Stremio stream object or a .torrent link, optionally one chosen file of it "
-            "(file_index). Needs Stremio's streaming server (stack_status / stack_start). Returns at once; "
-            "the hub daemon does the transfer. dry_run only names the engine."
+            "(file_index) or several (file_indexes). A torrent with many files queues nothing and lists them "
+            "first (see torrent_files). Needs Stremio's streaming server (stack_status / stack_start). Returns "
+            "at once; the hub daemon does the transfer. dry_run only names the engine."
         ),
         "parameters": {"type": "object",
-                       "properties": _add_props(("magnet", "stream", "file_index") + _SHARED_NAMES)},
+                       "properties": _add_props(("magnet", "stream", "file_index", "file_indexes") + _SHARED_NAMES)},
     },
     {
         "name": "dl_import_legacy",
@@ -1118,7 +1220,7 @@ TEST_CHECKLIST = {
                   "The cap of 50 is fixed in this version: `ytdlp.playlist_max` can only lower it, but no hub setting by that name exists yet. `generic` is switched off: it answers with one sentence and queues nothing."],
     },
     "dl_add_stremio": {
-        "does": "Queues a torrent (magnet, infohash, Stremio stream or .torrent link), optionally one chosen file of it, with the Stremio engine.",
+        "does": "Queues a torrent (magnet, infohash, Stremio stream or .torrent link), optionally one chosen file (file_index) or several (file_indexes: one group, one download per file), with the Stremio engine. A torrent with several real files and no choice queues nothing and lists the files first.",
         "steps": [
             {"run": {"magnet": "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567", "dry_run": True},
              "expect": "ok: true, one decision: engine stremio, add_tool dl_add_stremio. With Stremio's server stopped the decision's problem says so and how to start it (stack_start). Nothing queued."},
@@ -1132,8 +1234,18 @@ TEST_CHECKLIST = {
              "expect": "ok: false: a .torrent link can't carry a file choice; leave file_index out."},
             {"run": {"magnet": "<the full path of a .torrent file on this PC>"},
              "expect": "ok: false: that is not a magnet link, a 40-character infohash, a Stremio stream or a .torrent link. A file on this PC goes through dl_add instead (see dl_add), by design (brief 22 report, Open point 3)."},
+            {"run": {"magnet": "0123456789abcdef0123456789abcdef01234567", "file_index": 1, "file_indexes": [2, 3]},
+             "expect": "ok: false: give file_index (one file) or file_indexes (several), not both."},
+            {"run": {"magnet": "0123456789abcdef0123456789abcdef01234567", "file_indexes": [0, 1], "dry_run": True},
+             "expect": "ok: true, dry_run, files: 2, one decision: engine stremio. Nothing is queued and the torrent is not looked at."},
+            {"run": {"magnet": "magnet:?xt=urn:btih:<a real hash of a torrent with 20 files>"},
+             "expect": "needs_clarification: true, queued: 0, a message that names the torrent and its file count and size, `files` (numbers, paths, sizes) and a `call` with file_indexes. Nothing is queued (Menu > Downloads has no new row). With Stremio's server stopped it is queued the old way and the note says the list could not be read. A torrent with ONE real video (and subtitles around it) is queued at once as before. ⚠️ Never run against a real Stremio server (tested against a fake only)."},
+            {"run": {"magnet": "magnet:?xt=urn:btih:<the same hash>", "file_indexes": [2, 5, 6]},
+             "expect": "ok: true, ONE group named after the torrent with 3 downloads, one per file, saved under the library as <torrent name>/<folders inside it>/<file>; `refused` is empty unless a file name was unsafe (that file alone is refused). The total size is checked against the free space once. Menu > Downloads shows ONE group card; Pause / Resume / Cancel on it only touch the unfinished files; ONE notification when the group ends. ⚠️ Not tried with a real Stremio server."},
             {"run": {},
              "expect": "No error, a question: needs_clarification 'Which magnet link, infohash or stream should I download?'; nothing is queued."},
+            {"ask": "Download this torrent: magnet:?xt=urn:btih:<a real hash of a season pack>",
+             "expect": "Calls dl_add_stremio, gets the list, shows it (names and sizes) and asks which files; then calls it again with file_indexes. Does not guess."},
             {"ask": "Download this magnet, only file 3: magnet:?xt=urn:btih:<a real infohash>",
              "expect": "Calls dl_add_stremio with file_index 3 and says it was queued (Stremio's server running)."},
         ],

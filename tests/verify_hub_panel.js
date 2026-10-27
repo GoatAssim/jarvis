@@ -408,10 +408,10 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   check("the arrow keys, Home and End move between tabs", /ArrowRight/.test(source) && /ArrowLeft/.test(source) && /"Home"/.test(source) && /"End"/.test(source));
   check("the writes to the hub's web routes carry the header the server requires, and removing history asks first",
     /"X-Jarvis-Hub": "1"/.test(source) && /askFirst\("Remove from the history\?"/.test(source) && /askFirst\("Clear old history\?"/.test(source) && /dry_run: true/.test(source));
-  check("the panel only talks to /api/hub/ routes it knows", [...source.matchAll(/["'`]\/api\/([a-z\/\-]+)/g)].every((m) => /^hub\/(stream|list|sources|dismiss|history|history\/remove|history\/clear|redownload|reorder|thumb\/|file\/)/.test(m[1])));
+  check("the panel only talks to /api/hub/ routes it knows", [...source.matchAll(/["'`]\/api\/([a-z\/\-]+)/g)].every((m) => /^hub\/(stream|list|sources|dismiss|history|history\/remove|history\/clear|redownload|reorder|torrent\/(files|add)|thumb\/|file\/)/.test(m[1])));
   check("the live stream falls back to polling: errors, a silent stream and a `down` message all hand over", /es\.onerror = liveDown/.test(source) && /addEventListener\("down", liveDown\)/.test(source) && /45000/.test(source));
   check("while the stream is live the poll only refreshes the summary", /streaming \? \{ limit: 1, summary: true \}/.test(source));
-  check("a row drag doesn't turn into 'links dropped on the panel'", /if \(S\.dragId\) return;/.test(source));
+  check("a row drag, or a whole-group drag, doesn't turn into 'links dropped on the panel'", /if \(S\.dragId \|\| S\.dragGroup\) return;/.test(source));
   check("drag has a keyboard route: every draggable row also has move up / move down buttons", /Move up in the queue/.test(source) && /Move down in the queue/.test(source));
 
   // ---- the chat card keeps the panel's looks (its formatting half is a copy: they must agree on every state)
@@ -606,6 +606,92 @@ check("Clear finished takes cancelled hub rows but leaves failed ones (they may 
     && pure.cardNote(prow({ state: "downloading", message: null })) === "" && pure.cardNote(prow({ state: "done", message: steamNote })) === ""
     && pure.cardNote(prow({ state: "downloading", provider: "playnite", message: steamNote })) === "" && pure.cardNote(row({ state: "downloading", message: steamNote })) === ""
     && pure.cardNote(null) === "" && /cardNote\(row\) \? el\("div", \{ cls: "row__note"/.test(source) && /\.row__note \{/.test(css));
+
+
+  // ---- dragging a whole group (the Batch header): the pure helper, then the wiring on the source
+  const G = (id, gid, pr, at, o) => Object.assign({ id: id, group_id: gid, owner: "hub", state: "queued", priority: pr, created_at: at }, o || {});
+  const grows = [G("a1", "A", 0, 1), G("a2", "A", 0, 2), G("b1", "B", 0, 3), G("b2", "B", 0, 4), G("c1", "C", 0, 5), G("x", null, 0, 6),
+    G("d1", "D", 0, 7, { state: "downloading" })];
+  const gorder = ["a1", "a2", "b1", "b2", "c1", "x"];
+  check("the key of a section is g:<id>; anything else is no group", pure.groupIdOf("g:abc") === "abc" && pure.groupIdOf("loose") === "" && pure.groupIdOf("g:") === "" && pure.groupIdOf(null) === "");
+  check("a group's waiting rows, in the order the queue has them", eq(pure.groupWaiting(gorder, grows, "g:B"), ["b1", "b2"]) && eq(pure.groupWaiting(gorder, grows, "g:D"), []) && eq(pure.groupWaiting(gorder, grows, "g:zzz"), []));
+  check("dropping group C on the TOP half of A puts C's block before A's first waiting row",
+    eq(pure.moveGroupInOrder(gorder, grows, "g:C", "g:A", false), ["c1", "a1", "a2", "b1", "b2", "x"]));
+  check("dropping group A on the BOTTOM half of B puts A's block after B's last waiting row, A's own order kept",
+    eq(pure.moveGroupInOrder(gorder, grows, "g:A", "g:B", true), ["b1", "b2", "a1", "a2", "c1", "x"]));
+  const mixed = ["a2", "b1", "a1", "x", "b2"];            // a group whose waiting rows are not next to each other still travels as one block, in its own order
+  check("a group split by other rows moves as one block and keeps its own order", eq(pure.moveGroupInOrder(mixed, grows, "g:A", "g:B", true), ["b1", "x", "b2", "a2", "a1"]));
+  const keep = gorder.slice(); pure.moveGroupInOrder(keep, grows, "g:C", "g:A", false); pure.stepGroupInOrder(keep, grows, "g:B", -1);
+  check("moving a group never changes the list it was given", eq(keep, gorder));
+  check("an unknown key, the same group twice, a loose row and a group with no waiting rows leave the order as it was",
+    eq(pure.moveGroupInOrder(gorder, grows, "g:nope", "g:A", false), gorder) && eq(pure.moveGroupInOrder(gorder, grows, "g:A", "g:nope", false), gorder)
+    && eq(pure.moveGroupInOrder(gorder, grows, "g:A", "g:A", true), gorder) && eq(pure.moveGroupInOrder(gorder, grows, "loose", "g:A", false), gorder)
+    && eq(pure.moveGroupInOrder(gorder, grows, "g:D", "g:A", false), gorder) && eq(pure.moveGroupInOrder(gorder, grows, "g:A", "g:D", true), gorder)
+    && eq(pure.moveGroupInOrder(null, grows, "g:A", "g:B", true), []));
+  check("the groups are listed in the order their first waiting row comes", eq(pure.groupOrderKeys(gorder, grows), ["g:A", "g:B", "g:C"]));
+  check("one group up or down, and nothing at either end or for a group that isn't waiting",
+    eq(pure.stepGroupInOrder(gorder, grows, "g:B", -1), ["b1", "b2", "a1", "a2", "c1", "x"]) && eq(pure.stepGroupInOrder(gorder, grows, "g:B", 1), ["a1", "a2", "c1", "b1", "b2", "x"])
+    && pure.stepGroupInOrder(gorder, grows, "g:A", -1) === null && pure.stepGroupInOrder(gorder, grows, "g:C", 1) === null && pure.stepGroupInOrder(gorder, grows, "g:D", 1) === null);
+  check("a group can be dragged only when one of its rows is waiting and the live order is known",
+    pure.canReorderGroup([G("a", "A", 0, 1)], true) && !pure.canReorderGroup([G("a", "A", 0, 1)], false) && !pure.canReorderGroup([G("a", "A", 0, 1, { state: "downloading" })], true)
+    && !pure.canReorderGroup([], true) && pure.canReorderGroup([G("a", "A", 0, 1, { state: "done" }), G("b", "A", 0, 2)], true));
+  check("the header's tooltip says why there is no grip, in the words of reorderNote",
+    pure.groupReorderNote([G("a", "A", 0, 1)], true) === "" && /Only downloads that are still waiting can be put in a different order/.test(pure.groupReorderNote([G("a", "A", 0, 1, { state: "done" })], true))
+    && /Only downloads that are still waiting can be put in a different order/.test(pure.reorderNote(Q("a", 0, 1, { state: "downloading" }), true))
+    && pure.groupReorderNote([G("a", "A", 0, 1)], false) === pure.reorderNote(Q("a", 0, 1), false));
+  check("a group drag has its own S.dragGroup, the row handlers still read S.dragId, and the links guard skips both",
+    /dragGroup: ""/.test(source) && /S\.dragGroup = key;/.test(source) && /if \(!S\.dragGroup \|\| S\.dragGroup === key\) return;/.test(source) && /if \(!S\.dragId \|\| S\.dragId === row\.id\) return;/.test(source)
+    && /if \(S\.dragId\) return;\s*\n\s*S\.dragGroup = key/.test(source) && /if \(S\.dragId \|\| S\.dragGroup\) return;/.test(source));
+  check("a group header has a grip, is draggable only when it can be, and keeps the arrows for the keyboard",
+    /section__grip/.test(source) && /draggable: reorderable \? "true" : "false"/.test(source) && /"Move group up"/.test(source) && /"Move group down"/.test(source) && /moveGroup\(section\.key, m\[1\]\)/.test(source)
+    && /wireGroupDrag\(head, section\.key, reorderable\)/.test(source) && /groupReorderNote\(section\.rows, S\.live\)/.test(source) && /\.section__grip \{/.test(css) && /\.section\.drop-before \{/.test(css));
+  check("dropping on a group with nothing waiting is refused with a toast; the drop goes through the same sendOrder -> /api/hub/reorder",
+    /Drop it on a group that still has downloads waiting/.test(source) && /sendOrder\(moveGroupInOrder\(order, S\.rows, moving, key, after\)\)/.test(source)
+    && (source.match(/\/api\/hub\/reorder/g) || []).length === 1);
+
+  // ---- the torrent file picker (N24)
+  const F = (index, p, size, o) => Object.assign({ index: index, path: p, size: size }, o || {});
+  const tfiles = [F(0, "Show S01/Show S01E01.mkv", 1000, { video: true }), F(1, "Show S01/Show S01E02.mkv", 3000, { video: true }), F(2, "Show S01/Sample/sample.mkv", 10, { video: true, sample: true }),
+    F(3, "Show S01/Extras/making of.mp4", 500, { video: true }), F(4, "Show S01/readme.txt", 1), F(5, "Show S01/evil.mkv", 5, { refused: "its name has an empty or relative (. / ..) part" }), F(6, "Show S01/old.mkv", 7, { in_group: "done" })];
+  check("the add box recognises ONE torrent source: a magnet, a hash, a .torrent link or the full path of a .torrent file; nothing else",
+    pure.torrentSource("magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567") !== "" && pure.torrentSource("0123456789abcdef0123456789abcdef01234567") !== ""
+    && pure.torrentSource("https://example.com/x.torrent") !== "" && pure.torrentSource("C:\\Users\\me\\x.torrent") !== "" && pure.torrentSource("/home/me/x.torrent") !== ""
+    && pure.torrentSource("\"D:/files/x.torrent\"") === "D:/files/x.torrent" && pure.torrentSource("https://example.com/file.zip") === "" && pure.torrentSource("x.torrent") === ""
+    && pure.torrentSource("magnet:?xt=a\nmagnet:?xt=b") === "" && pure.torrentSource("") === "");
+  check("only a file with a safe name, not already in the group and not empty can be ticked", eq(tfiles.map(pure.selectableFile), [true, true, true, true, true, false, false]) && !pure.selectableFile(F(9, "a", 0)) && !pure.selectableFile(null));
+  const tree = pure.torrentTree(tfiles);
+  check("the tree: one folder with a sub-folder each for Sample and Extras, counts and sizes below each, the unselectable ones left out of the tick list",
+    tree.dirs.length === 1 && tree.dirs[0].name === "Show S01" && eq(tree.dirs[0].dirs.map((d) => d.name), ["Sample", "Extras"]) && tree.dirs[0].count === 7 && tree.dirs[0].size === 4523
+    && eq(tree.dirs[0].ids.slice().sort(), [0, 1, 2, 3, 4]) && tree.dirs[0].files.map((f) => f.leaf).indexOf("evil.mkv") !== -1);
+  const hostile = pure.torrentTree([F(0, "__proto__/constructor/a.bin", 5), F(1, "constructor/b.bin", 6), F(2, "__proto__/c.bin", 7)]);
+  check("a folder called __proto__ or constructor is only a name: no prototype is touched", hostile.dirs.length === 2 && hostile.dirs[0].name === "__proto__" && hostile.dirs[0].count === 2
+    && hostile.dirs[0].dirs[0].name === "constructor" && Object.getPrototypeOf({}) === Object.prototype && ({}).count === undefined && eq(hostile.dirs[1].ids, [1]));
+  check("the quick choices", eq(pure.pickerQuick(tfiles, "videos"), [0, 1, 3]) && eq(pure.pickerQuick(tfiles, "biggest"), [1]) && eq(pure.pickerQuick(tfiles, "nosample"), [0, 1, 3, 4])
+    && eq(pure.pickerQuick(tfiles, "all"), [0, 1, 2, 3, 4]) && eq(pure.pickerQuick(tfiles, "none"), []) && eq(pure.pickerQuick([F(0, "a.pdf", 5), F(1, "b.pdf", 9)], "biggest"), [1]) && eq(pure.pickerQuick([], "biggest"), []));
+  check("search keeps the files whose path holds the words, any case", eq(pure.pickerFilter(tfiles, "E02").map((f) => f.index), [1]) && pure.pickerFilter(tfiles, "").length === 7 && pure.pickerFilter(tfiles, "zzz").length === 0);
+  const t1 = pure.pickerTotals(tfiles, { 0: true, 1: true, 5: true, 6: true }, 1000000);
+  check("the running total counts only what can be ticked, and says when it is too many or too big for the free space", t1.count === 2 && t1.bytes === 4000 && !t1.tooMany && !t1.tooBig
+    && pure.pickerTotals(tfiles, { 0: true, 1: true }, 4200).tooBig === true && pure.pickerTotals(tfiles, { 0: true, 1: true }, 4400).tooBig === false && pure.pickerTotals(tfiles, { 0: true }, null).tooBig === false
+    && pure.pickerTotals(Array.from({ length: 101 }, (_, i) => F(i, "f" + i, 1)), Object.fromEntries(Array.from({ length: 101 }, (_, i) => [i, true])), null).tooMany === true);
+  check("the total reads as words, and Add is blocked with a reason until the choice fits",
+    pure.pickerTotalText(t1) === "2 files \u00B7 3.9 KB of 977 KB free" && pure.pickerTotalText(pure.pickerTotals(tfiles, {}, 5)) === "Nothing chosen yet" && /Tick at least one/.test(pure.pickerBlock(pure.pickerTotals(tfiles, {}, 5)))
+    && pure.pickerBlock(t1) === "" && /more than 100 files/.test(pure.pickerBlock({ count: 101, tooMany: true })) && /more room than is free/.test(pure.pickerBlock({ count: 2, tooBig: true })));
+  check("a torrent group's header says how many files were chosen out of how many the torrent has",
+    pure.torrentGroupMeta([{ state: "done" }, { state: "queued" }], { files: 23 }) === "1/2 done \u00B7 2 of 23 files" && pure.torrentGroupMeta([{ state: "done" }, { state: "queued" }], { files: 2 }) === "1/2 done");
+  const trows = [Q("t1", 0, 1, { group_id: "T", group_title: "Show S01", torrent: { index: 0, files: 23, name: "Show S01", infohash: "0123456789abcdef0123456789abcdef01234567" } }),
+    Q("t2", 0, 2, { group_id: "T", group_title: "Show S01", torrent: { index: 1, files: 23, name: "Show S01", infohash: "0123456789abcdef0123456789abcdef01234567" } }), Q("n1", 0, 3, { group_id: "N", group_title: "Batch" })];
+  const sect = pure.groupRows(trows, "group");
+  check("groupRows marks a torrent group and words its meta; an ordinary batch is unchanged", sect[0].torrent && sect[0].torrent.files === 23 && sect[0].meta === "0/2 done \u00B7 2 of 23 files" && !sect[1].torrent && sect[1].meta === "0/1 done");
+  check("a torrent group's header offers Pause, Resume and Cancel plus Add more files; an ordinary batch keeps Pause, Resume, Retry",
+    /\[\["pause", "Pause"\], \["resume", "Resume"\], \["cancel", "Cancel"\]\]/.test(source) && /\[\["pause", "Pause"\], \["resume", "Resume"\], \["retry", "Retry"\]\]/.test(source) && /text: "Add more files"/.test(source)
+    && /dl_cancel", \{ group: gid \}/.test(source));
+  check("the picker talks only to the two torrent routes, with the write header, and draws every name as text",
+    /hubFetch\("\/api\/hub\/torrent\/files", \{ source: P\.source \}\)/.test(source) && /hubFetch\("\/api\/hub\/torrent\/add", \{ source: P\.source, indexes: indexes, group: P\.group \}\)/.test(source)
+    && !/innerHTML\s*=/.test(source) && /id="picker"/.test(htmlT) && /id="addChoose"/.test(htmlT) && /\.picker__tree \{/.test(css) && /\.pk__n \{/.test(css));
+  check("a torrent that asked which files (needs_clarification) opens the picker instead of failing", /one\.needs_clarification && one\.torrent && c\.args\.magnet/.test(source) && /openPicker\(c\.args\.magnet, ""\)/.test(source));
+  const serverJs = fs.readFileSync(path.join(__dirname, "..", "web", "server.js"), "utf8");
+  check("server.js has exactly the two torrent routes, both behind the write guard", /app\.post\("\/api\/hub\/torrent\/files", requireHubWrite, requireJarvis/.test(serverJs) && /app\.post\("\/api\/hub\/torrent\/add", requireHubWrite, requireJarvis/.test(serverJs)
+    && (serverJs.match(/\/api\/hub\/torrent\//g) || []).length === 2);
 
   console.log("\n" + passed + " passed, " + failed + " failed");
   process.exit(failed ? 1 : 0);

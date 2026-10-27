@@ -70,6 +70,7 @@
             <textarea id="addInput" spellcheck="false" rows="5"
                       placeholder="Paste one or more links, one per line&#10;https://example.com/file.zip"></textarea>
             <div class="hint" id="addHint" aria-live="polite"></div>
+            <button type="button" class="btn btn--sm" id="addChoose" hidden title="See the files inside this torrent and tick the ones you want">Choose files&hellip;</button>
             <div class="field__help">Direct file links (http or https). Several links are queued together as one batch.
               You can also drop links anywhere on this panel.</div>
           </div>
@@ -131,6 +132,7 @@
           </div>
         </form>
 
+        <div class="picker" id="picker" hidden></div>
         <div class="detail" id="detail" hidden></div>
         <div class="prefsbox" id="detailPrefs" hidden></div>
       </div>

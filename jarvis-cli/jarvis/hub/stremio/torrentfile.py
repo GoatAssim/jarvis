@@ -23,6 +23,10 @@ Every sentence this module returns about a bad file names the file by its own na
 The reading rules are the owner's own files only: the add tools already refuse a chat guest before any path
 reaches here.
 
+5. LIST     `read_files()` (brief N24) reads the file list of those same bytes with no server, for the
+              `torrent_files` tool and the panel's file picker.  It returns names exactly as the file holds them:
+              they are untrusted, and `hub/stremio/torrent_files.py` decides what is safe.
+
 Linux-tested only.  The Windows branches (a mapped network drive, reparse points) are written but have not run on
 Windows; macOS network volumes are not detected.
 """
@@ -138,6 +142,105 @@ def parse(data):
     except _Bad as exc:
         return None, str(exc)
     return {"infohash": hashlib.sha1(data[start:end]).hexdigest(), "size": len(data)}, None
+
+
+# --------------------------------------------------------------------------- the file list (N24)
+
+MAX_FILES_READ = 20000           # file entries kept from one .torrent; the rest are only counted
+
+
+def _decode(data, i, depth, budget):
+    """One bencode value at data[i] -> (python value, next index).  Bytes stay bytes.  Bounded like _end_of()."""
+    budget[0] -= 1
+    if budget[0] < 0 or depth > MAX_DEPTH or i >= len(data):
+        raise _Bad("too big or too deep")
+    ch = data[i]
+    if ch == 0x69:                                           # i<digits>e
+        end = data.find(b"e", i)
+        if end < 0 or not _INT.fullmatch(data[i + 1:end]):
+            raise _Bad("bad integer")
+        return int(data[i + 1:end]), end + 1
+    if _is_digit(ch):                                        # <len>:<bytes>
+        colon = data.find(b":", i, i + 12)
+        if colon < 0:
+            raise _Bad("bad string")
+        n = int(data[i:colon])
+        if colon + 1 + n > len(data):
+            raise _Bad("cut off")
+        return data[colon + 1:colon + 1 + n], colon + 1 + n
+    if ch == 0x6C:                                           # l ... e
+        out, i = [], i + 1
+        while True:
+            if i >= len(data):
+                raise _Bad("cut off")
+            if data[i] == 0x65:
+                return out, i + 1
+            val, i = _decode(data, i, depth + 1, budget)
+            out.append(val)
+    if ch == 0x64:                                           # d ... e
+        out, i = {}, i + 1
+        while True:
+            if i >= len(data):
+                raise _Bad("cut off")
+            if data[i] == 0x65:
+                return out, i + 1
+            key, i = _decode(data, i, depth + 1, budget)
+            if not isinstance(key, bytes):
+                raise _Bad("bad key")
+            val, i = _decode(data, i, depth + 1, budget)
+            out.setdefault(key, val)
+    raise _Bad("not bencode")
+
+
+def _text(value, limit=4096):
+    """A name out of the file as text.  Kept RAW (NUL, slashes and all) so the caller can refuse it: this module
+    never decides what is safe, torrent_files.check_path() does."""
+    if isinstance(value, bytes):
+        return value[:limit].decode("utf-8", "replace")
+    return ""
+
+
+def read_files(data):
+    """The file list of a .torrent, from its own bytes, with NO server.  Pure: no files, no network.
+
+    Returns ({name, infohash, single, files: [{path, length, pad}], count, truncated}, None) or (None, why-not).
+    `path` is the segments joined with "/" and is UNTRUSTED (it may hold "..", a drive letter, a NUL ...);
+    `files` keeps the torrent's own order, which is the file index the Stremio server uses.  At most
+    MAX_FILES_READ entries are kept; `count` is the real number.  A v2-only torrent has no list: why-not."""
+    head, why = parse(data)
+    if head is None:
+        return None, why
+    data = bytes(data)
+    try:
+        budget = [MAX_NODES]
+        top = _dict_items(data, 0, budget)
+        start, _end = top[b"info"]
+        tree, _next = _decode(data, start, 0, budget)
+    except _Bad as exc:
+        return None, str(exc)
+    if not isinstance(tree, dict):
+        return None, "no info section"
+    name = _text(tree.get(b"name.utf-8") or tree.get(b"name"))
+    listed, files, count = tree.get(b"files"), [], 0
+    if isinstance(listed, list):
+        for ent in listed:
+            if not isinstance(ent, dict) or not isinstance(ent.get(b"length"), int):
+                return None, "a file entry without a length"
+            parts = ent.get(b"path.utf-8") if isinstance(ent.get(b"path.utf-8"), list) else ent.get(b"path")
+            if not isinstance(parts, list) or not parts:
+                return None, "a file entry without a path"
+            count += 1
+            if len(files) < MAX_FILES_READ:
+                attr = ent.get(b"attr") if isinstance(ent.get(b"attr"), bytes) else b""
+                files.append({"path": "/".join(_text(p, 1024) for p in parts), "length": max(0, ent[b"length"]),
+                              "pad": b"p" in attr})
+        single = False
+    elif isinstance(tree.get(b"length"), int):
+        files, count, single = [{"path": name, "length": max(0, tree[b"length"]), "pad": False}], 1, True
+    else:
+        return None, "no file list in it (a v2-only torrent)"
+    return {"name": name, "infohash": head["infohash"], "single": single, "files": files, "count": count,
+            "truncated": count > len(files)}, None
 
 
 # --------------------------------------------------------------------------- where the hub keeps its copies

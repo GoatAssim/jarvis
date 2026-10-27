@@ -258,7 +258,7 @@ def test_hub_client():
                                                                        size_bytes=10, source="reg") is True
               and ids(store) == ["c1"] and store.list_updates()[0]["source"] == "reg")
         check("clear_update removes it", hub_client.clear_update("fetch", "c1") is True and ids(store) == [])
-        check("the steam id is reserved for the hub itself", hub_client.offer_update("steam", "x", title="x") is False)
+        check("an id reserved for the hub's own engines is refused", hub_client.offer_update("ytdlp", "x", title="x") is False)
         check("a malformed provider or an empty id is False, never an exception",
               hub_client.offer_update("Bad Id", "x") is False and hub_client.offer_update("fetch", "") is False
               and hub_client.offer_update(None, None) is False and hub_client.clear_update(5, []) is False)

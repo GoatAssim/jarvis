@@ -429,6 +429,30 @@
             setStatus("waiting for your OK\u2026", "busy");
             confirmCard(m);
             break;
+          case "ui-request": {
+            // A tool asked the user something (jarvis/ui_bridge.py) and is blocked on stdin
+            // until we send exactly one `ui-response` -- including when there is no dialog kit
+            // or it throws, or the tool waits out its timeout.
+            const req = m.request || {};
+            const answer = (value) => {
+              if (sock && sock.readyState === 1) sock.send(JSON.stringify({ type: "ui-response", value }));
+            };
+            const kit = root.JarvisUI;
+            let pending;
+            try {
+              if (!kit) pending = Promise.resolve(req.default ?? "");
+              else if (req.kind === "confirm") pending = kit.confirm(req);
+              else if (req.kind === "choose") pending = kit.choose(req);
+              else if (req.kind === "prompt") pending = kit.prompt(req);
+              else if (req.kind === "form") pending = kit.form(req);
+              else pending = Promise.resolve(req.default ?? "");
+            } catch (_e) { pending = Promise.resolve(req.default ?? ""); }
+            setStatus("waiting for your answer\u2026", "busy");
+            Promise.resolve(pending)
+              .then((value) => answer(req.kind === "confirm" ? (value ? "y" : "n") : value))
+              .catch(() => answer(req.default ?? ""));
+            break;
+          }
           case "ask-error":
             finish({ error: String(m.message || "Jarvis couldn't answer."), stopped: t.stopped });
             break;

@@ -2962,6 +2962,25 @@ app.post("/api/hub/history/clear", requireHubWrite, requireJarvis, (req, res) =>
 });
 app.post("/api/hub/redownload", requireHubWrite, requireJarvis, (req, res) => hubAdmin(res, "redownload", { id: hubText(req.body?.id, 120) }, 30000));
 app.post("/api/hub/reorder", requireHubWrite, requireJarvis, (req, res) => hubAdmin(res, "reorder", { ids: hubIds(req.body?.ids) }));
+// The torrent file picker (N24): list one torrent's files, and queue the chosen ones as one group. Both are the owner's own
+// buttons (same guards as the other writes). Listing a magnet asks Stremio's server to register it and may wait for peers,
+// so it gets a long time limit; neither route decides anything: hub_admin / hub/stremio/torrent_files.py check every name.
+function hubIndexes(value) {
+  const out = [];
+  for (const v of Array.isArray(value) ? value : []) {
+    const n = typeof v === "number" ? v : Number.parseInt(String(v), 10);
+    if (Number.isInteger(n) && n >= 0 && n < 100000 && !out.includes(n)) out.push(n);
+    if (out.length >= 100) break;
+  }
+  return out;
+}
+app.post("/api/hub/torrent/files", requireHubWrite, requireJarvis, (req, res) => hubAdmin(res, "torrent_files", {
+  source: hubText(req.body?.source, 4096), wait_s: 25,
+}, 90000));
+app.post("/api/hub/torrent/add", requireHubWrite, requireJarvis, (req, res) => hubAdmin(res, "torrent_add", {
+  source: hubText(req.body?.source, 4096), indexes: hubIndexes(req.body?.indexes),
+  group: HUB_ID_RE.test(String(req.body?.group || "")) ? String(req.body.group) : "", start_paused: req.body?.start_paused === true,
+}, 90000));
 // Dismiss / Clear finished (brief 19): hide one provider row ({id}) or every row that can be hidden ({finished: true}).
 // It hides: no row is deleted and no file is touched. The rules and the refusals are service.dismiss's (hub_admin passes them on).
 app.post("/api/hub/dismiss", requireHubWrite, requireJarvis, (req, res) => hubAdmin(res, "dismiss", {
@@ -4498,9 +4517,11 @@ function relayBridgeEvent(ws, kind, types, ev, onStdoutLine, onLine) {
         tool: ev.tool, arguments: ev.arguments || {}, risk_note: ev.risk_note || null,
       });
     case "ui":
-      // Only a directly run command ever relayed these; in an ask the marker line was
-      // always plain output, and still is.
-      if (kind !== "run") return asLine(String(ev.raw ?? ""));
+      // A tool asked the user something (jarvis/ui_bridge.py) and is BLOCKED on stdin until
+      // the browser answers. Both kinds relay it: the browser shows the dialog and sends one
+      // `ui-response`, which the handler below writes to the running child's stdin. (An ask
+      // used to print this line as plain text, which nothing could answer: the tool waited
+      // out its timeout and counted it as "No".)
       if (onLine) onLine("out", String(ev.raw ?? ""));
       return send(ws, { type: "ui-request", request: ev.request });
     case "reply":
@@ -5457,6 +5478,16 @@ wss.on("connection", (ws) => {
             return false; // malformed — let it through as plain text rather than swallow it silently
           }
           send(ws, { type: "ask-usage", usage });
+          return true;
+        }
+        // The no-bridge twin of the bridge's `ui` event: same message as a direct run sends,
+        // same `ui-response` answer. Without it the question would print as plain text and
+        // the tool would sit on stdin until its timeout.
+        if (line.startsWith(UI_MARKER)) {
+          let uiPayload;
+          try { uiPayload = JSON.parse(line.slice(UI_MARKER.length)); }
+          catch { return false; }
+          send(ws, { type: "ui-request", request: uiPayload });
           return true;
         }
         if (!line.startsWith(CONFIRM_MARKER)) return false;

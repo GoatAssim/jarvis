@@ -386,3 +386,30 @@ input[type=time], input[type=number] { width: auto; }
 .hist__empty .btn { margin-top: 10px; }
 .hist__note { padding: 12px 4px 4px; text-align: center; color: var(--h-dimmer); }
 .hist__more { margin: 6px 14px 10px; align-self: center; }
+
+/* N24: dragging a whole group by its header, and the torrent file picker */
+.section.is-dragging { opacity: .45; }
+.section.drop-before { box-shadow: 0 -2px 0 0 var(--h-acc); }
+.section.drop-after { box-shadow: 0 2px 0 0 var(--h-acc); }
+.section__grip { flex: none; color: var(--h-dimmer); font-size: 11px; margin-right: 2px; user-select: none; cursor: grab; }
+.picker { display: flex; flex-direction: column; gap: 8px; min-height: 0; flex: 1; }
+.picker[hidden] { display: none; }
+.picker__head { display: flex; align-items: center; gap: 8px; }
+.picker__name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.picker__status { font-size: 11.5px; color: var(--h-dim); }
+.picker__status.bad, .picker__why.bad, .picker__total.bad { color: var(--h-red); }
+.picker__bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.picker__bar[hidden] { display: none; }
+.picker__bar .search__input { flex: 1; min-width: 140px; }
+.picker__quick { display: flex; flex-wrap: wrap; gap: 4px; }
+.picker__tree { flex: 1; min-height: 120px; max-height: 52vh; overflow: auto; border: 1px solid var(--h-line); border-radius: 6px; padding: 4px 0; }
+.pk { display: flex; align-items: center; gap: 6px; padding: 2px 6px; font-size: 12px; cursor: pointer; }
+.pk:hover { background: rgba(128,128,128,.12); }
+.pk.is-off { opacity: .55; cursor: default; }
+.pk__n { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pk__f { flex: none; color: var(--h-dimmer); font-size: 10.5px; }
+.pk__s { flex: none; min-width: 64px; text-align: right; color: var(--h-dim); font-variant-numeric: tabular-nums; }
+.picker__foot { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.picker__total { flex: 1; min-width: 0; font-size: 12px; }
+.picker__why { flex-basis: 100%; font-size: 11.5px; }
+

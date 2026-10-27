@@ -657,6 +657,168 @@ _STATE_GROUPS = {"active": states.ACTIVE_STATES, "final": states.FINAL_STATES,
                  "waiting": ("queued", "stalled", "paused")}
 
 
+# --------------------------------------------------------------------------- torrents: choose the files (N24)
+
+TORRENT_GROUP_KIND = "torrent"
+TORRENT_GROUP_DONE = ("done",)
+_SPACE_MARGIN = 1.10
+
+
+def torrent_groups(store):
+    """{group id: {title, infohash, name, folder, files}} for the groups that hold chosen files of one torrent."""
+    out = {}
+    for gid, group in store.list_groups().items():
+        if group.get("kind") == TORRENT_GROUP_KIND:
+            meta = group.get("meta") or {}
+            out[gid] = {"title": group.get("title"), "infohash": meta.get("infohash"), "name": meta.get("name"),
+                        "files": meta.get("files")}
+    return out
+
+
+def _file_index_of(item):
+    from .stremio import links
+    parsed = links.parse_magnet(item.get("source_url") or "")
+    return parsed["file_idx"] if parsed else None
+
+
+def add_torrent_files(source, indexes, *, dest=None, group_id=None, title=None, start_paused=False, start_at=None,
+                      allow_absolute_dest=False, listing=None, budget_s=20.0, store=None):
+    """Queue the chosen files of ONE torrent: one group, one child row per file.  Never raises.
+
+    `source` is what lookup() understands (magnet, hash, .torrent link, .torrent path); `indexes` the file
+    numbers (at most 100); `listing` an already-read lookup() answer (the panel and the tool pass it so the
+    torrent is read once).  `group_id` adds to a group that exists (the panel's "Add more files"); without it
+    the torrent's own group is reused when there is one, so one torrent is never two groups.  `title` names
+    a NEW group (default: the torrent's own name).
+
+    Safety is per file: a hostile name is refused alone (answer `refused`), the others are queued.  The
+    free-space check covers the SUM of the files that would be queued.
+
+    -> {ok, group, group_title, added: [{id, index, title, size, state, duplicate}], skipped: [...],
+        refused: [{index, path, reason}], count, total_size, free_bytes, note}"""
+    try:
+        from .stremio import links, torrent_files as tfiles, torrentfile
+        store = _store(store)
+        picked, problem = tfiles.parse_indexes(indexes)
+        if problem:
+            return _err(problem)
+        if not picked:
+            return _err("say which files: file_indexes is empty")
+        if listing is None:
+            listing = tfiles.lookup(source, budget_s=budget_s)
+        if not listing.get("ok"):
+            return _err(listing.get("error") or "couldn't read that torrent")
+        digest = listing.get("infohash") or ""
+        if not links.valid_infohash(digest):
+            return _err("couldn't tell which torrent that is")
+        settings = store.get_settings()
+        root = settings_mod.library_root(settings)
+        where, problem = split_dest(dest, root, allow_absolute=allow_absolute_dest)
+        if problem == "needs_absolute":
+            return _err("a full path writes outside the library root (%s), so it has to be approved first; "
+                        "until then dest must be a sub-folder of the library" % root)
+        if problem:
+            return _err(problem)
+        timed = None
+        if str(start_at or "").strip() and str(start_at).strip().lower() not in START_NOW_WORDS:
+            timed, problem = parse_start(start_at)
+            if problem:
+                return _err(problem)
+        base = where.get("subdir", "")
+        base_depth = len([p for p in str(base).replace("\\", "/").split("/") if p not in ("", ".")])
+        chosen = tfiles.choose(listing, picked, base=base, base_depth=base_depth)
+        accepted, refused, skipped = chosen["accepted"], chosen["refused"], []
+
+        # the group: given, else this torrent's own, else a new one
+        groups = torrent_groups(store)
+        gid = group_id
+        if gid is not None and gid not in groups:
+            return _err("that isn't a torrent group")
+        if gid is not None and groups[gid]["infohash"] != digest:
+            return _err("that group belongs to a different torrent")
+        if gid is None:
+            gid = next((g for g, info in groups.items() if info["infohash"] == digest), None)
+        taken = {}
+        if gid is not None:
+            for item in store.list_items(group_id=gid, limit=2000, include_dismissed=True, include_disabled=True):
+                if item["state"] not in ("failed", "cancelled"):
+                    taken[_file_index_of(item)] = item["state"]
+        fresh = []
+        for entry in accepted:
+            if entry["index"] in taken:
+                skipped.append({"index": entry["index"], "path": entry["display"],
+                                "reason": "already in this group (%s)" % taken[entry["index"]]})
+            else:
+                fresh.append(entry)
+        if not fresh:
+            return _err("nothing to queue: %s" % ("every chosen file was refused or is already queued"),
+                        refused=refused, skipped=skipped, group=gid)
+        total = sum(e["length"] for e in fresh)
+        probe = where.get("dest_abs") or (naming.safe_subdir(root, base) if base else None) or root
+        free = _free_bytes(probe)
+        if free is not None and free < int(total * _SPACE_MARGIN):
+            return _err("not enough free space: the %d chosen file(s) add up to %s and %s is free where they would be "
+                        "saved (%s). Choose fewer files or free some space." % (
+                            len(fresh), _fmt_bytes(total), _fmt_bytes(free), str(probe)[:80]),
+                        total_size=total, free_bytes=free, refused=refused, skipped=skipped)
+        kept = None
+        if listing.get("blob"):
+            kept = {"infohash": digest, "name": listing.get("name") or "", "stem": tfiles.clean_display(listing.get("name") or digest, 120),
+                    "size": len(listing["blob"]), "blob": listing["blob"]}
+            torrentfile.stage(kept)            # the engine finds the copy by hash when it runs a child
+        title = (tfiles.clean_display(title or "", 100) or tfiles.clean_display(listing.get("name") or "", 100)
+                 or "Torrent %s" % digest[:8])
+        if gid is None:
+            gid = store.ensure_group(title, kind=TORRENT_GROUP_KIND,
+                                     meta={"infohash": digest, "name": tfiles.clean_display(listing.get("name") or "", 200),
+                                           "folder": listing["folder"], "files": listing["count"],
+                                           "single": bool(listing["single"])})
+        meta = {"folder": listing["folder"], "root": str(listing.get("name") or "")[:300], "single": bool(listing["single"]),
+                "base": base, "base_depth": base_depth}
+        added = []
+        for entry in fresh:
+            options = dict(where)
+            options["subdir"] = entry["subdir"]
+            options["filename"] = entry["filename"]
+            options["torrent"] = dict(meta)
+            if timed:
+                options["start_at"] = timed["iso"]
+            magnet = links.build_magnet(digest, entry["index"], listing.get("name") or None, ())
+            item, created = store.add_item(
+                engine="stremio", source_url=magnet, title=states.clean_text(os.path.basename(entry["relative"]), 120),
+                subtitle=states.clean_text(entry["relative"], 200),
+                kind=naming.kind_for(entry["filename"]), options=options, group_id=gid,
+                state="paused" if (start_paused or timed) else "queued",
+                dedupe_key=router.dedupe_key("stremio", router.canonical_url(magnet), options))
+            if timed and created:
+                store.update_item(item["id"], {"next_attempt_at": timed["epoch"]}, touch=False,
+                                  event="scheduled to start at %s" % timed["iso"])
+                item = store.get_item(item["id"]) or item
+            added.append({"id": item["id"], "index": entry["index"], "title": item["title"], "size": entry["length"],
+                          "state": item["state"], "duplicate": not created})
+        out = {"ok": True, "group": gid, "group_title": title, "added": added, "skipped": skipped, "refused": refused,
+               "count": len(added), "total_size": total, "free_bytes": free, "library_root": str(root)}
+        notes = []
+        if not daemon_view(store)["alive"]:
+            notes.append("The download hub daemon isn't running, so nothing will start until it is "
+                         "(Menu > Daemons > Download hub).")
+        if refused:
+            notes.append("%d file(s) were refused because their names in the torrent are not safe to save." % len(refused))
+        if notes:
+            out["note"] = " ".join(notes)
+        return out
+    except Exception as exc:  # noqa: BLE001 - tools never raise
+        return _err("couldn't queue those files: %s" % exc)
+
+
+def _fmt_bytes(n):
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024 or unit == "TB":
+            return ("%d %s" % (n, unit)) if unit == "B" else ("%.1f %s" % (n, unit))
+        n /= 1024.0
+    return "%d B" % n
+
+
 def list_items(*, state=None, engine=None, provider=None, kind=None, group=None, search=None,
                limit=50, store=None, with_summary=False):
     try:

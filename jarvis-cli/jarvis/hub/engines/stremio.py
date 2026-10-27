@@ -17,6 +17,13 @@ end; the server fetches the pieces.  This engine is the HTTP engine plus two ext
                 shows peers and the final message can say "no peers" instead of just "stalled".
   5. DONE       EOF + the file's size equals `files[idx].length` from stats.json.
 
+A TORRENT GROUP's child (brief N24: the owner chose some files of a torrent) carries `options["torrent"]` =
+{folder, root, single, base, base_depth}.  Its file name and folder are NOT taken from the row: they are worked
+out again here from the server's own file entry by `torrent_files.layout()`, which REFUSES a hostile name
+(`..`, an absolute path, a drive letter, a NUL, a reserved Windows name, an over-long part) for that file only: the
+child fails with a plain sentence and nothing is written.  The layout is `<library>/<torrent folder>/<folders
+inside the torrent>/<file>`.
+
 Storage mode is `save` (plan decision 6): the hub owns an ordinary video file.  `warm` is not built.
 
 The server forgets every registration when it restarts, so each attempt starts with `create`
@@ -44,6 +51,7 @@ from .. import settings as settings_mod
 from ..stremio import config as scfg
 from ..stremio import links
 from ..stremio import server as sserver
+from ..stremio import torrent_files as tfiles
 from ..stremio import torrentfile
 from .base import Engine, Outcome, RouteRule
 
@@ -399,6 +407,31 @@ def _layout(item, ref, ctx, entry, idx):
     return opts
 
 
+def _torrent_layout(item, entry, root):
+    """(options for the HTTP engine, None) or (None, a sentence) for a child of a torrent group.
+
+    The name comes from the SERVER's entry, checked again here whatever the row says: a name the swarm chose is
+    never trusted.  A refused name writes nothing."""
+    opts = dict(item.get("options") or {})
+    meta = opts.get("torrent") or {}
+    placed = tfiles.layout(entry.get("path") or entry.get("name") or "", root=root or str(meta.get("root") or ""),
+                           folder=str(meta.get("folder") or ""), single=bool(meta.get("single")),
+                           base="" if opts.get("dest_abs") else str(meta.get("base") or ""),
+                           base_depth=0 if opts.get("dest_abs") else int(meta.get("base_depth") or 0))
+    if not placed["ok"]:
+        return None, "refused: this file's name from the torrent isn't safe to write (%s); nothing was saved" % placed["reason"]
+    opts["filename"] = placed["filename"]
+    opts.pop("torrent", None)
+    if opts.get("dest_abs"):
+        target = naming.safe_subdir(opts["dest_abs"], placed["subdir"])
+        if target is None:
+            return None, "refused: this file's folder doesn't fit under the chosen folder; nothing was saved"
+        opts["dest_abs"] = str(target)
+    else:
+        opts["subdir"] = placed["subdir"]
+    return opts, None
+
+
 def _cache_problem(server, length):
     """A sentence when the Stremio cache drive can't hold this file, else None.  Only checked for
     an unlimited cache (a finite one evicts instead of filling the disk)."""
@@ -548,7 +581,12 @@ def _run(item, ctx):
             return Outcome.failed(problem)
 
         # --- 3. download through the HTTP engine
-        opts = _layout(item, ref, ctx, entry, idx)
+        if isinstance((item.get("options") or {}).get("torrent"), dict):
+            opts, refusal = _torrent_layout(item, entry, str(stats.get("name") or ""))
+            if opts is None:
+                return Outcome.failed(refusal)
+        else:
+            opts = _layout(item, ref, ctx, entry, idx)
         ref.update({"infohash": target["infohash"], "file_idx": idx, "length": length})
         title = str(item.get("title") or "")
         if (not title or title.lower().startswith(("magnet:", "{")) or title == str(item.get("source_url") or "")[:len(title)]
