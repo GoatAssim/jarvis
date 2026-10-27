@@ -11,9 +11,11 @@ hub daemon).  These two tools are the chat side of it:
                      process); the answer comes later and is read with dl_updates.  Read-only: a check only
                      lists what is out of date, it never installs, upgrades or removes anything.
 
-Neither is confirm-gated: neither changes anything on the machine.  A remote chat guest (Discord / Instagram)
-may read dl_updates; dl_updates_check is refused for a guest in the handler (it starts programs and uses the
-network on the owner's PC) and belongs in tools.OWNER_ONLY_TOOLS (see the 9B report, Open points).
+Neither is confirm-gated: neither changes anything on the machine.  BOTH are the owner's (9B): a remote chat
+guest (Discord / Instagram) is refused in the handler before the store is read, and neither is offered to one
+(both are in tools.OWNER_ONLY_TOOLS).  dl_updates_check starts programs and uses the network on the owner's PC;
+dl_updates names the software installed on it (titles, installed -> available versions), the same kind of
+answer as steam_library and check_mc_updates, which are owner-only.  A guest keeps dl_list and dl_status.
 
 Provider text (titles, versions, error words) comes from other programs and is UNTRUSTED: it is capped here a
 second time, returned only as data fields, and never put into a prompt or an instruction by this file.
@@ -112,9 +114,9 @@ def _is_chat_guest():
     return not data.get("is_owner")
 
 
-def _guest_refusal():
-    return {"ok": False, "error": "starting an update check is the owner's: someone in a chat can read what "
-                                  "was found (dl_updates) but not start a check"}
+def _guest_refusal(tool):
+    """One plain sentence naming the tool; the same wording as download_hub._owner_refusal."""
+    return {"ok": False, "error": "%s is the owner's: in a chat you can only look at the queue (dl_list, dl_status)" % tool}
 
 
 def _store():
@@ -161,8 +163,11 @@ def _provider_for_model(p):
 # ---------------------------------------------------------------------------
 
 def tool_dl_updates(args=None):
-    """The stored findings.  Read-only; a chat guest may call it."""
+    """The stored findings.  Read-only, but owner only: it names the software installed on the owner's PC.
+    Refuses a chat guest BEFORE touching the store."""
     try:
+        if _is_chat_guest():
+            return _guest_refusal("dl_updates")
         from ..hub import updates
         args = args if isinstance(args, dict) else {}
         provider = _provider_arg(args)
@@ -197,7 +202,7 @@ def tool_dl_updates_check(args=None):
     """Ask for a check now.  Refuses a chat guest BEFORE touching the store."""
     try:
         if _is_chat_guest():
-            return _guest_refusal()
+            return _guest_refusal("dl_updates_check")
         from ..hub import updates
         args = args if isinstance(args, dict) else {}
         out = updates.request_check(_store(), provider=_provider_arg(args))
@@ -247,7 +252,10 @@ TEST_CHECKLIST = {
         "care": "Read-only. Titles and versions are text from other programs; the tool hands them over as data only.",
         "watch": [
             "Tested against a fake only (a fake update tool); never run with a real provider on the owner's PC.",
-            "A chat guest may ask dl_updates (read-only on purpose); the same guest is refused by dl_updates_check.",
+            "Owner only: a chat guest (Discord / Instagram) is refused by the handler before the store is read, and the tool is "
+            "not offered to one (tools.OWNER_ONLY_TOOLS); dl_list and dl_status stay open to a guest. Covered by "
+            "tests/test_hub_updates_gates.py and tests/test_hub_control_gates.py with a simulated guest (direct call); not tried "
+            "from a real Discord or Instagram chat.",
             "A provider switched off in Menu > Downloads > Providers shows no findings and no health line; so does one "
             "with update_checks off.",
             "After a failed check the OLD findings stay, with their age (checked_ago), and the failure is named in problems.",
@@ -274,9 +282,10 @@ TEST_CHECKLIST = {
         "care": "A check starts programs and uses the network on this PC (what a provider's update tool does); it changes nothing.",
         "watch": [
             "Tested against a fake only; never run with a real provider on the owner's PC.",
-            "Owner only: a chat guest is refused by the handler before anything is read or started; tools.OWNER_ONLY_TOOLS "
-            "(tools.py, not in this change) should also hide it from a guest. See the 9B report, Open points.",
-            "Not confirm-gated: it changes nothing on the machine. The owner may want a confirmation anyway (Open points).",
+            "Owner only: a chat guest (Discord / Instagram) is refused by the handler before anything is read or started, and the "
+            "tool is not offered to one (tools.OWNER_ONLY_TOOLS). Covered by tests/test_hub_updates_gates.py and "
+            "tests/test_hub_control_gates.py with a simulated guest (direct call); not tried from a real Discord or Instagram chat.",
+            "Not confirm-gated: it changes nothing on the machine. The owner may want a confirmation anyway (see the 9B report, Open points).",
         ],
     },
 }

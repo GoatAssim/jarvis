@@ -2,8 +2,12 @@
 
 Each `jarvis` command is a new process, so a memory cache does nothing; this file is the cache.
 Time to live about 10 minutes by default, size capped, written atomically (temp file then replace).
-It holds public answers only, NEVER the key: put() refuses a value that contains the CurseForge key if
-one is configured (belt and braces: net.py never returns the key anyway).
+It holds public answers only, NEVER the key: put() refuses a value (or a cache key name) that contains the
+CurseForge key if one is configured, in any spelling the file could carry: as it is, and JSON-escaped (a key
+with a backslash or a double quote is written with a backslash in front of it), once or twice (a JSON text
+held in a string).  The guard has no minimum key length: a refused write is only a cache miss, so a short or
+odd key costs a little caching and never a leak.  (Belt and braces: net.py never returns the key anyway, and
+nothing from curseforge.py is cached at all; tests/test_minecraft_hardening.py pins both.)
 
 The file is listed in Settings as cache state by another patch (its entry is not part of this file).  Every
 function returns quietly on any problem: a cache that fails is a cache miss, never an error.
@@ -59,14 +63,26 @@ def _save(entries):
 
 
 def _secret():
-    """The configured CurseForge key, or None.  Lazy: config.py belongs to another patch."""
+    """The configured CurseForge key, or None.  Lazy: config.py belongs to another patch.  Any length."""
     try:
         import importlib
         config = importlib.import_module(__package__ + ".config")
         key = config.get_key()
-        return key if isinstance(key, str) and len(key) >= 8 else None
+        return key.strip() if isinstance(key, str) and key.strip() else None
     except Exception:  # noqa: BLE001
         return None
+
+
+def _spellings(secret):
+    """Every way `secret` can read inside the cache file: as it is, and JSON-escaped once or twice, with
+    and without ASCII escapes.  json.dumps escapes a backslash and a double quote, so a key holding either
+    is NOT found by a plain substring search of the serialised value."""
+    forms = {secret}
+    for ascii_only in (True, False):
+        once = json.dumps(secret, ensure_ascii=ascii_only)[1:-1]
+        forms.add(once)
+        forms.add(json.dumps(once, ensure_ascii=ascii_only)[1:-1])
+    return forms
 
 
 def get(key):
@@ -95,8 +111,10 @@ def put(key, value, ttl_seconds=DEFAULT_TTL):
         if len(text.encode("utf-8")) > MAX_ENTRY_BYTES:
             return False
         secret = _secret()
-        if secret and secret in text:
-            return False
+        if secret:
+            forms = _spellings(secret)
+            if any(form in text or form in key for form in forms):
+                return False
         with _lock:
             entries = _load()
             now = _now()

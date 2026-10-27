@@ -14,14 +14,16 @@ spread over several files that different agents wrote:
     on disk (the key file itself) and in no result;
   * vendor text: a project summary that reads like an instruction comes back clipped and marked.
 
-It does not pin "exactly six tools": a later round may add a Minecraft tool, and every check that loops over the
-group covers it too.  The one exception is SIX below, the six tools of the first round, which must all exist and
-all be owner-only.
+It does not pin "exactly seven tools": a later round may add a Minecraft tool, and every check that loops over the
+group covers it too.  The one exception is SEVEN below (the six tools of the first round plus `check_mc_updates`),
+which must all exist and all be owner-only.  A new tool also needs its module in `_handler()` (and in G1's module
+list), or the "has a handler" check fails on purpose.
 
-KNOWN FAILURE UNTIL S2'S PATCH IS APPLIED: in the baseline this file was written against (jarvis-main_181_),
-`download_mc_file` and `make_modpack_file` are loaded tools but are not in tools.OWNER_ONLY_TOOLS.  The checks
-"<name> is in OWNER_ONLY_TOOLS" and "a chat guest is not offered <name>" fail for exactly those two names until
-S2's tools.py patch adds them.  Everything else here passes without it (the handlers refuse a guest themselves).
+Checked against jarvis-main_182_ (docs agent M4, by reading, not by running): the files S1 to S3 added
+(modhosts/crossmatch.py, modhosts/updates.py, actions/minecraft_updates.py) import no network library, name neither the
+key file nor the key variable and never call get_key(), so the allow-lists below needed no new entry; tools.py lists
+all seven names in OWNER_ONLY_TOOLS.  What did need a fix: `_handler()` did not know minecraft_updates, so G3 could not
+find check_mc_updates' handler.
 
 Run: python3 tests/test_minecraft_guards.py   (plain script, prints "ok" / "FAILED", exits 1 on any failure)
 No network, no real home folder: HOME is a temp folder and the transport is replaced.  Fixture prefix: hand_p7_
@@ -55,6 +57,7 @@ from jarvis.actions import minecraft_download as dl  # noqa: E402
 from jarvis.actions import minecraft_lookup as lk  # noqa: E402
 from jarvis.actions import minecraft_optifine as mo  # noqa: E402
 from jarvis.actions import minecraft_packs as mp  # noqa: E402
+from jarvis.actions import minecraft_updates as mu  # noqa: E402
 from jarvis.hub import service  # noqa: E402
 from jarvis.modhosts import cache, config, hosts, net, untrusted  # noqa: E402
 
@@ -65,6 +68,7 @@ service._store(None).set_settings({"library_root": str(Path(HOME) / "library")})
 PASS, FAIL = [], []
 SIX = ("search_mc_mods", "get_mc_project", "download_mc_file", "make_modpack_file",
        "list_optifine_versions", "download_optifine")
+SEVEN = SIX + ("check_mc_updates",)
 WRITERS = ("download_mc_file", "make_modpack_file", "download_optifine")
 GROUP = "minecraft"
 FAKE_KEY = "FAKE-KEY-P7-3c9d41e07b5a28f6"
@@ -191,10 +195,11 @@ def test_g1_group_is_loaded():
     index = tools._tool_index()
     names = group_tools()
     check("the minecraft group lists tools", bool(names), names)
-    for name in SIX:
+    for name in SEVEN:
         check("%s is a loaded tool in the minecraft group" % name, name in index and name in names)
     for module, tool_names in ((lk, ("search_mc_mods", "get_mc_project")), (dl, ("download_mc_file",)),
-                               (mp, ("make_modpack_file",)), (mo, ("list_optifine_versions", "download_optifine"))):
+                               (mp, ("make_modpack_file",)), (mo, ("list_optifine_versions", "download_optifine")),
+                               (mu, ("check_mc_updates",))):
         check("%s declares its tools" % module.__name__.rsplit(".", 1)[-1], all(n in module.TOOLS for n in tool_names))
         check("%s joins the %s group" % (module.__name__.rsplit(".", 1)[-1], GROUP), module.TOOL_GROUP == GROUP)
 
@@ -203,13 +208,13 @@ def test_g1_group_is_loaded():
 # G2  owner only
 # =====================================================================================================================
 def test_g2_owner_only_set():
-    for name in SIX:
+    for name in SEVEN:
         check("%s is in OWNER_ONLY_TOOLS" % name, name in tools.OWNER_ONLY_TOOLS)
     for name in group_tools():
         check("%s (a minecraft tool) is in OWNER_ONLY_TOOLS" % name, name in tools.OWNER_ONLY_TOOLS)
     with Sender(GUEST):
         hidden = set(tools.hidden_from_sender())
-    for name in SIX:
+    for name in SEVEN:
         check("a chat guest is not offered %s" % name, name in hidden)
     with Sender(OWNER):
         hidden = set(tools.hidden_from_sender())
@@ -217,7 +222,7 @@ def test_g2_owner_only_set():
 
 
 def _handler(name):
-    for module in (lk, dl, mp, mo):
+    for module in (lk, dl, mp, mo, mu):
         if name in module.TOOLS:
             return module.TOOLS[name]
     return None
@@ -248,6 +253,9 @@ def test_g3_every_handler_refuses_a_guest_before_any_network_call():
 def test_g4_writers_are_confirm_gated():
     for name in WRITERS:
         check("%s is confirm-gated by default" % name, name in tool_safety.DEFAULT_CONFIRM_REQUIRED)
+    for module in (lk, mu):
+        check("%s only reads: its own confirm set is empty" % module.__name__.rsplit(".", 1)[-1],
+              not module.TOOL_CONFIRM_REQUIRED, module.TOOL_CONFIRM_REQUIRED)
 
 
 # =====================================================================================================================
@@ -293,6 +301,9 @@ def _imports(path):
 def test_g6_only_net_py_opens_connections():
     scanned = py_files("modhosts") + sorted((PKG / "actions").glob("minecraft_*.py"))
     check("the scan sees the modhosts package and the minecraft action files", len(scanned) >= 10, len(scanned))
+    check("the scan covers the S1 and S2 files (crossmatch, updates, minecraft_updates)",
+          {"modhosts/crossmatch.py", "modhosts/updates.py", "actions/minecraft_updates.py"} <= {rel(p) for p in scanned},
+          sorted(rel(p) for p in scanned))
     offenders = {}
     for path in scanned:
         hits = sorted(m for m in _imports(path) if m.split(".")[0] in NET_MODULES or m == "urllib.request")

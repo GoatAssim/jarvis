@@ -16,6 +16,10 @@ Rules this file enforces (tests/test_modhosts_net.py pins each one):
     its own key / authorization / cookie header: those are dropped.
   * 429: honour Retry-After once when it is short, otherwise `rate_limited` with the wait stated.  Never
     a retry loop.
+  * A CurseForge 403 is told apart by WHERE it came from.  From api.curseforge.com (the only host the key is
+    sent to) it is `bad_key`.  From the download host (no key is sent there) it is `cdn_refused`: the key is not
+    in question, and nothing says why the file was refused.  `cdn_refused` is net.py's own reason code (see
+    CDN_REFUSED); curseforge.download_url still folds it into `not_distributable` (tests/test_minecraft_hardening.py).
   * Every exception is caught and rewritten: a library error can carry a URL, so only the kind of failure
     is ever said.
 
@@ -61,6 +65,11 @@ MAX_ERROR_BODY = 2000
 KEY_VENDOR = "curseforge"
 KEY_HOST = "api.curseforge.com"
 KEY_HEADER = "x-api-key"
+
+# The reason for a 403 from a CurseForge host that is NOT the API host (the download host).  It is net.py's own
+# code: fail() would turn a code that modhosts/__init__.py does not list into `vendor_changed`, so _fail_own()
+# keeps it.  Once __init__.py lists it too, nothing here needs to change.
+CDN_REFUSED = "cdn_refused"
 
 # A short Retry-After is honoured once; a long one is reported instead.
 MAX_RETRY_WAIT = 10.0
@@ -161,6 +170,13 @@ def _scrub(text, key):
 
 def _label(vendor):
     return _LABELS.get(vendor, "The site")
+
+
+def _fail_own(reason, error, **extra):
+    """fail(), for a reason code this file adds to the package's list (only CDN_REFUSED today)."""
+    out = fail(reason, error, **extra)
+    out["reason"] = reason
+    return out
 
 
 def _with_params(url, params):
@@ -377,7 +393,7 @@ def _fetch(vendor, url, method, params, json_body, headers, want, max_bytes, max
 
             if not 200 <= status < 300:
                 raw, _ = _read(reply, MAX_ERROR_BODY * 4, deadline) if want != "head" else (b"", False)
-                return _http_failure(vendor, status, lowered, raw, key)
+                return _http_failure(vendor, status, lowered, raw, key, host)
 
             if want == "head":
                 return {"ok": True, "status": status, "headers": lowered, "body": None, "final_url": current}
@@ -418,7 +434,9 @@ def _charset(headers):
     return "utf-8"
 
 
-def _http_failure(vendor, status, headers, raw, key):
+def _http_failure(vendor, status, headers, raw, key, host=None):
+    """The failure for a non-2xx answer.  `host` is the host that answered: a 403 only means "the key" when it
+    came from the API host (the one place the key is sent); from the download host it is `cdn_refused`."""
     label = _label(vendor)
     if key and isinstance(raw, (bytes, bytearray)):
         raw = bytes(raw).replace(key.encode("utf-8"), b"***")        # a vendor error page may echo what it was sent
@@ -428,6 +446,10 @@ def _http_failure(vendor, status, headers, raw, key):
         extra["body"] = body
     if status == 404:
         return fail(NOT_FOUND, "%s has no such page (HTTP 404)." % label, **extra)
+    if status == 403 and vendor == KEY_VENDOR and host not in (None, "", KEY_HOST):
+        return _fail_own(CDN_REFUSED, "%s's download server refused this file (HTTP 403). The API key is not sent "
+                                      "there, so this is not a key problem: the link may have expired or the author "
+                                      "may not allow the download." % label, **extra)
     if status == 401 or (status == 403 and vendor == KEY_VENDOR):
         return fail(BAD_KEY, "%s refused the request (HTTP %d): the API key may be wrong, or this item is not "
                              "available to third-party tools." % (label, status), **extra)

@@ -374,9 +374,10 @@ def test_folder_rules():
         check("no request was made for any of them", fake.calls == [], fake.calls[:2])
         wipe_state()
         res = updates.check_folder(folder=None, default_folder=str(HOMEP / "Downloads-that-is-missing"))
-        check("a missing default folder is bad_dest too, in a plain sentence", res.get("ok") is False and res.get("reason") == "bad_dest"
-              and isinstance(res.get("error"), str) and res["error"], res)
-        check("nothing was requested for it either", fake.calls == [])
+        check("no folder, no last folder and a default that is not usable: needs_folder, asked in a plain sentence, no suggestion",
+              res.get("ok") is True and res.get("needs_folder") is True and res.get("needs_clarification") is True
+              and isinstance(res.get("ask"), str) and "can't be used" in res["ask"] and "suggested_folder" not in res, res)
+        check("nothing was requested for it either, and no state was written", fake.calls == [] and not state_file().exists())
     check("the resolver takes a good folder", updates.resolve_folder(str(real), "~/Downloads")[2] is None)
     check("`updates.protected_reason` is the shared rule (outdir), asked for the real path too",
           updates.outdir.protected_reason(jarvis_dir, writing=True) is not None)
@@ -485,7 +486,8 @@ def test_a_whole_folder():
     check("a resource pack and a shader use their own loaders and the asked Minecraft version",
           ups["looky-1.0.0.zip"]["latest"]["version"] == "1.1.0" and ups["shadery-1.0.0.zip"]["latest"]["version"] == "1.1.0")
     check("no `via` without Quilt", all("via" not in e["latest"] for e in ups.values()))
-    check("the CurseForge explanation is there once", "CurseForge" in res.get("curseforge_note", "") and "fingerprint" in res["curseforge_note"], res.get("curseforge_note"))
+    check("the CurseForge hint is there once (no key here: the half is skipped, not an error)", "CurseForge" in res.get("curseforge_note", "")
+          and "fingerprint" in res["curseforge_note"] and res["curseforge"]["why"] == "no_key" and res["curseforge"]["status"] == "skipped", res.get("curseforge"))
     check("the message says nothing was changed and where to get a file",
           "Nothing was downloaded, replaced, updated or installed" in res["message"] and "download_mc_file" in res["message"] and res["nothing_changed"] is True, res["message"])
     check("never says 'updated' as a result", "was updated" not in res["message"] and "have been updated" not in res["message"])
@@ -593,8 +595,9 @@ def test_curseforge_files_are_not_checked_never_guessed():
     nc = by_file(res, "not_checked")
     check("a file Modrinth does not know is not checked, with the reason", nc["jei-1.20.1-forge-15.3.0.jar"]["why"] == "not_on_modrinth"
           and "does not know" in nc["jei-1.20.1-forge-15.3.0.jar"]["detail"], nc)
-    check("the answer explains CurseForge files once: own fingerprint, not computed, nothing guessed",
-          "fingerprint" in res["curseforge_note"] and "not checked" in res["curseforge_note"] and "guessed" in res["curseforge_note"], res["curseforge_note"])
+    check("the answer explains CurseForge files once: own fingerprint, needs a key, nothing guessed",
+          "fingerprint" in res["curseforge_note"] and "not checked" in res["curseforge_note"] and "guessed" in res["curseforge_note"]
+          and "key" in res["curseforge_note"], res["curseforge_note"])
     check("the name 'jei' (a CurseForge-looking name) led nowhere: no name was ever sent", "jei" not in json.dumps([c["json"] for c in fake.calls]))
     check("no other site was contacted and no key was used", {c["host"] for c in fake.calls} == {"api.modrinth.com"}
           and not any("x-api-key" in c["headers"] for c in fake.calls))
@@ -723,8 +726,10 @@ def test_state_file():
         state_file().write_text("{not json at all", encoding="utf-8")
         check("a corrupt state file reads as empty", updates.load_state() == {"last_folder": None, "hashes": {}})
         res = updates.check_folder(folder=None, default_folder=str(folder))
-        check("and the default folder is used again", res.get("ok") is True and res["folder_from"] == "default", res)
-        check("the run rewrote a good file", isinstance(json.loads(state_file().read_text(encoding="utf-8")), dict))
+        check("and with no last folder the default is only SUGGESTED (needs_folder), never read on its own",
+              res.get("ok") is True and res.get("needs_folder") is True and res.get("suggested_folder") == str(folder), res)
+        updates.check_folder(folder=str(folder), default_folder=str(folder), **FAB)
+        check("the next run with a named folder rewrote a good file", isinstance(json.loads(state_file().read_text(encoding="utf-8")), dict))
         state_file().write_text(json.dumps({"v": 1, "last_folder": 5, "hashes": {"a": [1, 2, "nothex"], "b": "x", "c": [1, 2.5, "0" * 40]}}), encoding="utf-8")
         check("a state file with wrong types reads as empty", updates.load_state() == {"last_folder": None, "hashes": {}})
     # size cap
@@ -736,11 +741,20 @@ def test_state_file():
     downloads = HOMEP / "Downloads"
     downloads.mkdir(exist_ok=True)
     (downloads / "lithiumish-1.0.0.jar").write_bytes(b"lithiumish-1.0.0")
-    with Fake():
+    hashed_default = []
+    real_hash_default = updates._hash_file
+    with Fake() as fake, Patch(updates, _hash_file=lambda p: hashed_default.append(p) or real_hash_default(p)):
         with Patch(mu, _setting=lambda key, default: {"default_dest": "~/Downloads"}.get(key, default)):
             res = mu.tool_check_mc_updates(dict(FAB))
-    check("no folder and no state: the default download folder (~ expanded)", res.get("ok") is True and res["folder"] == str(downloads)
-          and res["folder_from"] == "default" and res["checked"] == 1, res)
+            check("no folder and no state: needs_folder, the ask line names the default download folder (~ expanded)",
+                  res.get("ok") is True and res.get("needs_folder") is True and res["suggested_folder"] == str(downloads)
+                  and res["suggestion_from"] == "default_dest" and str(downloads) in res["ask"] and "default_dest" in res["ask"], res)
+            check("nothing was hashed, requested or remembered for it", hashed_default == [] and fake.calls == [] and not state_file().exists())
+            res = mu.tool_check_mc_updates(dict(FAB, folder=str(downloads)))
+            check("naming the suggested folder checks it", res.get("ok") is True and res["folder"] == str(downloads)
+                  and res["folder_from"] == "given" and res["checked"] == 1, res)
+            res = mu.tool_check_mc_updates(dict(FAB))
+            check("and from then on it is the last folder checked", res.get("folder_from") == "last_checked" and res["checked"] == 1, res)
 
 
 def test_a_state_file_that_cannot_be_written_breaks_nothing():

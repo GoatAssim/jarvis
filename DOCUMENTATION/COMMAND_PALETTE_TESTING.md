@@ -24,6 +24,9 @@ Test in **both** layouts (classic and focus) where noted, and once at phone widt
 - [ ] `python3 tests/test_slash_coverage.py` - all pass
 - [ ] `python3 tests/test_reserved_names.py` - all pass
 - [ ] `node tests/verify_slash_palette.js` - all pass
+- [ ] `python3 tests/test_minecraft_panel.py`, `python3 tests/test_tool_commands.py` and
+      `node tests/verify_minecraft_panel.js` - all pass (the Minecraft panel verb and its three commands; the
+      panel tests read `tests/data/modhosts/hand_s3_*.json`, which are git-ignored and must be `git add -f`ed)
 - [ ] Restart the web server (the new `POST /api/slash/run` route is server-side) and hard-refresh
       the page (three new/changed front-end files are cached otherwise)
 - [ ] Browser console shows **no** `slash-palette.js:` warning on load (one would mean a verb has
@@ -174,7 +177,7 @@ With the palette open:
 
 **Panels** (each opens the right one, also mid-reply)
 - [ ] `/guides` `/debug` (`/tools`) `/checklist` (`/tests`) `/schedule` (`/sched`) `/mcp` `/ctools` (`/toolmanager`) `/channels`
-      `/daemons` `/backlog` `/logsearch` `/setup` `/subagents` `/notifications` `/logs`
+      `/daemons` `/backlog` `/logsearch` `/setup` `/subagents` `/notifications` `/logs` `/minecraft` (see 8c)
 - [ ] `/config` opens the old Config modal (its title is the word "Settings", so two things are called
       Settings; this is known); `/skin` and its alias `/settings` open Settings on the Skin section
 - [ ] `/backlog` opens the Backlog panel; `/backlog add <title>` adds an item without opening it (see 8b)
@@ -208,6 +211,33 @@ function" to get one):
 - [ ] Works mid-reply (it only adds an item)
 
 ---
+
+## 8c. `/minecraft`, `/mcsearch`, `/mcfind`, `/mcproject`
+
+`/minecraft` is a panel verb (group Panels, tier safe, covers no CLI name, so `reserved_names.py` is unchanged). The three
+others are tool commands from `actions/minecraft_lookup.py` (section 9b's rules apply: they follow their tool and have a
+Tool Manager row). Nothing here needs a CurseForge key; without one the CurseForge half says so. The full hand-test list
+for the tools themselves is `DOCUMENTATION/MINECRAFT_TEST_CHECKLIST.md`. Not checked in a browser by anyone yet.
+
+- [ ] `/` with an empty query lists 41 verbs (plus the "show the other commands" row): **Minecraft** is among them in
+      the Panels group, with a **safe** badge; the footer says "Open the Minecraft panel." and shows the example `/minecraft`
+- [ ] `/minecraft` runs on the **first** Enter (a safe panel verb with nothing to fill in) and opens the same panel as
+      Menu > Minecraft, also while Jarvis is replying
+- [ ] `Esc` or the × closes the panel and focus goes back to where it was; opening it twice shows one panel, not two
+- [ ] `/mcsearch sodium`: appears under **Tool commands** with a `tool` tag and a **safe** badge; Enter runs it with no
+      confirmation and shows the hits as a toast or dialog (up to 5, each with a slug)
+- [ ] `/mcsearch` with nothing after it is refused with its hint ("a mod name, or a few words") and **nothing** is sent
+      (Network tab: no request)
+- [ ] `/mcfind 1.20.1 fabric sodium`: the first word is the Minecraft version, the second the loader, the rest the query;
+      the answer lists only mods for 1.20.1 on Fabric. `/mcfind 1.20.1 sodium` (loader missing) is refused with the hint
+- [ ] `/mcproject sodium` shows the project's files, newest compatible first; `/mcproject sodium 1.20.1 fabric` shows only
+      the compatible ones. Words are literal: `/mcsearch $(whoami) ; echo hi` searches for that text and runs nothing else
+- [ ] None of the three asks for confirmation (all `safe` lookups); downloads and packs are NOT commands: `/mcdownload`
+      and `/mcpack` do not exist (typing one is not a command)
+- [ ] Tool Manager: switch `search_mc_mods` off: `/mcsearch` and `/mcfind` disappear within 20 s (or after a reload) and a
+      hand-typed one answers that it is off; `/mcproject` stays. Switch it back on: they return
+- [ ] A chat guest has no access to the tools behind them (they are owner-only); the commands run as the owner in the
+      web page
 
 ## 9. CLI passthrough (`/<cli-name> [args]`)
 

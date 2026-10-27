@@ -3679,7 +3679,21 @@ app.post("/api/tools/run", requireJarvis, async (req, res) => {
   // recognize, so no validation is needed here beyond "it's a string" —
   // an empty string is the "no override" case it already expects.
   const mode = typeof req.body?.mode === "string" ? req.body.mode.trim() : "";
-  const result = await runJarvisOnce(["tool-run", name, argsJson, mode], 30000, { JARVIS_UI: "web" });
+  // The Minecraft panel (minecraft-panel.js) may pass the owner's yes on to the questions a Minecraft
+  // tool asks while it runs ("Save outside the downloads library?", "Download mod files to match them on
+  // CurseForge?"). Nobody can answer those here, so without this they end in "Not confirmed". It is
+  // opt-in twice: the body must say confirm_ui === true (the panel sends it only after ITS dialog showed
+  // the dry-run message, the exact arguments, the folder and, for a cross-platform pack, the file count
+  // and size) AND the tool must be one of the Minecraft group's. "y" is fed as the answer to EVERY
+  // question such a tool asks, a fixed number of lines: once they run out the next question reads end
+  // of file and takes its default, which is no. Any other tool (the Debug panel, the Test Checklist)
+  // ignores confirm_ui and runs exactly as before: no stdin, 30 s.
+  const MINECRAFT_TOOLS = ["search_mc_mods", "get_mc_project", "list_optifine_versions", "download_mc_file",
+    "download_optifine", "make_modpack_file", "check_mc_updates"];
+  const confirmUi = req.body?.confirm_ui === true && MINECRAFT_TOOLS.includes(name);
+  const result = confirmUi
+    ? await runJarvisOnce(["tool-run", name, argsJson, mode], 120000, { JARVIS_UI: "web" }, "y\n".repeat(64))
+    : await runJarvisOnce(["tool-run", name, argsJson, mode], 30000, { JARVIS_UI: "web" });
   // `jarvis tool-run` always prints a JSON object to stdout, even on its
   // own validation errors (bad JSON args, missing name), just with a
   // non-zero exit code in those cases — so try parsing stdout first no

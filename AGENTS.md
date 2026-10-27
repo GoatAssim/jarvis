@@ -543,18 +543,19 @@ things that were already fixed once.
   `X-Jarvis-Settings: 1` header; don't weaken that, and don't point the page at `/api/config/*` for new work.
 
 - **Minecraft mod sources (the `minecraft` tool group: `search_mc_mods`, `get_mc_project`, `download_mc_file`,
-  `make_modpack_file`, `list_optifine_versions`, `download_optifine`; code in `jarvis/modhosts/` and
-  `actions/minecraft_*.py`).** Nothing here is ever "installed": no tool name says install, and a result says
-  "queued", "written" or "downloaded, not installed". `tests/test_minecraft_guards.py` pins everything below;
+  `make_modpack_file`, `list_optifine_versions`, `download_optifine`, `check_mc_updates`; code in `jarvis/modhosts/`
+  and `actions/minecraft_*.py`; the owner's guide is `DOCUMENTATION/MINECRAFT_GUIDE.md`).** Nothing here is ever
+  "installed": no tool name says install, and a result says "queued", "written", "downloaded, not installed" or
+  "a newer file is available" (never "updated"). `tests/test_minecraft_guards.py` pins most of what follows;
   `tests/test_minecraft_integration.py` runs the real adapters and the real `net.py` over a fake transport.
-  - *Owner only, asked first.* Every tool of the group is in `tools.OWNER_ONLY_TOOLS`, AND each handler refuses a chat
-    guest itself before any network call (an unreadable sender counts as a guest). The three that write a file,
-    `download_mc_file`, `make_modpack_file` and `download_optifine`, are confirm-gated by name
-    (`TOOL_CONFIRM_REQUIRED`). A new tool of the group joins both lists; the guard test loops over the whole group and
-    does not pin "exactly six". In jarvis-main_181_ `download_mc_file` and `make_modpack_file` are loaded tools that
-    are not yet in `OWNER_ONLY_TOOLS` (only their handler check protects them), so the guard test's owner-only checks
-    for those two names fail until they are added together with their entry in `tests/test_l28b_followups.py`; delete
-    this sentence when that is done.
+  - *Owner only, asked first.* Every tool of the group is in `tools.OWNER_ONLY_TOOLS` (all seven are, in 182), AND each
+    handler refuses a chat guest itself before any network call or file read (an unreadable sender counts as a guest).
+    The three that write a file, `download_mc_file`, `make_modpack_file` and `download_optifine`, are confirm-gated by
+    name (`TOOL_CONFIRM_REQUIRED`); the other four only read (`check_mc_updates` hashes files in a folder the owner names
+    and writes nothing there) and have an empty confirm set. A new tool of the group joins `OWNER_ONLY_TOOLS` (and
+    `tests/test_l28b_followups.py`'s expected set) and, if it writes or fetches a file, `TOOL_CONFIRM_REQUIRED`; the guard
+    test loops over the whole group, so a new tool also needs its handler's module added to the guard test's
+    `_handler()` lookup.
   - *One door.* Only `modhosts/net.py` opens a connection (it holds the one `requests` import). It allows https only,
     follows redirects by hand, checks every hop against the host lists in `modhosts/hosts.py` and against the SSRF guard
     (`netguard`), and caps size and time. The host lists are constants: never read from config or the environment, so a
@@ -581,13 +582,59 @@ things that were already fixed once.
     refused and never worked around: the `download-url` route is not asked. `download_optifine` does NOT use the hub: it
     downloads inside the call (optifine.net publishes no checksum, so it checks the jar's shape), writes
     `<name>.part` exclusively and renames it, never overwrites, and asks its own "Save outside the downloads library?"
-    question; no row appears in Downloads.
+    question; no row appears in Downloads. **The one other place Jarvis reads mod bytes** is `modhosts/crossmatch.py`
+    with `download_to_match=true` (see *Packs*): it goes through `net.fetch("modrinth", ...)`, not the hub, and keeps
+    nothing.
   - *Packs.* `make_modpack_file` writes ONE `.mrpack` or CurseForge `.zip` per call, from one platform's own lookups; an
     entry that is not found, ambiguous, blocked or without a compatible file is reported and skipped, never swapped.
     `loader_version` given is used exactly; omitted, `modhosts/loaders.py` finds the latest (the loader-meta hosts) and the
     answer says which; with neither the pack is refused. A folder packed into `overrides/` is read without following
     links and is refused if it is, or contains, `~/.jarvis`. Quilt may use a Fabric-tagged file only when it is labelled
     `via`. Files are written by `modhosts/outdir.py` (temp `.part`, then rename).
+  - *Cross-platform matching (`modhosts/crossmatch.py`).* A pack still lists ONE platform. With the optional
+    `entries_from` argument of `make_modpack_file` the entries are named on the OTHER platform, each is resolved there by
+    the pack builder's own rules and then matched to the IDENTICAL file on the pack's platform by hash, and the matches
+    go to `packs.plan_pack` as pinned entries (the pack builder is not changed). A match must agree on sha1; a name or a
+    similar version counts for nothing, so an entry with no identical file is reported and skipped, never swapped, and two
+    identical CurseForge files are `ambiguous`. CurseForge to Modrinth downloads nothing (Modrinth `POST /version_files`
+    by sha1). **Modrinth to CurseForge is the one case where a pack tool reads mod bytes:** CurseForge identifies files by
+    a murmur2 fingerprint that needs the bytes, so with `download_to_match=true` AND the owner's yes to the dialog
+    "Download mod files to match them on CurseForge?" (count and size, default no) each file is fetched from
+    `cdn.modrinth.com` through `net.fetch`, checked against Modrinth's size, sha1 AND sha512, fingerprinted in memory and
+    thrown away. `download_max_mb` and `deadline_seconds` apply (0 = none); a fingerprint is remembered as one
+    `crossmatch:fingerprints:v1` entry in `modhosts/cache.json` (30-day TTL, unlike the roughly 10-minute default), so a
+    second run downloads nothing. A CurseForge file whose author blocks distribution is not matched
+    (`not_distributable`). Verified live: Modrinth `version_files` by sha1. **Not tried against the real service:**
+    CurseForge's fingerprint route and the murmur2 variant (a wrong variant can only produce "not found", never a wrong
+    match, because sha1 must also agree).
+  - *Update checks (`check_mc_updates`).* `actions/minecraft_updates.py` (the tool) and `modhosts/updates.py` (the logic)
+    answer "which files in ONE folder have a newer compatible file on Modrinth" and change nothing: no download, no
+    rename, no write into the folder. It hashes (SHA-1) the `.jar`, `.zip` and `.mrpack` files one level deep (no
+    sub-folders, links, hidden files; opened with `O_NOFOLLOW` where the OS has it) and asks Modrinth
+    `POST /version_files` through `net.fetch`: only hashes leave the PC. The folder is the named one, else the last one
+    checked, else `default_dest`, and must pass `outdir.protected_reason` as written and as resolved (never `~/.jarvis`,
+    the home folder, an OS folder, a link). "Newer" compares Modrinth's publication dates for the same Minecraft version
+    and loader, never version numbers. A file Modrinth does not know, CurseForge files included, is "not checked" with
+    `why: not_on_modrinth` and a `curseforge_note` (this check computes no CurseForge fingerprint); a file that lists
+    several versions or loaders and got no answer is `needs_mc_version` / `needs_loader` with `needs_clarification`;
+    another version or loader is `other_version`, never "up to date". The state file
+    `~/.jarvis/modhosts/update_state.json` holds only a hash cache (`[size, mtime_ns, sha1]` per path) and the last folder;
+    losing it costs one re-hash. It is not reachable from Settings.
+  - *Panel and palette.* `web/public/minecraft-panel.js` (+ `.css`; Menu > Minecraft, tabs Search, Project files,
+    OptiFine, Make a pack) is a thin face on the six tools it names (`TOOLS` in the file; `check_mc_updates` is not one of
+    them in 182): every action goes through `/api/tools/preview` and then `/api/tools/run`, writes get a dry run and one
+    dialog showing the exact folder first. It never reads `curseforge.json` ("no key" comes from the tool's `no_key`
+    answer), never builds HTML from vendor text (`textContent` / `setAttribute` only) and links only https addresses on
+    `modrinth.com`, `curseforge.com` or `optifine.net`. `tests/test_minecraft_panel.py` and `tests/verify_minecraft_panel.js`
+    pin this, including that the panel's tool list equals the six tools the action files declare. `minecraft` is a panel
+    verb in `slash-commands-data.js` with `covers: []` (the panel has no CLI subcommand, like `guides`; nothing goes into
+    `reserved_names.py`) and is in `PANEL_VERBS` in `slash-palette.js`; a new verb means updating the hard-coded counts in
+    `tests/verify_slash_palette.js` (41 verbs in 182). `actions/minecraft_lookup.py` ships three `TOOL_COMMANDS`, all
+    `safe` lookups: `/mcsearch <query>`, `/mcfind <mc_version> <loader> <query>`, `/mcproject <project> [mc_version] [loader]`;
+    it is on `tests/test_tool_commands.py`'s allow-list of files that may name `TOOL_COMMANDS`. Downloads and packs are
+    deliberately not commands. In 182 `web/server.js` does not act on the `confirm_ui` flag the panel sends, so a write to
+    a folder outside the downloads library (including the default `~/Downloads`) from the panel ends in "Not confirmed";
+    the panel then offers its "Minecraft" library folder instead.
   - *Settings and routing.* `web/server.js` `SETTINGS_NAME_RE` accepts one folder level: `channels/`, `web-data/` or
     `modhosts/`; `settings_admin._split_name` is the real gate, and `modhosts/` reaches only the files `_FILES` names
     (today `modhosts/cache.json`, read-only). `curseforge.json` is a top-level Settings file with a validator and a
@@ -729,7 +776,7 @@ actually render Markdown):
     node tests/verify_panel_open_guard.js   # I-B18(c): openScriptPanel() says so when a panel's script didn't load; no npm install
     python3 tests/verify_panel_open_guard.py  # same, in a real browser with daemons.js blocked; needs `playwright` (Python) + Chromium, prints SKIP without them
     python3 tests/test_minecraft_glue.py     # Minecraft wave-1 glue: OptiFine tools owner-only, modhosts/ settings name, pack-instruction sentence, split_dest refusal wording
-    python3 tests/test_minecraft_guards.py   # the Minecraft group's cross-file promises: owner-only, confirm-gated, no "install" in a name, no shared routing phrase, one network door, key allow-lists, key stays in its file, stranger text marked (the owner-only checks for download_mc_file / make_modpack_file fail until tools.py lists them)
+    python3 tests/test_minecraft_guards.py   # the Minecraft group's cross-file promises: owner-only (all seven tools), confirm-gated, no "install" in a name, no shared routing phrase, one network door, key allow-lists, key stays in its file, stranger text marked
     python3 tests/test_minecraft_integration.py  # real adapters + real net.py over a fake transport: CurseForge download, blocked file, Modrinth download then pack (same checksum), CurseForge pack, dry runs; inline data, no tests/data files
     python3 tests/test_modhosts_net.py       # modhosts/net.py, hosts.py, cache.py: allow-lists, redirects, netguard, key header, scrubbing
     python3 tests/test_modhosts_config.py    # the CurseForge key: config.py, Settings entries, policy, doctor, settings.js
@@ -742,6 +789,16 @@ actually render Markdown):
     python3 tests/test_minecraft_lookup_tools.py  # search_mc_mods / get_mc_project end to end (needs hand_*.json fixtures)
     python3 tests/test_minecraft_download.py # download_mc_file against fake adapters and the real hub store (needs hand_p4_catalog.json)
     python3 tests/test_minecraft_packs_tool.py   # make_modpack_file end to end
+    python3 tests/test_modhosts_crossmatch.py    # S1: CurseForge fingerprint (murmur2), cross-platform matching, entries_from / download_to_match (needs hand_s1_*.json fixtures)
+    python3 tests/test_minecraft_updates.py      # S2: check_mc_updates and modhosts/updates.py against an in-process fake Modrinth (needs hand_s2_catalog.json)
+    python3 tests/test_minecraft_panel.py        # S3: panel files and wiring, the `minecraft` palette verb, TOOL_COMMANDS, panel rules (needs hand_s3_*.json fixtures)
+    node tests/verify_minecraft_panel.js         # S3: the panel's pure helpers (arguments, classification, safe links); no npm install (needs hand_s3_*.json fixtures)
+    python3 tests/test_hub_http_verify.py        # Download Hub P1: the `verify` item option (sha1 / sha256 / sha512 on the finished .part) and the protected-folder refusal
+
+`tests/data/` is git-ignored (`.gitignore`), so every fixture a Minecraft test reads from `tests/data/modhosts/`
+(`hand_*.json`, `golden_*.json`, the probe's `optifine_*` files) must be added with `git add -f`; a patch applies them,
+but a later `git add` skips them. A zip made from a clean checkout does not contain them, and the tests that read them
+fail or print SKIP.
 
 Two things that will waste your time if nobody tells you:
 
@@ -1063,7 +1120,9 @@ rename, or remove a subcommand:
 Adding a **Menu panel** (a new `menu-item-*` in `index.html`) is the same rule:
 give the verb that opens it a `menu` field naming that id, and an opener in
 `JarvisHost.openPanel()` (bottom of `app.js`). `test_slash_coverage.py` fails until
-every `menu-item-*` is claimed by exactly one verb.
+every `menu-item-*` is claimed by exactly one verb. A panel with no CLI subcommand takes `covers: []` (`guides`,
+`minecraft`); `tests/verify_slash_palette.js` hard-codes the verb count (41 in 182), so every new verb means updating
+those numbers and adding a case there.
 
 The parser lives in one place. Do not add another `/`-prefix regex to the ask-form
 submit handler in `app.js`: register a verb instead.
@@ -1102,7 +1161,8 @@ from `GET /api/tool-commands` and are kept by `slash-palette.js` (`TOOLCMDS`).
   This is NOT the saved-command switch (`command-disable-set`, commands.json).
 - **Nothing model-facing may create or edit one**, same as `TOOL_UI` and daemons: the author
   of the file is the person who installed it. `tests/test_tool_commands.py` fails if any
-  other module names `TOOL_COMMANDS`.
+  other module names `TOOL_COMMANDS`. The only built-in tool file on that allow-list is `actions/minecraft_lookup.py`,
+  which ships `/mcsearch`, `/mcfind` and `/mcproject` (read-only lookups, tier `safe`).
 - `tests/test_tool_commands.py`, `verify_tool_commands_palette.js` and
   `verify_tool_commands_route.js` pin all of this; `tests/test_tool_command_switch.py` and
   `verify_tool_manager_tcmd.js` pin the owner's switch and its Tool Manager row. `test_slash_coverage.py` still only

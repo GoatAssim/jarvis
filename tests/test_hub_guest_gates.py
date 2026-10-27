@@ -10,6 +10,10 @@ Covers:
   * (brief 31) play_control is in OWNER_ONLY_TOOLS too, hidden from a guest, and its handler still refuses one.
   * (brief 6F) steam_library, steam_install_game and steam_update_game are in OWNER_ONLY_TOOLS too, real tools, hidden
     from a guest by hidden_from_sender() (not from the owner, not with no chat context), and their handlers still refuse one.
+  * (9B) the rest of the hub group (dl_pause, dl_resume, dl_cancel, dl_retry, dl_schedule, dl_open, dl_settings, dl_prefs,
+    dl_providers, dl_provider_prefs, dl_import_legacy, hub_doctor, hub_demo_provider, dl_updates, dl_updates_check) is in
+    OWNER_ONLY_TOOLS, hidden from a guest, refused by its handler before the service is touched, and dl_list, dl_status and
+    present_download_status stay open (the full matrix is tests/test_hub_control_gates.py).
   * the four names are in tools.OWNER_ONLY_TOOLS; tools.hidden_from_sender() hides them, and every loaded
     dl_add_<id> tool, from a guest (still a plain frozenset, nothing for the owner, nothing for no chat).
   * the "downloads" group has exactly ONE pack instruction, in download_hub.py, not longer than the two old
@@ -253,6 +257,39 @@ try:
 finally:
     steam_tools.OPEN_URL = _orig_open_url
     set_sender(None)
+
+# ------------------------------------------------------------------ the rest of the hub group (9B): owner-only, hidden, refused before the service
+HUB_REST = ("dl_pause", "dl_resume", "dl_cancel", "dl_retry", "dl_schedule", "dl_open", "dl_settings", "dl_prefs",
+            "dl_providers", "dl_provider_prefs", "dl_import_legacy", "hub_doctor", "hub_demo_provider")
+HUB_READ = ("dl_list", "dl_status", "present_download_status")
+_svc_calls = []
+_orig_svc = dh._svc
+dh._svc = lambda: _svc_calls.append("_svc()")        # a guest must be refused before the service is even asked for
+try:
+    for name in HUB_REST:
+        check(f"{name} is in OWNER_ONLY_TOOLS and a real tool", name in tools.OWNER_ONLY_TOOLS and name in tools.TOOLS)
+        for label, raw in [("a chat guest", GUEST), ("a sender with no is_owner flag", GUEST_NO_FLAG)] + \
+                          [("an unreadable sender (%r...)" % r[:12], r) for r in UNREADABLE]:
+            set_sender(raw)
+            del _svc_calls[:]
+            r = dh.TOOLS[name]({"id": "abc", "all": True, "action": "start", "when": "now", "set": {"rate_limit_kbps": 1}})
+            check(f"{name} handler refuses {label}, before the service is asked",
+                  r.get("ok") is False and "owner's" in r.get("error", "") and _svc_calls == [])
+        for label, raw in (("a chat guest", GUEST), ("a sender with no is_owner flag", GUEST_NO_FLAG)):
+            set_sender(raw)
+            check(f"{label}: {name} is hidden by hidden_from_sender()", name in tools.hidden_from_sender())
+        for label, raw in (("the owner on a chat platform", OWNER), ("no chat context", None)):
+            set_sender(raw)
+            check(f"{label}: {name} is not hidden", name not in tools.hidden_from_sender())
+finally:
+    dh._svc = _orig_svc
+    set_sender(None)
+for name in HUB_READ:
+    check(f"{name} is NOT owner-only: a guest may look at the queue", name not in tools.OWNER_ONLY_TOOLS)
+set_sender(GUEST)
+check("a guest still gets dl_list and dl_status schemas, and none of the 13",
+      sorted(s["name"] for s in tools.schemas_for_tools(list(HUB_REST) + ["dl_list", "dl_status"])) == ["dl_list", "dl_status"])
+set_sender(None)
 
 # ------------------------------------------------------------------ one pack instruction for "downloads"
 declarers = sorted(r.file for r in tools._AUTO_VALID if r.group == "downloads" and r.pack_instruction)

@@ -201,6 +201,19 @@ def test_g4_split_dest_refusal_names_the_protected_folders():
     check("without the owner's yes it is still just needs_absolute", where == {} and problem == "needs_absolute", problem)
 
 
+# ---- G5 (M3) -----------------------------------------------------------------------------------------------------
+def test_g5_pack_instruction_points_at_check_mc_updates_before_the_optifine_sentence():
+    text = lk.TOOL_PACK_INSTRUCTION
+    sentence = "To see which mods in a folder have newer files, use check_mc_updates."
+    check("the update-check sentence is in the group's pack instruction, once", text.count(sentence) == 1, text[-400:])
+    check("it comes BEFORE the OptiFine sentence", text.index(sentence) < text.index(SENTENCE))
+    check("the OptiFine sentence is still the last thing (test_g3 pins that)", text.endswith(SENTENCE))
+    check("the tool it names exists and is in the group", "check_mc_updates" in tools.AUTO_TOOL_GROUPS.get("minecraft", []),
+          tools.AUTO_TOOL_GROUPS.get("minecraft"))
+    check("the registry carries it", sentence in tools.AUTO_TOOL_PACK_INSTRUCTIONS.get("minecraft", ""))
+    check("still plain text for the per-turn tail", "\n" not in text and "{" not in text)
+
+
 # --- runner (keep BELOW every test: it reads globals() when it executes) ----------------------------------------
 
 if __name__ == "__main__":

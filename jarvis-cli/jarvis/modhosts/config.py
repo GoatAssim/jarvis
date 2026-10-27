@@ -14,9 +14,13 @@ OptiFine keep working.
 Rules this file exists to keep (the plan's D5, and the P3 acceptance line "with a fake key no
 result, error, log line or ``public_view()`` contains it"):
 
-* ``get_key()`` is the ONLY way the key leaves this module, and its only callers are
-  ``modhosts/net.py`` (which puts it in the ``x-api-key`` header, for ``api.curseforge.com``
-  alone) and ``curseforge.py`` (which only asks whether there is one).
+* ``get_key()`` is the ONLY way the key leaves this module, and it has four callers (the guard
+  test, tests/test_minecraft_guards.py, lists them): ``modhosts/net.py`` (puts it in the
+  ``x-api-key`` header, for ``api.curseforge.com`` alone, and scrubs it from every error),
+  ``modhosts/cache.py`` (refuses to store anything that holds it), ``modhosts/sources.py``
+  (only asks whether there is one) and ``modhosts/curseforge.py`` (asks whether there is one
+  before any request, and scrubs it from messages). A new caller is a decision to make on
+  purpose: add it to that list and say why in AGENTS.md.
 * The key is never printed, logged, put in an error string, a result, a hub row or a prompt.
   Every message below is built without the value, including the "damaged key" one.
 * ``public_view()`` is what everything else (doctor, tests, the Settings page through

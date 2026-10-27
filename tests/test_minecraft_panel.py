@@ -1,4 +1,4 @@
-"""The Minecraft Menu panel and its palette commands (wave S3).
+"""The Minecraft Menu panel and its palette commands (waves S3 and M2).
 
 Covers (static and declarative: nothing here opens a browser or the network):
   1. The panel's files exist and are wired: the Menu button, the stylesheet, the script, the click
@@ -12,9 +12,16 @@ Covers (static and declarative: nothing here opens a browser or the network):
   4. The panel only names the six Minecraft tools, and that list matches the tools the action files declare.
   5. Panel rules (AGENTS.md): no native confirm/alert/prompt, no second toast helper, no HTML built from
      text, no key and no direct vendor call in the panel's JavaScript.
-  6. The hand-written hand_s3_* fixtures exist and parse.
+  6. The hand-written hand_s3_* fixtures (when present) and the M2 hand_m2_* fixtures parse.
+  7. M2: the SEVENTH tool (check_mc_updates), the Updates tab, and every argument name the panel sends is one the real
+     tool schema declares (checked by running the panel's argument builders under node, when node is installed).
+  8. M2: /api/tools/run in web/server.js. confirm_ui is read ONLY there, ONLY as `=== true`, ONLY for the Minecraft
+     tools; "y" is fed on stdin and 120000 ms allowed only on that path; every other tool still gets 30000 ms and no stdin.
+  9. M2: the questions a Minecraft tool can ask while it runs are exactly the two the panel's dialog covers. A new
+     ui.confirm / choose / prompt / form in these files, or an open_when_done in the download tool, fails here so the
+     panel's dialog is updated BEFORE a "y" is fed to it.
 
-Run: python3 tests/test_minecraft_panel.py        (written by the S3 agent; not run by it)
+Run: python3 tests/test_minecraft_panel.py        (written by the S3 and M2 agents; not run by them)
 """
 import json
 import os
@@ -62,6 +69,7 @@ def registry():
 
 
 # --- 1. files and wiring ---------------------------------------------------------------------
+SEVEN = SIX | {"check_mc_updates"}
 check("the panel script and stylesheet exist", JS.exists() and CSS.exists())
 index = read(PUBLIC / "index.html")
 app = read(PUBLIC / "app.js")
@@ -111,18 +119,20 @@ check("only the lookup file names TOOL_COMMANDS (downloads and packs are never t
           for f in ("minecraft_download.py", "minecraft_optifine.py", "minecraft_packs.py")))
 
 # --- 4. the six tools ------------------------------------------------------------------------
-from jarvis.actions import minecraft_download, minecraft_optifine, minecraft_packs  # noqa: E402
+from jarvis.actions import minecraft_download, minecraft_optifine, minecraft_packs, minecraft_updates  # noqa: E402
 
 declared = set()
-for mod in (lookup, minecraft_download, minecraft_optifine, minecraft_packs):
-    declared |= {s["name"] for s in mod.TOOL_SCHEMAS}
-check("the four action files declare exactly the six tools", declared == SIX, declared)
+for mod in (lookup, minecraft_download, minecraft_optifine, minecraft_packs, minecraft_updates):
+    declared |= {s_["name"] for s_ in mod.TOOL_SCHEMAS}
+check("the five action files declare exactly the seven tools", declared == SEVEN, declared)
 js = read(JS)
 m = re.search(r"const TOOLS = \[([^\]]*)\]", js)
 panel_tools = set(re.findall(r'"([a-z_]+)"', m.group(1))) if m else set()
-check("the panel's own list matches them", panel_tools == SIX, panel_tools)
-used = set(re.findall(r'runTool\("([a-z_]+)"', js))
-check("every tool the panel runs is one of the six", used and used <= SIX, used)
+check("the panel's own list matches them", panel_tools == SEVEN, panel_tools)
+used = set(re.findall(r'runTool\("([a-z_]+)"', js)) | set(re.findall(r'call\("([a-z_]+)"', js))
+check("every tool the panel runs is one of the seven", used and used <= SEVEN, used)
+check("the panel has an Updates tab that runs check_mc_updates", '["updates", "Updates"]' in js and 'runTool("check_mc_updates"' in js)
+check("check_mc_updates is a read: it asks for no confirmation of its own", "check_mc_updates" not in minecraft_updates.TOOL_CONFIRM_REQUIRED)
 
 # --- 5. panel rules --------------------------------------------------------------------------
 code = strip_js_comments(js)
@@ -134,7 +144,9 @@ check("the panel only calls the tool routes", set(re.findall(r'"(/api/[^"]*)"', 
 check("the panel makes no request to a vendor", re.search(r"fetch\(\s*[\"']https?:", code) is None)
 check("vendor links are made only through safeUrl", "target: \"_blank\"" in code and code.count("target:") == 1 and "safeUrl(url)" in code)
 check("the panel keeps the preview-then-run gate", code.index('"/api/tools/preview"') < code.index('"/api/tools/run"'))
-check("a real write is always confirmed (sure: true on queue, OptiFine and pack)", code.count("sure: true") == 3)
+check("a real write is always confirmed (sure: true on queue, OptiFine and pack: dry run + real pack = 2)", code.count("sure: true") == 4)
+check("no word 'install' in any text the panel shows (nothing is ever installed)",
+      not [t for t in re.findall(r'"(?:[^"\\\n]|\\.)*"', code) if re.search(r"install", t, re.I)])
 css = read(CSS)
 check("the stylesheet uses only :root tokens for colour", re.search(r"#[0-9a-fA-F]{3,8}\b|rgba?\(", css) is None)
 check("the stylesheet is scoped to the panel", all(sel.strip().startswith((".mc-", ".menu-panel--minecraft", "@media", "}")) or not sel.strip() or sel.strip().startswith(("*", "/*", " *"))
@@ -142,17 +154,108 @@ check("the stylesheet is scoped to the panel", all(sel.strip().startswith((".mc-
 
 # --- 6. fixtures -----------------------------------------------------------------------------
 DATA = ROOT / "tests" / "data" / "modhosts"
-fixtures = sorted(p.name for p in DATA.glob("hand_s3_*.json"))
-check("the hand_s3_ fixtures are all there", fixtures == ["hand_s3_download_dry.json", "hand_s3_hostile.json", "hand_s3_not_confirmed.json",
-                                                         "hand_s3_project_files.json", "hand_s3_search_both_nokey.json"], fixtures)
-for name in fixtures:
+# tests/data is git-ignored, so the S3 fixtures only exist where the owner added them with `git add -f`: whatever is there must parse.
+s3 = sorted(p.name for p in DATA.glob("hand_s3_*.json"))
+for name in s3:
     try:
-        data = json.loads(read(DATA / name))
-        ok = isinstance(data, dict)
+        ok = isinstance(json.loads(read(DATA / name)), dict)
     except Exception:  # noqa: BLE001
         ok = False
     check("%s parses" % name, ok)
-check("no fixture holds anything that looks like a key", not any(re.search(r"[A-Za-z0-9_\-]{32,}", read(DATA / n)) for n in fixtures))
+m2 = sorted(p.name for p in DATA.glob("hand_m2_*.json"))
+check("the hand_m2_ fixtures are all there", m2 == ["hand_m2_pack_cross_dry.json", "hand_m2_pack_cross_needs_download.json",
+                                                 "hand_m2_pack_cross_needs_download_nosize.json", "hand_m2_pack_cross_written.json",
+                                                 "hand_m2_updates.json", "hand_m2_updates_ask.json", "hand_m2_updates_hostile.json"], m2)
+for name in m2:
+    try:
+        ok = isinstance(json.loads(read(DATA / name)), dict)
+    except Exception:  # noqa: BLE001
+        ok = False
+    check("%s parses" % name, ok)
+check("no fixture holds anything that looks like a key", not any(re.search(r"[A-Za-z0-9_\-]{32,}", read(DATA / n)) for n in s3 + m2))
+
+# --- 7. the panel only sends argument names the real schemas declare ----------------------------
+import shutil  # noqa: E402
+import subprocess  # noqa: E402
+
+SCHEMAS = {}
+for mod in (lookup, minecraft_download, minecraft_optifine, minecraft_packs, minecraft_updates):
+    for sc in mod.TOOL_SCHEMAS:
+        SCHEMAS[sc["name"]] = sc["parameters"]["properties"]
+node = shutil.which("node")
+if not node:
+    print("NOTE: node is not installed, so the argument names the panel sends were not compared with the tool schemas")
+else:
+    script = r"""
+const fs = require('fs'), vm = require('vm');
+const sb = { URL }; vm.createContext(sb);
+vm.runInContext(fs.readFileSync(process.argv[1], 'utf8'), sb);
+const P = sb.JarvisMinecraft._pure;
+const dl = { project: 'a', source: 'modrinth', kind: 'mod', channel: 'beta', mc_version: '1.20.1', loader: 'fabric', file: 'f', dest: 'D:/x', filename: 'x.jar', with_dependencies: true };
+const out = {
+  search_mc_mods: P.searchArgs({ query: 'q', kind: 'mod', sort: 'downloads', source: 'both', mc_version: '1.20.1', loader: 'fabric', limit: 5, offset: 5 }),
+  get_mc_project: P.projectArgs({ project: 'p', source: 'modrinth', channel: 'beta', mc_version: '1.20.1', loader: 'fabric', files_limit: 5 }),
+  download_mc_file: P.downloadArgs(dl, true),
+  list_optifine_versions: P.optifineListArgs({ mc_version: '1.20.1', include_preview: true }),
+  download_optifine: P.optifineArgs({ mc_version: '1.20.1', version: 'I6', preview: true, dest: 'D:/x', filename: 'o.jar' }, true),
+  make_modpack_file: P.packArgs({ format: 'curseforge', entries_from: 'modrinth', download_to_match: true, name: 'n', version: '1', author: 'a', summary: 's', mc_version: '1.20.1',
+    loader: 'fabric', loader_version: '0.15', entries: 'a | f | beta', channel: 'beta', src: 'D:/s', dest: 'D:/d', filename: 'f', include_dependencies: false, overwrite: true }, false),
+  check_mc_updates: P.updatesArgs({ folder: 'D:/m', mc_version: '1.20.1', loader: 'fabric', channel: 'beta' }),
+};
+process.stdout.write(JSON.stringify(out));
+"""
+    done = subprocess.run([node, "-e", script, str(JS)], capture_output=True, text=True, timeout=60)
+    try:
+        built = json.loads(done.stdout)
+    except Exception:  # noqa: BLE001
+        built = None
+    check("the panel's argument builders ran under node", isinstance(built, dict), done.stderr[:300])
+    if isinstance(built, dict):
+        for tool, args in sorted(built.items()):
+            check("%s: every argument name the panel sends is in the tool's schema" % tool, set(args) <= set(SCHEMAS[tool]), sorted(set(args) - set(SCHEMAS[tool])))
+        entry_keys = set(SCHEMAS["make_modpack_file"]["entries"]["items"]["properties"])
+        for e in built["make_modpack_file"]["entries"]:
+            check("a pack entry only has keys the schema declares", set(e) <= entry_keys, sorted(set(e) - entry_keys))
+        enums = {"channel": ("make_modpack_file", "check_mc_updates", "download_mc_file"), "loader": ("check_mc_updates",)}
+        for key, tools_ in enums.items():
+            for t in tools_:
+                allowed = SCHEMAS[t][key].get("enum")
+                if allowed and key in built[t]:
+                    check("%s.%s: the value the panel sends is one the schema allows" % (t, key), built[t][key] in allowed, built[t][key])
+        check("make_modpack_file: entries_from and download_to_match are real arguments", {"entries_from", "download_to_match"} <= set(SCHEMAS["make_modpack_file"]))
+
+# --- 8. /api/tools/run: the one place confirm_ui means anything --------------------------------
+server = read(ROOT / "web" / "server.js")
+start = server.index('app.post("/api/tools/run"')
+end = server.index('app.post("/api/tools/preview"')
+handler = server[start:end]
+check("confirm_ui appears only inside the /api/tools/run handler", server.count("confirm_ui") == handler.count("confirm_ui") and handler.count("confirm_ui") >= 1)
+check("it is read as a strict boolean", "req.body?.confirm_ui === true" in handler)
+tools_m = re.search(r"const MINECRAFT_TOOLS = \[([^\]]*)\]", handler)
+listed = set(re.findall(r'"([a-z_]+)"', tools_m.group(1))) if tools_m else set()
+check("only the Minecraft group's seven tools can use it", listed == SEVEN, listed)
+check("the tool name is checked against that list", "MINECRAFT_TOOLS.includes(name)" in handler)
+check("the yes is fed on stdin as a fixed number of lines", '"y\\n".repeat(64)' in handler)
+check("a confirm_ui run is allowed 120000 ms", "120000" in handler)
+check("any other call is exactly what it was: 30000 ms, only JARVIS_UI, no stdin", 'runJarvisOnce(["tool-run", name, argsJson, mode], 30000, { JARVIS_UI: "web" })' in handler)
+check("the preview handler never reads confirm_ui", "confirm_ui" not in server[end:end + 4000].split("app.post(\"/api/tools/safety\"")[0])
+check("runJarvisOnce already takes stdin (no new parameter was needed)", re.search(r"function runJarvisOnce\(args, timeoutMs = 10000, extraEnv = \{\}, stdinText = null\)", server) is not None)
+
+# --- 9. the questions a Minecraft tool can ask while it runs ----------------------------------
+PKG = ROOT / "jarvis-cli" / "jarvis"
+files = sorted((PKG / "actions").glob("minecraft_*.py")) + sorted((PKG / "modhosts").glob("*.py"))
+titles, calls, others = set(), 0, []
+for f_ in files:
+    text_ = read(f_)
+    calls += len(re.findall(r"\bui\.confirm\(", text_))
+    titles |= set(re.findall(r'\bui\.confirm\(\s*"([^"]+)"', text_))
+    others += [f_.name for w in ("choose", "prompt", "form") if re.search(r"\bui\.%s\(" % w, text_)]
+check("the only questions are 'Save outside the downloads library?' and 'Download mod files to match them on CurseForge?'",
+      titles == {"Save outside the downloads library?", "Download mod files to match them on CurseForge?"}, titles)
+check("every ui.confirm in them has a literal title (so the line above sees it)", calls == len(re.findall(r'\bui\.confirm\(\s*"', "".join(read(f_) for f_ in files))), calls)
+check("none of them asks a choose / prompt / form question", not others, others)
+check("the download tool never asks the hub to open a file when it is done (a yes would turn that on)", "open_when_done" not in read(PKG / "actions" / "minecraft_download.py"))
+check("the download tool queues one link per call (the hub's bulk question needs more than its limit)", read(PKG / "actions" / "minecraft_download.py").count("[plan[\"url\"]]") >= 2)
 
 print("\n%d passed, %d failed" % (len(PASS), len(FAIL)))
 sys.exit(1 if FAIL else 0)

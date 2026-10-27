@@ -214,13 +214,17 @@ def test_owner_only_set_is_exactly_what_the_handlers_gate():
     check("OWNER_ONLY_TOOLS names real tools",
           all(n in system_tools._tool_index() for n in system_tools.OWNER_ONLY_TOOLS))
     check("it is send_dm + recent_dms + recent_spaces (S10c) + the L.21-L.23 person tools + the Download Hub's "
-          "add / dismiss / season / Stremio-library tools + play_control (brief 31) + the three Steam tools (N22b/c) + "
+          "add / dismiss / season / Stremio-library tools + torrent_files (N24) + the rest of the hub group except "
+          "dl_list, dl_status and the status card (9B) + play_control (brief 31) + the three Steam tools (N22b/c) + "
           "play_local, play_episode, stack_start, stack_stop, server_cache_clear (7A) + the two Minecraft lookups "
           "+ the two OptiFine tools + download_mc_file, make_modpack_file and check_mc_updates",
           system_tools.OWNER_ONLY_TOOLS == {
               "send_dm", "recent_dms", "recent_spaces", "person_remember", "person_forget",
               "person_instruct", "person_recall", "person_review", "await_reply",
-              "dl_add", "dl_add_ytdlp", "dl_add_stremio", "dl_dismiss",
+              "dl_add", "dl_add_ytdlp", "dl_add_stremio", "dl_dismiss", "torrent_files",
+              "dl_pause", "dl_resume", "dl_cancel", "dl_retry", "dl_schedule", "dl_open",
+              "dl_settings", "dl_prefs", "dl_providers", "dl_provider_prefs", "dl_import_legacy",
+              "hub_doctor", "hub_demo_provider", "dl_updates", "dl_updates_check",
               "bulk_plan", "bulk_run", "stremio_library", "stremio_mark_watched", "play_control",
               "steam_library", "steam_install_game", "steam_update_game",
               "play_local", "play_episode", "stack_start", "stack_stop", "server_cache_clear",

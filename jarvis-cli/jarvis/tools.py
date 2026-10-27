@@ -694,6 +694,15 @@ OWNER_ONLY_TOOLS = frozenset({
     # to register a torrent, which a guest has no business starting.
     "torrent_files",
     "bulk_plan", "bulk_run", "stremio_library", "stremio_mark_watched",
+    # Download hub, the rest of the group (9B): a guest keeps ONLY dl_list, dl_status and the status card
+    # (present_download_status).  Pause / resume / cancel / retry / schedule / open act on the owner's downloads
+    # and PC; dl_settings, dl_prefs, dl_provider_prefs, dl_providers, hub_doctor and hub_demo_provider show or
+    # change the owner's folders, limits, notification choices and which programs are installed; dl_import_legacy
+    # writes the store; dl_updates and dl_updates_check name the owner's installed software and start its update
+    # tools.  Their handlers refuse a guest too (fail closed; tests/test_hub_control_gates.py).
+    "dl_pause", "dl_resume", "dl_cancel", "dl_retry", "dl_schedule", "dl_open",
+    "dl_settings", "dl_prefs", "dl_providers", "dl_provider_prefs", "dl_import_legacy",
+    "hub_doctor", "hub_demo_provider", "dl_updates", "dl_updates_check",
     # Stremio playback (brief 31): drives the mpv on the owner's PC; its handler refuses a guest too.
     "play_control",
     # Steam (N22b/c): they install / update games on the owner's PC and read what is installed; a guest is

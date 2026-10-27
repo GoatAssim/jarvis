@@ -335,6 +335,18 @@ def test_settings_page():
         print("skip    node is not installed: node --check not run")
 
 
+# ---- 7. the docstring names the real get_key() callers (M3) ---------------------------------
+def test_docstring_names_the_real_callers():
+    doc = config.__doc__ or ""
+    named = ("modhosts/net.py", "modhosts/cache.py", "modhosts/sources.py", "modhosts/curseforge.py")
+    check("the docstring names net.py, cache.py, sources.py and curseforge.py", all(n in doc for n in named), doc[:400])
+    check("it no longer says only net.py and curseforge.py call get_key()", "its only callers are" not in doc)
+    pkg = Path(config.__file__).resolve().parent
+    callers = sorted(f.name for f in pkg.glob("*.py")
+                     if f.name != "config.py" and re.search(r"\bconfig\.get_key\(", f.read_text(encoding="utf-8", errors="replace")))
+    check("the files that really call config.get_key() are exactly those four", callers == ["cache.py", "curseforge.py", "net.py", "sources.py"], callers)
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

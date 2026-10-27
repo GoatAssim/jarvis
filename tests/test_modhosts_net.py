@@ -506,6 +506,49 @@ def test_cache_never_holds_the_key():
     check("the key is not in the file", FAKE_KEY not in _cache_file().read_text(encoding="utf-8"))
 
 
+# ------------------------------------------------------------------ a 403 says where it came from (M3)
+
+CDN = "https://edge.forgecdn.net/files/1/2/a.jar"
+
+
+def test_a_403_from_the_download_host_is_not_a_key_problem():
+    check("cdn_refused is its own code, none of the existing ones",
+          net.CDN_REFUSED == "cdn_refused" and net.CDN_REFUSED not in ("bad_key", "not_distributable", "vendor_changed", "not_found"))
+    with Config():
+        script = Script(net.Reply(403, {"content-type": "text/html"}, b"<html>Forbidden</html>"))
+        with Env(script):
+            res = net.fetch("curseforge", CDN, want="bytes")
+        check("a 403 from edge.forgecdn.net is cdn_refused, with its status",
+              res["ok"] is False and res["reason"] == "cdn_refused" and res["status"] == 403, res)
+        check("...and its sentence does not blame the key",
+              "may be wrong" not in res["error"] and "not a key problem" in res["error"], res["error"])
+        check("...no key was sent to that host, and none is in the answer",
+              "x-api-key" not in script.calls[0]["headers"] and FAKE_KEY not in json.dumps(res, default=str), script.calls)
+
+        script = Script(net.Reply(403, {}, b""))
+        with Env(script):
+            res = net.fetch("curseforge", CF)
+        check("a 403 from api.curseforge.com stays bad_key",
+              res["ok"] is False and res["reason"] == "bad_key" and res["status"] == 403 and "key may be wrong" in res["error"], res)
+
+        script = Script(net.Reply(302, {"Location": CDN}), net.Reply(403, {}, b""))
+        with Env(script):
+            res = net.fetch("curseforge", CF, want="bytes")
+        check("a 403 after a redirect from the API to the CDN is cdn_refused (the host that answered decides)",
+              res["ok"] is False and res["reason"] == "cdn_refused" and len(script.calls) == 2, res)
+        check("...the key went to the API request only",
+              "x-api-key" in script.calls[0]["headers"] and "x-api-key" not in script.calls[1]["headers"], script.calls)
+
+        for status, reason in ((404, "not_found"), (500, "offline"), (418, "vendor_changed")):
+            with Env(Script(net.Reply(status, {}, b""))):
+                res = net.fetch("curseforge", CDN, want="bytes")
+            check("the download host's HTTP %d is still %s" % (status, reason), res["reason"] == reason and res["status"] == status, res)
+
+    with Env(Script(net.Reply(403, {}, b""))):
+        res = net.fetch("modrinth", "https://cdn.modrinth.com/data/x/a.jar", want="bytes")
+    check("another vendor's 403 is unchanged (vendor_changed)", res["reason"] == "vendor_changed" and res["status"] == 403, res)
+
+
 # --- runner (keep BELOW every test: it reads globals() when it executes) ----
 
 if __name__ == "__main__":
