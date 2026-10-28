@@ -1,4 +1,4 @@
-"""The Minecraft Menu panel and its palette commands (waves S3 and M2).
+"""The Minecraft Menu panel and its palette commands (waves S3, M2 and M5).
 
 Covers (static and declarative: nothing here opens a browser or the network):
   1. The panel's files exist and are wired: the Menu button, the stylesheet, the script, the click
@@ -21,7 +21,12 @@ Covers (static and declarative: nothing here opens a browser or the network):
      ui.confirm / choose / prompt / form in these files, or an open_when_done in the download tool, fails here so the
      panel's dialog is updated BEFORE a "y" is fed to it.
 
-Run: python3 tests/test_minecraft_panel.py        (written by the S3 and M2 agents; not run by them)
+  10. M5: the reworked panel (shared "what I play", cards, tray, batch). It still names only the seven tools, keeps
+     nothing in the browser, reads only fields the real tools produce (checked against the action files), has its
+     narrow-width, focus and reduced-motion rules, and its own hand_m5_* fixtures parse and hold no key-like text.
+     The baseline zip carries no hand_s3_* / hand_m2_* fixtures, so those are only checked when present.
+
+Run: python3 tests/test_minecraft_panel.py        (written by the S3, M2 and M5 agents; not run by them)
 """
 import json
 import os
@@ -144,12 +149,12 @@ check("the panel only calls the tool routes", set(re.findall(r'"(/api/[^"]*)"', 
 check("the panel makes no request to a vendor", re.search(r"fetch\(\s*[\"']https?:", code) is None)
 check("vendor links are made only through safeUrl", "target: \"_blank\"" in code and code.count("target:") == 1 and "safeUrl(url)" in code)
 check("the panel keeps the preview-then-run gate", code.index('"/api/tools/preview"') < code.index('"/api/tools/run"'))
-check("a real write is always confirmed (sure: true on queue, OptiFine and pack: dry run + real pack = 2)", code.count("sure: true") == 4)
-check("no word 'install' in any text the panel shows (nothing is ever installed)",
-      not [t for t in re.findall(r'"(?:[^"\\\n]|\\.)*"', code) if re.search(r"install", t, re.I)])
+check("a real write is always confirmed (sure: true on queue, the tray's batch, OptiFine and pack: dry run + real pack = 2)", code.count("sure: true") == 5)
+check("no word 'install' in any text the panel shows, except as \"not installed\" (nothing is ever installed)",
+      not [t for t in re.findall(r'"(?:[^"\\\n]|\\.)*"', code) if re.search(r"install", re.sub(r"not installed", "", t, flags=re.I), re.I)])
 css = read(CSS)
 check("the stylesheet uses only :root tokens for colour", re.search(r"#[0-9a-fA-F]{3,8}\b|rgba?\(", css) is None)
-check("the stylesheet is scoped to the panel", all(sel.strip().startswith((".mc-", ".menu-panel--minecraft", "@media", "}")) or not sel.strip() or sel.strip().startswith(("*", "/*", " *"))
+check("the stylesheet is scoped to the panel", all(sel.strip().startswith((".mc-", ".menu-panel--minecraft", "@media", "@keyframes mc-", "}")) or not sel.strip() or sel.strip().startswith(("*", "/*", " *"))
       for sel in re.findall(r"^([^\s{][^{]*)\{", css, re.M)))
 
 # --- 6. fixtures -----------------------------------------------------------------------------
@@ -162,17 +167,28 @@ for name in s3:
     except Exception:  # noqa: BLE001
         ok = False
     check("%s parses" % name, ok)
+# The baseline zip carries no hand_m2_* either: check whichever are present (M2 asked for all seven with `git add -f`).
 m2 = sorted(p.name for p in DATA.glob("hand_m2_*.json"))
-check("the hand_m2_ fixtures are all there", m2 == ["hand_m2_pack_cross_dry.json", "hand_m2_pack_cross_needs_download.json",
-                                                 "hand_m2_pack_cross_needs_download_nosize.json", "hand_m2_pack_cross_written.json",
-                                                 "hand_m2_updates.json", "hand_m2_updates_ask.json", "hand_m2_updates_hostile.json"], m2)
 for name in m2:
     try:
         ok = isinstance(json.loads(read(DATA / name)), dict)
     except Exception:  # noqa: BLE001
         ok = False
     check("%s parses" % name, ok)
-check("no fixture holds anything that looks like a key", not any(re.search(r"[A-Za-z0-9_\-]{32,}", read(DATA / n)) for n in s3 + m2))
+M5 = ["hand_m5_dry_download.json", "hand_m5_hostile.json", "hand_m5_pack_cross_dry.json", "hand_m5_pack_cross_needs_download.json",
+      "hand_m5_pack_cross_needs_download_nosize.json", "hand_m5_pack_cross_written.json", "hand_m5_project.json",
+      "hand_m5_project_nofit.json", "hand_m5_project_unfiltered.json", "hand_m5_search_both_cf.json",
+      "hand_m5_search_both_partial.json", "hand_m5_search_empty.json", "hand_m5_search_modrinth.json", "hand_m5_updates.json",
+      "hand_m5_updates_ask.json", "hand_m5_updates_hostile.json", "hand_m5_updates_needs_folder.json"]
+m5 = sorted(p.name for p in DATA.glob("hand_m5_*.json"))
+check("the hand_m5_ fixtures are all there (git add -f: tests/data is git-ignored)", m5 == M5, sorted(set(M5) ^ set(m5)))
+for name in m5:
+    try:
+        ok = isinstance(json.loads(read(DATA / name)), dict)
+    except Exception:  # noqa: BLE001
+        ok = False
+    check("%s parses" % name, ok)
+check("no fixture holds anything that looks like a key", not any(re.search(r"[A-Za-z0-9_\-]{32,}", read(DATA / n)) for n in s3 + m2 + m5))
 
 # --- 7. the panel only sends argument names the real schemas declare ----------------------------
 import shutil  # noqa: E402
@@ -256,6 +272,49 @@ check("every ui.confirm in them has a literal title (so the line above sees it)"
 check("none of them asks a choose / prompt / form question", not others, others)
 check("the download tool never asks the hub to open a file when it is done (a yes would turn that on)", "open_when_done" not in read(PKG / "actions" / "minecraft_download.py"))
 check("the download tool queues one link per call (the hub's bulk question needs more than its limit)", read(PKG / "actions" / "minecraft_download.py").count("[plan[\"url\"]]") >= 2)
+
+# --- 10. M5: the reworked panel -----------------------------------------------------------------
+check("nothing is kept in the browser (no localStorage, sessionStorage, IndexedDB or cookie)", re.search(r"localStorage|sessionStorage|indexedDB|document\.cookie", code) is None)
+check("the four tabs are Find, Updates, OptiFine and Make a pack, and the tray is a side region",
+      '[["find", "Find"], ["updates", "Updates"], ["optifine", "OptiFine"], ["pack", "Make a pack"]]' in js and 'el("aside", { class: "mc-tray"' in js)
+check("the tab list is a real tab list (roles, arrow keys) and the panel a labelled dialog",
+      all(w in js for w in ('role: "tablist"', 'role: "tab"', 'setAttribute("role", "tabpanel")', '"ArrowRight"', '"aria-modal": "true"', '"aria-controls"')))
+check("results are announced politely and loading is marked busy", 'aria-live' in js and '"aria-busy"' in js)
+check("every control is labelled (fields are wrapped in a label)", 'el("label", { class: "mc-field" }' in js and "mc-sr" in js)
+check("a dry run of a writer opens no dialog of its own, and a batch's real calls say their dialog was shown", "dryRunNeedsNoDialog" in js and "dialogShown: true" in js)
+check("the stylesheet has a visible focus rule, a narrow-width layout, stacked table rows and reduced motion",
+      ":focus-visible" in css and "@media (max-width: 820px)" in css and "mc-table--stack" in css and "prefers-reduced-motion" in css)
+check("the stylesheet has light and dark through tokens only (no colour literal; colour-mix of tokens is fine)", "var(--green)" in css and "var(--red)" in css and re.search(r"#[0-9a-fA-F]{3,8}\b|rgba?\(", css) is None)
+check("the layout keeps its scroll inside the body and the tray (the top never moves)", "scrollbar-gutter: stable" in css and ".mc-work{" in css)
+
+# The fields the cards, the project view and the tabs read must be ones the real tools produce.
+sample = {"source": "modrinth", "id": "AANobbMI", "slug": "sodium", "name": "Sodium", "summary": "s", "author": "a", "downloads": 5,
+          "updated": "2026-01-01T00:00:00Z", "kind": "mod", "mc_versions": ["1.20.1"], "loaders": ["fabric"], "page_url": "https://modrinth.com/mod/sodium"}
+hit_keys = set(lookup._shape_hit(sample))
+check("a search hit carries every field the cards draw", {"source", "id", "slug", "name", "summary", "author", "downloads", "updated", "kind",
+                                                          "mc_versions", "loaders", "page_url"} <= hit_keys, hit_keys)
+cf_hit = lookup._shape_hit(dict(sample, source="curseforge", distributable=False))
+check("a CurseForge hit says when its author blocks downloads (the card shows that)", cf_hit.get("distributable") is False, cf_hit)
+fsample = {"file_id": "u1", "file_name": "x.jar", "version_label": "1", "mc_versions": ["1.20.1"], "loaders": ["fabric"], "channel": "release",
+           "date": "2026-01-01", "size": 5, "downloadable": True, "via": "fabric",
+           "dependencies": [{"project_id": "P7dR8mSB", "type": "required"}]}
+fshape = lookup._shape_file(fsample, {"P7dR8mSB": "Fabric API"})
+check("a file carries every field the files table draws, and its required dependencies with names",
+      {"file_id", "name", "version", "mc_versions", "loaders", "channel", "date", "size", "downloadable", "via", "requires"} <= set(fshape)
+      and fshape["requires"] == [{"project_id": "P7dR8mSB", "name": "Fabric API"}], fshape)
+lookup_src = read(ROOT / "jarvis-cli" / "jarvis" / "actions" / "minecraft_lookup.py")
+check("get_mc_project answers with the recommended file, the total and the notes the project view reads",
+      all(('"%s"' % k) in lookup_src for k in ("recommended_file_id", "files_total", "unfiltered", "note", "via_note", "loader_note",
+                                              "distribution_note")) and "alternatives=" in lookup_src and "candidates=" in lookup_src)
+check("search answers with the per-site lists and errors the cards and the partial notices read",
+      all(w in lookup_src for w in ('"%s_hits"', '"%s_total"', '"%s_error"', '"%s_reason"')))
+upd_src = read(ROOT / "jarvis-cli" / "jarvis" / "modhosts" / "updates.py")
+check("check_mc_updates really answers needs_folder with suggested_folder and ask (the Updates tab asks for the folder)",
+      all(w in upd_src for w in ('"needs_folder": True', '"suggested_folder"', 'out["ask"]')))
+dl_src = read(ROOT / "jarvis-cli" / "jarvis" / "actions" / "minecraft_download.py")
+check("a download's dry run carries the message, the folder and the dependencies the dialog shows",
+      all(w in dl_src for w in ('out["message"]', '"dest": landing', "dependencies_would_queue", "dry_run")))
+check("the dry-run message says nothing was downloaded or installed (the dialog adds 'downloaded, not installed')", "nothing was downloaded or installed" in dl_src)
 
 print("\n%d passed, %d failed" % (len(PASS), len(FAIL)))
 sys.exit(1 if FAIL else 0)

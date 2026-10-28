@@ -65,72 +65,182 @@
       </div>
       <div class="mid" id="mid">
 
-        <form class="add" id="addForm" autocomplete="off">
-          <div class="field">
-            <label class="field__label" for="addInput">Links</label>
-            <textarea id="addInput" spellcheck="false" rows="5"
-                      placeholder="Paste one or more links, one per line&#10;https://example.com/file.zip"></textarea>
-            <div class="hint" id="addHint" aria-live="polite"></div>
-            <button type="button" class="btn btn--sm" id="addChoose" hidden title="See the files inside this torrent and tick the ones you want">Choose files&hellip;</button>
-            <div class="field__help">Direct file links (http or https). Several links are queued together as one batch.
-              You can also drop links anywhere on this panel.</div>
-          </div>
+        <form class="add" id="addForm" autocomplete="off" aria-label="Add a download">
+          <!-- What happened: what was added, what was refused and why, and anything that needs an answer.  At the top, so it is
+               seen without scrolling a long form.  Outside the locked fieldset so its buttons can be reached; they check for
+               themselves that nothing is running. -->
+          <div class="af-result" id="addResult" role="status" aria-live="polite" hidden></div>
 
-          <details class="advanced">
-            <summary>Options</summary>
-            <div class="field">
-              <label class="field__label" for="addDest">Save in folder</label>
-              <div class="inline">
-                <input type="text" id="addDest" spellcheck="false" placeholder="e.g. Manuals, or D:\Games (optional)">
-                <button type="button" class="btn btn--sm" id="addDestBrowse" aria-label="Browse for the folder">Browse...</button>
-              </div>
-              <div class="field__help" id="addDestHelp">A folder inside your downloads library, or a full path (you'll be asked to confirm one outside the library). Leave empty to use the folder for its file type.</div>
-            </div>
-            <div class="field">
-              <label class="field__label" for="addStart">Start at</label>
-              <input type="text" id="addStart" spellcheck="false" autocomplete="off" placeholder="Now, or e.g. tomorrow at 3am, in 2 hours">
-              <div class="field__help">Hold these until a time you choose (one time, not a repeat). They wait paused and start by themselves, as long as the hub daemon is running then. Leave empty to start straight away.</div>
-            </div>
-            <div class="field">
-              <label class="field__label" for="addLimit">Speed limit for these downloads</label>
-              <div class="inline">
-                <input type="text" id="addLimit" inputmode="decimal" spellcheck="false" placeholder="No limit of their own">
-                <select id="addLimitUnit" aria-label="Unit"><option value="kb">KB/s</option><option value="mb">MB/s</option></select>
-              </div>
-              <div class="field__help">Each of these will stay under this speed. The overall limit in the top strip still applies.</div>
-            </div>
-            <div class="field">
-              <label class="field__label" for="addOpen">When it finishes</label>
-              <select id="addOpen" aria-label="When it finishes"></select>
-            </div>
-            <div class="field">
-              <label class="field__label" for="addNotify">Tell me when it finishes</label>
-              <select id="addNotify" aria-label="Notify me">
-                <option value="default">Follow my notification settings</option>
-                <option value="on">Always, for these</option>
-                <option value="off">Never, for these</option>
-              </select>
-            </div>
-            <div class="field">
-              <span class="field__label">Tell me through (just for these)</span>
-              <div class="checks" id="addChannels" role="group" aria-label="Notification channels for these downloads"></div>
-              <div class="field__help">Leave all unticked to use your notification settings. Tick, say, only Discord to be told there and nowhere else. The Notifications inbox always keeps a record.</div>
-            </div>
-            <div class="field">
-              <span class="field__label">Tell me when it (just for these)</span>
-              <div class="checks" id="addEvents" role="group" aria-label="Which events notify for these downloads"></div>
-              <div class="field__help">Leave all unticked to use your settings. These work even if notifications are off overall.</div>
-            </div>
-            <div class="field">
-              <label class="field__label" for="addGroup">Batch name</label>
-              <input type="text" id="addGroup" spellcheck="false" placeholder="Name for this batch (optional)">
-            </div>
-            <label class="check"><input type="checkbox" id="addPaused"> Add it paused, I will start it myself</label>
-          </details>
+          <fieldset class="af-lock" id="addLock">
+            <legend class="af-sr">Add a download</legend>
 
-          <div class="submit">
-            <button type="submit" class="btn btn--primary" id="addBtn">Add to downloads</button>
-          </div>
+            <!-- THE MAIN PATH: paste links, see what each one is and which engine takes it, press Add -->
+            <div class="field af-main">
+              <label class="field__label" for="addInput">Links</label>
+              <textarea id="addInput" spellcheck="false" rows="4" aria-describedby="addHelp addHintSr" aria-keyshortcuts="Control+Enter"
+                        placeholder="Paste links here, one per line&#10;https://example.com/file.zip"></textarea>
+              <div class="field__help" id="addHelp">Video pages, direct file links, magnet links and .torrent links all work.
+                Press Ctrl+Enter to add. You can also drop links anywhere on this panel.</div>
+              <div class="af-sum" id="addHint" aria-hidden="true"></div>
+              <div class="af-sr" id="addHintSr" role="status" aria-live="polite"></div>
+              <ul class="af-links" id="addLinks" aria-label="What will happen to each link" hidden></ul>
+            </div>
+
+            <!-- Only when a pasted link needs it: the torrent's file list ... -->
+            <div class="af-box af-torrent" id="addTorrent" hidden>
+              <div class="field__help" id="addTorrentHelp"></div>
+              <button type="button" class="btn btn--sm" id="addChoose" title="See the files inside this torrent and tick the ones you want">Choose files&hellip;</button>
+            </div>
+
+            <!-- ... and the video / audio choices (dl_add_ytdlp's own arguments; they are sent to that tool only) -->
+            <fieldset class="af-box" id="addVideo" hidden>
+              <legend class="af-box__title">Video and audio</legend>
+              <div class="field__help" id="addVideoHelp">These apply to the video pages in your list. Other links ignore them.</div>
+              <div class="af-grid">
+                <div class="field">
+                  <label class="field__label" for="addVMode">Get</label>
+                  <select id="addVMode" aria-describedby="addVideoHelp"><option value="video">Video</option><option value="audio">Audio only</option></select>
+                </div>
+                <div class="field af-vonly">
+                  <label class="field__label" for="addVQuality">Quality</label>
+                  <select id="addVQuality"><option value="best">Best available</option><option value="2160p">2160p (4K)</option><option value="1440p">1440p</option><option value="1080p">1080p</option><option value="720p">720p</option><option value="480p">480p</option><option value="360p">360p</option></select>
+                </div>
+                <div class="field af-vonly">
+                  <label class="field__label" for="addVContainer">File type</label>
+                  <select id="addVContainer"><option value="">MP4 (usual)</option><option value="mkv">MKV</option><option value="webm">WebM</option></select>
+                </div>
+                <div class="field af-aonly" hidden>
+                  <label class="field__label" for="addVAudioFormat">Audio file type</label>
+                  <select id="addVAudioFormat"><option value="">MP3 (usual)</option><option value="m4a">M4A</option><option value="opus">Opus</option><option value="wav">WAV</option><option value="flac">FLAC</option><option value="aac">AAC</option><option value="vorbis">Vorbis</option><option value="alac">ALAC</option></select>
+                </div>
+                <div class="field af-aonly" hidden>
+                  <label class="field__label" for="addVAudioQuality">Audio quality</label>
+                  <input type="text" id="addVAudioQuality" spellcheck="false" placeholder="192K (usual)" aria-describedby="addVAudioQualityHelp">
+                  <div class="field__help" id="addVAudioQualityHelp">0 is the best, 10 the smallest, or a bitrate such as 192K.</div>
+                </div>
+              </div>
+              <details class="af-more" id="addVideoMore">
+                <summary>More video choices</summary>
+                <div class="field af-vonly">
+                  <label class="field__label" for="addVCodec">Preferred video format</label>
+                  <select id="addVCodec" aria-describedby="addVCodecHelp"><option value="">No preference</option><option value="h264">H.264</option><option value="vp9">VP9</option><option value="av1">AV1</option></select>
+                  <div class="field__help" id="addVCodecHelp">Used when the site offers a choice.</div>
+                </div>
+                <div class="checks" role="group" aria-label="Extras to save in the file">
+                  <label class="check"><input type="checkbox" id="addVThumb"> <span>Cover picture</span></label>
+                  <label class="check"><input type="checkbox" id="addVMeta"> <span>Title and uploader</span></label>
+                  <label class="check"><input type="checkbox" id="addVChapters"> <span>Chapter marks</span></label>
+                  <label class="check"><input type="checkbox" id="addVSkip"> <span>Skip videos already downloaded</span></label>
+                </div>
+                <div class="checks" role="group" aria-label="Subtitles">
+                  <label class="check"><input type="checkbox" id="addVSubs"> <span>Save subtitles as separate files</span></label>
+                  <label class="check"><input type="checkbox" id="addVSubsEmbed"> <span>Put subtitles inside the video</span></label>
+                </div>
+                <div class="field">
+                  <label class="field__label" for="addVSubLangs">Subtitle languages</label>
+                  <input type="text" id="addVSubLangs" spellcheck="false" placeholder="en, or en,es" aria-describedby="addVSubLangsHelp">
+                  <div class="field__help" id="addVSubLangsHelp">Used when a subtitle box above is ticked.</div>
+                </div>
+                <div class="field">
+                  <label class="field__label" for="addVSponsor">Cut out sponsor segments (YouTube)</label>
+                  <input type="text" id="addVSponsor" spellcheck="false" placeholder="e.g. sponsor,selfpromo" aria-describedby="addVSponsorHelp">
+                  <div class="field__help" id="addVSponsorHelp">SponsorBlock categories to remove. Leave empty to keep everything.</div>
+                </div>
+              </details>
+            </fieldset>
+
+            <!-- EVERYTHING ELSE, in five groups. All start closed; a closed group still says what is set in it. -->
+            <div class="af-options" role="group" aria-labelledby="addOptionsTitle">
+              <div class="af-options__title" id="addOptionsTitle">Options <span class="af-options__aside">all optional</span></div>
+
+              <details class="af-group" id="addWhere">
+                <summary><span class="af-group__name">Where it goes</span><span class="af-state" id="addStateWhere"></span></summary>
+                <div class="af-group__body">
+                  <div class="field">
+                    <label class="field__label" for="addDest">Save in folder</label>
+                    <div class="inline">
+                      <input type="text" id="addDest" spellcheck="false" placeholder="e.g. Manuals, or D:\Games (optional)" aria-describedby="addDestHelp addDestNote">
+                      <button type="button" class="btn btn--sm" id="addDestBrowse" aria-label="Browse for the folder">Browse...</button>
+                    </div>
+                    <div class="field__help" id="addDestHelp">A folder inside your downloads library, or a full path (you'll be asked to confirm one outside the library). Leave empty to use the folder for its file type.</div>
+                    <div class="field__help af-warn" id="addDestNote" role="status" hidden></div>
+                  </div>
+                  <div class="field">
+                    <label class="field__label" for="addOpen">When it finishes</label>
+                    <select id="addOpen" aria-describedby="addOpenHelp"></select>
+                    <div class="field__help" id="addOpenHelp">What Jarvis does with the finished file.</div>
+                  </div>
+                </div>
+              </details>
+
+              <details class="af-group" id="addWhen">
+                <summary><span class="af-group__name">When</span><span class="af-state" id="addStateWhen"></span></summary>
+                <div class="af-group__body">
+                  <div class="field">
+                    <label class="field__label" for="addStart">Start at</label>
+                    <input type="text" id="addStart" spellcheck="false" autocomplete="off" placeholder="Now, or e.g. tomorrow at 3am, in 2 hours" aria-describedby="addStartHelp">
+                    <div class="field__help" id="addStartHelp">Hold these until a time you choose (one time, not a repeat). They wait paused and start by themselves, as long as the hub daemon is running then. If the time can't be read, nothing is added and this form says so. Leave empty to start straight away.</div>
+                  </div>
+                  <label class="check"><input type="checkbox" id="addPaused" aria-describedby="addPausedHelp"> <span>Add paused, I will start it myself</span></label>
+                  <div class="field__help" id="addPausedHelp">Not needed with a start time: those wait paused anyway.</div>
+                </div>
+              </details>
+
+              <details class="af-group" id="addSpeed">
+                <summary><span class="af-group__name">Speed</span><span class="af-state" id="addStateSpeed"></span></summary>
+                <div class="af-group__body">
+                  <div class="field">
+                    <label class="field__label" for="addLimit">Speed limit for these downloads</label>
+                    <div class="inline">
+                      <input type="text" id="addLimit" inputmode="decimal" spellcheck="false" placeholder="No limit of their own" aria-describedby="addLimitHelp">
+                      <select id="addLimitUnit" aria-label="Speed unit"><option value="kb">KB/s</option><option value="mb">MB/s</option></select>
+                    </div>
+                    <div class="field__help" id="addLimitHelp">Each of these will stay under this speed. The overall limit in the top strip still applies.</div>
+                  </div>
+                </div>
+              </details>
+
+              <details class="af-group" id="addTell">
+                <summary><span class="af-group__name">Tell me</span><span class="af-state" id="addStateTell"></span></summary>
+                <div class="af-group__body">
+                  <div class="field">
+                    <label class="field__label" for="addNotify">Tell me when it finishes</label>
+                    <select id="addNotify">
+                      <option value="default">Follow my notification settings</option>
+                      <option value="on">Always, for these</option>
+                      <option value="off">Never, for these</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <span class="field__label" id="addChannelsLabel">Tell me through (just for these)</span>
+                    <div class="checks" id="addChannels" role="group" aria-labelledby="addChannelsLabel"></div>
+                    <div class="field__help">Leave all unticked to use your notification settings. Tick, say, only Discord to be told there and nowhere else. The Notifications inbox always keeps a record.</div>
+                  </div>
+                  <div class="field">
+                    <span class="field__label" id="addEventsLabel">Tell me when it (just for these)</span>
+                    <div class="checks" id="addEvents" role="group" aria-labelledby="addEventsLabel"></div>
+                    <div class="field__help">Leave all unticked to use your settings. These work even if notifications are off overall.</div>
+                  </div>
+                </div>
+              </details>
+
+              <details class="af-group" id="addBatch">
+                <summary><span class="af-group__name">Batch</span><span class="af-state" id="addStateBatch"></span></summary>
+                <div class="af-group__body">
+                  <div class="field">
+                    <label class="field__label" for="addGroup">Batch name</label>
+                    <input type="text" id="addGroup" spellcheck="false" placeholder="Name for this batch (optional)" aria-describedby="addGroupHelp">
+                    <div class="field__help" id="addGroupHelp">Several links are queued together as one batch you can fold up in the list. Name it here, or leave this empty.</div>
+                  </div>
+                </div>
+              </details>
+            </div>
+
+            <div class="submit">
+              <button type="submit" class="btn btn--primary" id="addBtn">Add to downloads</button>
+            </div>
+          </fieldset>
+
         </form>
 
         <div class="picker" id="picker" hidden></div>

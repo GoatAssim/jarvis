@@ -464,14 +464,18 @@ function groupByAddTool(urls, decisions) {
 }
 
 // The calls to make: one per group, except dl_add_stremio, which takes one magnet at a time.
-// `base` (dest, group, start_paused and the extras) goes to every call.  -> [{ tool, args }]
-function addCalls(groups, base) {
+// `base` (dest, group, start_paused and the extras) goes to every call; `perTool` ({ dl_add_ytdlp: {...} }) only to the call
+// of that tool.  -> [{ tool, args }]
+function addCalls(groups, base, perTool) {
   const calls = [];
+  const extra = perTool && typeof perTool === "object" ? perTool : {};
   (groups || []).forEach((g) => {
+    // 9C: a tool's OWN options (the video choices, for dl_add_ytdlp) go to that tool only, never to the others (N4).
+    const own = Object.prototype.hasOwnProperty.call(extra, g.tool) && extra[g.tool] && typeof extra[g.tool] === "object" ? extra[g.tool] : {};
     if (g.tool === "dl_add_stremio") {
-      g.urls.forEach((u) => calls.push({ tool: g.tool, args: Object.assign({}, base, { magnet: u }) }));
+      g.urls.forEach((u) => calls.push({ tool: g.tool, args: Object.assign({}, base, own, { magnet: u }) }));
     } else {
-      calls.push({ tool: g.tool, args: Object.assign({}, base, { urls: g.urls }) });
+      calls.push({ tool: g.tool, args: Object.assign({}, base, own, { urls: g.urls }) });
     }
   });
   return calls;
@@ -496,6 +500,298 @@ function mergeAddResults(results) {
   if (notes.length) out.note = notes.join(" ");
   if (out.ok) delete out.error;
   return out;
+}
+
+// ---- the add form, pure half (9C) -----------------------------------------------------------------------------
+// What each pasted link is and which engine takes it, what each option group holds, the video / audio choices, and what
+// an add came to.  No DOM here.  Every link, file name and reason is DATA: it is only ever drawn with textContent.
+
+const DRY_RUN_CHUNK = 10;                // the hub's dry run answers for at most ten links per call
+const ADD_MAX_LINKS = 50;                // what extractInputs takes
+const ADD_LIST_SHOWN = 10;               // how many per-link rows the form draws before "and N more"
+const START_NOW_WORDS = ["now", "right now", "immediately", "asap", "start now"];   // the hub reads these as "no start time"
+const LINK_TOKEN = /^(https?:\/\/|magnet:\?)\S+$/i;
+const HASH_TOKEN = /^[0-9a-f]{40}$/i;
+const LINK_ENGINE_WORDS = { ytdlp: "yt-dlp", stremio: "Stremio", http: "HTTP", qbittorrent: "qBittorrent" };
+
+function linkEngineWord(engine) {
+  const e = String(engine || "").toLowerCase();
+  if (!e) return "";
+  return Object.prototype.hasOwnProperty.call(LINK_ENGINE_WORDS, e) ? LINK_ENGINE_WORDS[e] : e.slice(0, 24);
+}
+
+// What a link is, in words: from its shape first (a magnet is a magnet whoever takes it), then from the engine.
+function linkKindOf(url, decision) {
+  const t = String(url || "").trim();
+  const engine = decision && decision.engine ? String(decision.engine).toLowerCase() : "";
+  if (/^magnet:/i.test(t)) return { id: "magnet", one: "magnet", many: "magnets" };
+  if (HASH_TOKEN.test(t)) return { id: "hash", one: "info hash", many: "info hashes" };
+  if (/^https?:\/\/\S+\.torrent(\?\S*)?$/i.test(t)) return { id: "torrentfile", one: "torrent file link", many: "torrent file links" };
+  if (engine === "ytdlp") return { id: "video", one: "video page", many: "video pages" };
+  if (engine === "http") return { id: "file", one: "direct file", many: "direct files" };
+  if (engine === "stremio" || engine === "qbittorrent") return { id: "torrent", one: "torrent", many: "torrents" };
+  return { id: "link", one: "link", many: "links" };
+}
+
+// The hub's reason without its engine tail ("YouTube page (yt-dlp engine)" -> "YouTube page"), and nothing when it only repeats the
+// kind: the row already says the kind and the engine.
+function reasonWords(reason, kind) {
+  const r = String(reason || "").replace(/\s*\((?:[^()]*\s)?engine\)\s*$/i, "").trim();
+  return kind && r.toLowerCase() === String(kind.one).toLowerCase() ? "" : r;
+}
+
+// How many of these links are torrents (by their shape), and the one torrent source when there is exactly one link.
+function torrentLinkCount(urls) {
+  return (Array.isArray(urls) ? urls : []).filter((u) => /^magnet:/i.test(u) || HASH_TOKEN.test(u) || /^https?:\/\/\S+\.torrent(\?\S*)?$/i.test(u)).length;
+}
+
+// The dry run's answers (index by index with the links) as one list of rows plus the sentence for the line under the box.
+//   "3 links: 2 video pages (yt-dlp), 1 magnet (Stremio)"   problems and links not yet checked are named after it.
+// -> { items: [{ url, checked, ok, kind, engine, engineWord, addTool, reason, problem }], text, spoken, bad, unchecked, ok, video, torrents }
+function describeLinks(urls, decisions) {
+  const list = Array.isArray(urls) ? urls : [];
+  const dec = Array.isArray(decisions) ? decisions : [];
+  const items = list.map((u, i) => {
+    const d = dec[i] && typeof dec[i] === "object" ? dec[i] : null;
+    const ok = !!d && !!d.ok;
+    const kind = linkKindOf(u, ok ? d : null);
+    return {
+      url: String(u), checked: !!d, ok: ok, kind: kind,
+      engine: ok ? String(d.engine || "") : "", engineWord: ok ? linkEngineWord(d.engine) : "",
+      addTool: d && /^dl_add[a-z0-9_]*$/.test(String(d.add_tool || "")) ? d.add_tool : "",
+      reason: d && ok ? reasonWords(d.reason, kind) : "", problem: d && !ok ? String(d.problem || "I can't download that") : "",
+    };
+  });
+  const groups = [];
+  const by = {};
+  items.filter((x) => x.ok).forEach((x) => {
+    const key = x.kind.id + "|" + x.engine;
+    if (!by[key]) { by[key] = { kind: x.kind, word: x.engineWord, n: 0 }; groups.push(by[key]); }
+    by[key].n++;
+  });
+  const bad = items.filter((x) => x.checked && !x.ok).length;
+  const unchecked = items.filter((x) => !x.checked).length;
+  const good = items.length - bad - unchecked;
+  const n = items.length;
+  let text = "";
+  if (n) {
+    text = n + (n === 1 ? " link" : " links");
+    const parts = groups.map((g) => (n === 1 ? "" : g.n + " ") + (g.n === 1 ? g.kind.one : g.kind.many) + (g.word ? " (" + g.word + ")" : ""));
+    if (parts.length) text += ": " + parts.join(", ");
+    else if (bad && !unchecked) text += ": " + (n === 1 ? "I can't add it" : "none can be added");
+    if (bad && parts.length) text += DOT + bad + " can't be added";
+    if (unchecked) text += (parts.length || bad ? DOT : ": ") + unchecked + " not checked yet";
+    if (n === 1 && good === 1 && items[0].reason) text += " \u2014 " + items[0].reason;
+  }
+  const spoken = text.split(DOT).join(". ").replace(/\(([^)]+)\)/g, "taken by $1");
+  return {
+    items: items, text: text, spoken: spoken, bad: bad, unchecked: unchecked, ok: good,
+    video: items.some((x) => x.ok && x.addTool === "dl_add_ytdlp"),
+    torrents: items.filter((x) => x.ok && ["magnet", "hash", "torrentfile", "torrent"].indexOf(x.kind.id) !== -1).length,
+  };
+}
+
+// Split a list into parts of at most `size`; the dry run takes ten links at a time.
+function chunked(list, size) {
+  const out = [];
+  const n = Math.max(1, Math.floor(Number(size) || 1));
+  (Array.isArray(list) ? list : []).forEach((x, i) => { if (i % n === 0) out.push([]); out[out.length - 1].push(x); });
+  return out;
+}
+
+// The answers of the chunked dry runs as ONE list of decisions in the order of the links.  A chunk the hub did not answer
+// leaves null in its place (that link is "not checked yet") and its error is kept.  -> { decisions, error }
+function mergeDecisions(parts, answers) {
+  const decisions = [];
+  let error = "";
+  (Array.isArray(parts) ? parts : []).forEach((part, i) => {
+    const a = answers && answers[i] && typeof answers[i] === "object" ? answers[i] : {};
+    const got = Array.isArray(a.decisions) ? a.decisions : null;
+    if (!got && !error) error = String(a.error || "");
+    part.forEach((_, j) => decisions.push(got && got[j] && typeof got[j] === "object" ? got[j] : null));
+  });
+  return { decisions: decisions, error: error };
+}
+
+// Words the box has to say about what it will NOT use: text that isn't a link, links beyond the 50 it takes.  "" = nothing.
+function ignoredNote(text) {
+  const seen = [];
+  let ignored = 0;
+  String(text || "").split(/\s+/).forEach((t) => {
+    if (!t) return;
+    if (LINK_TOKEN.test(t) || HASH_TOKEN.test(t)) { if (seen.indexOf(t) === -1) seen.push(t); } else ignored++;
+  });
+  const parts = [];
+  if (seen.length > ADD_MAX_LINKS) parts.push("only the first " + ADD_MAX_LINKS + " links are used");
+  if (ignored && seen.length) parts.push(ignored + (ignored === 1 ? " piece of text that isn't a link is" : " pieces of text that aren't links are") + " ignored");
+  return parts.join(DOT);
+}
+
+// A folder text that is a full path (a drive, a leading slash, a UNC share, ~): the hub asks before saving there.
+function looksAbsolute(text) {
+  return /^(?:[A-Za-z]:[\\/]|[\\/]|~(?:[\\/]|$))/.test(String(text || "").trim());
+}
+
+// The button's words, from what the form will do.
+function addButtonLabel(o) {
+  const x = o || {};
+  const n = Math.max(0, Math.floor(Number(x.count) || 0));
+  if (!n) return "Add to downloads";
+  const things = n + (n === 1 ? " download" : " downloads");
+  const start = String(x.start || "").trim();
+  if (start && START_NOW_WORDS.indexOf(start.toLowerCase()) === -1) return "Schedule " + things;
+  return x.paused ? "Add " + things + ", paused" : "Add " + things;
+}
+
+// What each closed option group still says about itself ("" = nothing set, the form shows its usual words).
+// f: { dest, open, start, paused, limit, unit, notify, channels, events, group }
+function groupStates(f) {
+  const x = f || {};
+  const where = [];
+  const dest = String(x.dest || "").trim();
+  if (dest) where.push(looksAbsolute(dest) ? dest + " (outside the library: asks first)" : "in " + dest);
+  if (x.open && x.open !== "default") where.push("then " + openLabel(x.open).toLowerCase());
+  const when = [];
+  const start = String(x.start || "").trim();
+  if (start && START_NOW_WORDS.indexOf(start.toLowerCase()) === -1) when.push("starts " + start);
+  else if (x.paused) when.push("added paused");
+  const lim = parseLimit(x.limit, x.unit);
+  const speed = lim.error ? "check the speed" : lim.kbps > 0 ? "limit " + fmtLimit(lim.kbps) : "";
+  const tell = [];
+  if (x.notify === "on") tell.push("always");
+  if (x.notify === "off") tell.push("never");
+  if (x.channels && x.channels.length) tell.push("through " + x.channels.map(channelLabel).join(", "));
+  if (x.events && x.events.length) tell.push("when it " + x.events.map((e) => (ITEM_EVENTS.find((v) => v.id === e) || { label: e }).label.toLowerCase()).join(" / "));
+  return { where: where.join(DOT), when: when.join(DOT), speed: speed, tell: tell.join(DOT), batch: String(x.group || "").trim() };
+}
+
+// ---- yt-dlp's own choices.  These are the arguments of dl_add_ytdlp (see _ALL_PROPS in download_hub.py) and go to that tool
+// ONLY (N4): never to dl_add, never to dl_add_stremio.  The lists below are that schema's own enums.
+const VIDEO_QUALITIES = ["best", "2160p", "1440p", "1080p", "720p", "480p", "360p"];
+const VIDEO_CONTAINERS = ["mp4", "mkv", "webm"];
+const VIDEO_CODECS = ["h264", "vp9", "av1"];
+const AUDIO_FORMATS = ["mp3", "m4a", "opus", "wav", "flac", "aac", "vorbis", "alac"];
+const VIDEO_FLAGS = ["embed_thumbnail", "embed_metadata", "embed_chapters", "write_subs", "embed_subs", "skip_if_downloaded"];
+
+// f: { mode, quality, container, video_codec, audio_format, audio_quality, <the six flags>, sub_langs, sponsorblock_remove }
+// Only what differs from the tool's own default is sent, and only what fits the mode.  -> { args }
+function videoOptionsFromForm(f) {
+  const x = f || {};
+  const out = {};
+  if (x.mode === "audio") {
+    out.mode = "audio";
+    if (AUDIO_FORMATS.indexOf(x.audio_format) !== -1 && x.audio_format !== "mp3") out.audio_format = x.audio_format;
+    const aq = String(x.audio_quality || "").trim();
+    if (aq) out.audio_quality = aq.slice(0, 12);
+  } else {
+    if (VIDEO_QUALITIES.indexOf(x.quality) !== -1 && x.quality !== "best") out.quality = x.quality;
+    if (VIDEO_CONTAINERS.indexOf(x.container) !== -1 && x.container !== "mp4") out.container = x.container;
+    if (VIDEO_CODECS.indexOf(x.video_codec) !== -1) out.video_codec = x.video_codec;
+  }
+  VIDEO_FLAGS.forEach((k) => { if (x[k] === true) out[k] = true; });
+  const langs = String(x.sub_langs || "").trim();
+  if (langs && (x.write_subs === true || x.embed_subs === true)) out.sub_langs = langs.slice(0, 60);
+  const sb = String(x.sponsorblock_remove || "").trim();
+  if (sb) out.sponsorblock_remove = sb.slice(0, 120);
+  return { args: out };
+}
+
+// What a question the hub asked back (needs_clarification) offers the person.  Buttons only where the hub's own call is
+// one the form can make: a playlist for one link (playlist="all"), yt-dlp's generic extractor for one link
+// (generic=true), the torrent's file list.  -> { message, label, tool, extra, urls } (label "" = just the words)
+function followUpFor(result, entry) {
+  const r = result || {};
+  const urls = entry && Array.isArray(entry.urls) ? entry.urls : [];
+  const tool = entry && entry.tool ? entry.tool : "";
+  const message = String(r.message || "The hub needs an answer before it adds this.");
+  const base = { message: message, label: "", tool: tool, extra: {}, urls: urls };
+  if (r.torrent && urls.length === 1) return Object.assign(base, { label: "Choose files\u2026", tool: "", source: urls[0] });
+  if (tool === "dl_add_ytdlp" && urls.length === 1 && r.playlist && r.call) {
+    const cap = Math.max(1, Math.round(Number(r.playlist.cap) || 50));
+    return Object.assign(base, { label: "Add the playlist (up to " + cap + " videos)", extra: { playlist: "all" } });
+  }
+  if (tool === "dl_add_ytdlp" && urls.length === 1 && r.generic_available && r.call) {
+    return Object.assign(base, { label: "Let yt-dlp try anyway", extra: { generic: true } });
+  }
+  return base;
+}
+
+// A start time from the hub ("2026-10-28T03:00:00") for people.
+function startWords(iso) {
+  const t = String(iso || "");
+  return /^\d{4}-\d\d-\d\d[T ]\d\d:\d\d/.test(t) ? t.slice(0, 16).replace("T", " ") : t.replace("T", " ");
+}
+
+// What a set of add calls came to.  entries: [{ tool, urls, result, why }] (result null = not tried, `why` says why);
+// o: { paused }.  The links that were NOT added stay in the box (`keep`) so they can be fixed and sent again.
+// -> { tone: ok | partial | ask | info | bad, headline, lines: [{ url, text }], asks, note, queued, when, paused, dup, total, keep, select }
+function describeAdd(entries, o) {
+  const opt = o || {};
+  const list = (Array.isArray(entries) ? entries : []).filter((e) => e && typeof e === "object");
+  const lines = [];
+  const asks = [];
+  const keep = [];
+  const oks = [];
+  let total = 0;
+  let declined = 0;
+  list.forEach((e) => {
+    const urls = (Array.isArray(e.urls) ? e.urls : []).map(String);
+    const r = e.result && typeof e.result === "object" ? e.result : null;
+    total += urls.length;
+    const add = (u, text) => lines.push({ url: String(u || ""), text: String(text || "") });
+    if (!r) { urls.forEach((u) => { keep.push(u); add(u, e.why || "Not tried."); }); return; }
+    if (r.ok) {
+      oks.push(r);
+      const skipped = Array.isArray(r.skipped) ? r.skipped : [];
+      const inputs = skipped.map((s) => String((s && s.input) || ""));
+      urls.forEach((u) => { if (inputs.indexOf(u.slice(0, 120)) !== -1) keep.push(u); });
+      skipped.forEach((s) => add(s && s.input, (s && s.problem) || "Refused."));
+      return;
+    }
+    urls.forEach((u) => keep.push(u));
+    if (r.needs_clarification) { asks.push(followUpFor(r, e)); return; }
+    if (r.declined || r.cancelled) declined++;
+    const why = r.error ? String(r.error) : r.declined || r.cancelled ? "You did not confirm." : "That didn't work.";
+    urls.forEach((u) => add(u, why));
+  });
+  const merged = oks.length ? mergeAddResults(oks) : null;
+  const added = merged ? merged.added || [] : [];
+  const queued = merged ? Number(merged.count) || 0 : 0;
+  const dup = added.filter((a) => a && a.duplicate).length;
+  const timed = added.find((a) => a && a.start_at);
+  const when = timed ? startWords(timed.start_at) : "";
+  const paused = !!opt.paused && !when;
+  const things = (n) => n + (n === 1 ? " download" : " downloads");
+  const tail = (when ? ", will start at " + when : paused ? ", paused" : "") + (dup ? " (" + dup + " already in the list)" : "");
+  let tone;
+  let headline;
+  if (queued && !lines.length && !asks.length) {
+    tone = "ok";
+    headline = (when ? "Scheduled " : "Added ") + things(queued) + tail;
+    if (paused) headline += ": start " + (queued === 1 ? "it" : "them") + " from the list when you are ready";
+  } else if (queued) {
+    tone = "partial";
+    headline = "Added " + queued + " of " + total + (total === 1 ? " link" : " links") + tail;
+  } else if (asks.length && !lines.length) {
+    tone = "ask";
+    headline = "Nothing was added yet: it needs your answer.";
+  } else {
+    tone = lines.length && declined === list.filter((e) => e.result).length && !asks.length ? "info" : "bad";
+    headline = "Nothing was added.";
+  }
+  return {
+    tone: tone, headline: headline, lines: lines, asks: asks, note: merged && merged.note ? String(merged.note) : "", queued: queued, when: when,
+    paused: paused, dup: dup, total: total, keep: keep,
+    select: tone === "ok" && queued === 1 && added[0] && added[0].id ? String(added[0].id) : "",
+  };
+}
+
+// The links left in the box after an add: everything the entries did not touch, plus the ones that were not added.
+function remainingLinks(allUrls, entries, keep) {
+  const touched = [];
+  (Array.isArray(entries) ? entries : []).forEach((e) => (e && Array.isArray(e.urls) ? e.urls : []).forEach((u) => touched.push(String(u))));
+  const kept = Array.isArray(keep) ? keep : [];
+  return (Array.isArray(allUrls) ? allUrls : []).filter((u) => touched.indexOf(u) === -1 || kept.indexOf(u) !== -1);
 }
 
 // ---- helpers added for the three-pane layout (rework 17.1); pure, like everything above
@@ -701,7 +997,7 @@ function addOptionsFromForm(f) {
   if (f.channels && f.channels.length) out.notify_channels = f.channels.slice();
   if (f.events && f.events.length) out.notify_events = f.events.slice();
   const start = String(f.start || "").trim();
-  if (start && ["now", "right now", "immediately"].indexOf(start.toLowerCase()) === -1) out.start_at = start;
+  if (start && START_NOW_WORDS.indexOf(start.toLowerCase()) === -1) out.start_at = start;
   return { args: out };
 }
 
@@ -1313,6 +1609,9 @@ const pure = {
   PICK_MAX, PICK_QUICK, torrentSource, selectableFile, torrentTree, pickerQuick, pickerFilter, pickerTotals, pickerTotalText, pickerBlock, torrentGroupMeta,
   UPDATES_NOTE, updateVersionText, updateSizeText, updateMetaParts, updateHealthText, updateGroups, updateSummaryText, updateBadge, updateCheckNotice,
   updatesPollDelay, updatesSignature,
+  DRY_RUN_CHUNK, ADD_LIST_SHOWN, reasonWords, linkEngineWord, linkKindOf, torrentLinkCount, describeLinks, chunked, mergeDecisions, ignoredNote, looksAbsolute,
+  addButtonLabel, groupStates, VIDEO_QUALITIES, VIDEO_CONTAINERS, VIDEO_CODECS, AUDIO_FORMATS, VIDEO_FLAGS, videoOptionsFromForm,
+  followUpFor, startWords, describeAdd, remainingLinks,
 };
 if (host && host.__hubPureOnly) return pure;
 
@@ -2146,28 +2445,161 @@ async function poll() {
   schedule();
 }
 
-// ---- the add form
+// ---- the add form (9C): links in, what each one is and who takes it, then Add.  Everything else sits in closed groups.
 
-function setHint(text, bad) {
+let addBusy = false;                      // an add is running: a second press (button, Enter, Ctrl+Enter) does nothing
+let addView = null;                       // { urls, decisions }: the dry run's last answer for what is in the box
+let addCtx = null;                        // what the last add sent: { args, perTool, paused }, so a follow-up question can be answered
+const ADD_GROUPS = ["Where", "When", "Speed", "Tell", "Batch"];
+const ADD_STATE_USUAL = { Where: "usual folder", When: "right away", Speed: "no limit of its own", Tell: "my notification settings", Batch: "none" };
+
+// The line under the box: `text` for the eye, `spoken` (default: the same words) for a screen reader.
+function setHint(text, bad, spoken) {
   const h = $("#addHint");
   h.textContent = text;
-  h.className = "hint" + (bad ? " bad" : "");
+  h.className = "af-sum" + (bad ? " bad" : "");
+  $("#addHintSr").textContent = spoken === undefined ? text : spoken;
+}
+
+function addFormFields() {
+  return { dest: $("#addDest").value, open: $("#addOpen").value, start: $("#addStart").value, paused: $("#addPaused").checked,
+    limit: $("#addLimit").value, unit: $("#addLimitUnit").value, notify: $("#addNotify").value,
+    channels: ticked($("#addChannels")), events: ticked($("#addEvents")), group: $("#addGroup").value };
+}
+
+function videoFields() {
+  return { mode: $("#addVMode").value, quality: $("#addVQuality").value, container: $("#addVContainer").value, video_codec: $("#addVCodec").value,
+    audio_format: $("#addVAudioFormat").value, audio_quality: $("#addVAudioQuality").value,
+    embed_thumbnail: $("#addVThumb").checked, embed_metadata: $("#addVMeta").checked, embed_chapters: $("#addVChapters").checked,
+    write_subs: $("#addVSubs").checked, embed_subs: $("#addVSubsEmbed").checked, skip_if_downloaded: $("#addVSkip").checked,
+    sub_langs: $("#addVSubLangs").value, sponsorblock_remove: $("#addVSponsor").value };
+}
+
+function openAddGroup(name) {
+  const box = $("#add" + name);
+  if (box) box.open = true;
+}
+
+// After a failed or partial add, open every group that holds a choice, so what was sent can be seen.
+function openGroupsWithValues() {
+  const st = groupStates(addFormFields());
+  ADD_GROUPS.forEach((g) => { if (st[g.toLowerCase()]) openAddGroup(g); });
+}
+
+// Everything on the form that follows from what is in the box and in the groups: the button's words, what each closed group
+// says, the torrent row, the folder warning, the video / audio block.  Cheap; called on every change.
+function refreshAddUi() {
+  const text = $("#addInput").value;
+  const urls = extractInputs(text);
+  const single = !!torrentSource(text);
+  const torrents = torrentLinkCount(urls);
+  $("#addTorrent").hidden = !(single || torrents > 0);
+  $("#addChoose").hidden = !single;
+  $("#addTorrentHelp").textContent = single
+    ? "This is a torrent. If it holds many files you can choose which to download. Or just press Add: a torrent with several files asks you first."
+    : torrents ? "To choose which files of a torrent to download, paste just that one torrent's link. A torrent with several files asks you first when you add it." : "";
+  const fields = addFormFields();
+  const states = groupStates(fields);
+  ADD_GROUPS.forEach((g) => {
+    const t = states[g.toLowerCase()];
+    const node = $("#addState" + g);
+    node.textContent = t || ADD_STATE_USUAL[g];
+    node.classList.toggle("is-set", !!t);
+    node.title = t || "";
+  });
+  const abs = looksAbsolute(fields.dest);
+  const note = $("#addDestNote");
+  note.hidden = !abs;
+  note.textContent = abs ? "That is a full path, so you'll be asked to confirm before anything is saved there." : "";
+  const audio = $("#addVMode").value === "audio";
+  Array.prototype.forEach.call(root.querySelectorAll("#addVideo .af-vonly"), (n) => { n.hidden = audio; });
+  Array.prototype.forEach.call(root.querySelectorAll("#addVideo .af-aonly"), (n) => { n.hidden = !audio; });
+  $("#addVideo").hidden = !(urls.length && addView && describeLinks(addView.urls, addView.decisions).video);
+  if (!addBusy) $("#addBtn").textContent = addButtonLabel({ count: urls.length, paused: fields.paused, start: fields.start });
+}
+
+// The line under the box and the row for each link, from the dry run's answer.
+function showLinks(sum, note) {
+  const list = $("#addLinks");
+  list.textContent = "";
+  if (!sum || !sum.items.length) { list.hidden = true; return; }
+  const text = sum.text + (note ? DOT + note : "");
+  setHint(text, sum.bad > 0, sum.spoken + (note ? ". " + note : ""));
+  list.hidden = !(sum.items.length > 1 || sum.bad > 0);
+  sum.items.slice(0, ADD_LIST_SHOWN).forEach((x) => {
+    const what = x.ok ? x.kind.one + (x.engineWord ? DOT + x.engineWord : "") + (x.reason ? " \u2014 " + x.reason : "") : x.checked ? x.problem : "Checked when you press Add.";
+    list.appendChild(el("li", { cls: "af-link " + (x.ok ? "is-ok" : x.checked ? "is-bad" : "is-wait") }, [
+      el("span", { cls: "af-link__tag", text: x.ok ? "Ready" : x.checked ? "Can't add" : "Not checked" }),
+      el("span", { cls: "af-link__url", text: x.url, title: x.url }),
+      el("span", { cls: "af-link__what", text: what }),
+    ]));
+  });
+  if (sum.items.length > ADD_LIST_SHOWN) list.appendChild(el("li", { cls: "af-link af-link--more", text: "and " + (sum.items.length - ADD_LIST_SHOWN) + " more" }));
+}
+
+// The dry run, ten links at a time (the hub answers for ten per call), so every link is checked and the options reach them all.
+async function dryRunAll(urls) {
+  const parts = chunked(urls, DRY_RUN_CHUNK);
+  const answers = await Promise.all(parts.map((part) => callTool("dl_add", { urls: part, dry_run: true })));
+  return mergeDecisions(parts, answers);
 }
 
 async function previewHint(urls) {
   const seq = ++hintSeq;
-  const r = await callTool("dl_add", { urls: urls, dry_run: true });
+  clearAddResult();
+  refreshAddUi();                          // also after a drop of links, which fills the box without an input event
+  setHint("Checking " + urls.length + (urls.length === 1 ? " link" : " links") + "\u2026", false);
+  const checked = await dryRunAll(urls);
   if (seq !== hintSeq) return;
-  if (r.ok === false && !r.decisions) { setHint(r.error || "", true); return; }
-  const h = hintFromDecisions(r.decisions);
-  setHint(h[0], h[1]);
+  if (checked.error && !checked.decisions.some(Boolean)) { addView = null; showLinks(null); setHint(checked.error, true); refreshAddUi(); return; }
+  addView = { urls: urls, decisions: checked.decisions };
+  showLinks(describeLinks(urls, checked.decisions), ignoredNote($("#addInput").value));
+  refreshAddUi();
 }
 
-async function submitAdd(ev) {
-  ev.preventDefault();
-  const input = $("#addInput");
-  const urls = extractInputs(input.value);
-  if (!urls.length) { setHint("Paste a link that starts with http:// or https://", true); return; }
+function clearAddResult() {
+  const box = $("#addResult");
+  box.hidden = true;
+  box.textContent = "";
+}
+
+// What happened, in the form itself: the headline, every link that was refused with its reason, a note, and any question the hub asked.
+function renderAddResult(model) {
+  const box = $("#addResult");
+  box.textContent = "";
+  box.className = "af-result is-" + model.tone;
+  box.appendChild(el("div", { cls: "af-result__head", text: model.headline }));
+  if (model.lines.length) {
+    const ul = el("ul", { cls: "af-result__list", attrs: { "aria-label": "Links that were not added" } });
+    model.lines.slice(0, 12).forEach((l) => ul.appendChild(el("li", {}, [
+      el("span", { cls: "af-result__url", text: l.url, title: l.url }),
+      el("span", { cls: "af-result__why", text: l.text }),
+    ])));
+    if (model.lines.length > 12) ul.appendChild(el("li", { text: "and " + (model.lines.length - 12) + " more" }));
+    box.appendChild(ul);
+  }
+  model.asks.forEach((ask) => {
+    const row = el("div", { cls: "af-result__ask" }, [el("div", { text: ask.message })]);
+    if (ask.label) row.appendChild(el("button", { cls: "btn btn--sm", text: ask.label, attrs: { type: "button" }, on: { click: () => runFollowUp(ask) } }));
+    box.appendChild(row);
+  });
+  if (model.note) box.appendChild(el("div", { cls: "af-result__note", text: model.note }));
+  box.hidden = false;
+  if (typeof box.scrollIntoView === "function") box.scrollIntoView({ block: "nearest" });     // the form is long: the answer must be seen
+}
+
+function setAddBusy(on) {
+  addBusy = !!on;
+  $("#addLock").disabled = addBusy;
+  $("#addForm").setAttribute("aria-busy", addBusy ? "true" : "false");
+  if (addBusy) { $("#addBtn").textContent = "Adding\u2026"; return; }
+  refreshAddUi();
+  if (!root.activeElement) $("#addInput").focus();         // a disabled form drops the focus: put it back in the box
+}
+
+// The form as the add calls need it: the links, the arguments every add tool takes, and the video choices (for dl_add_ytdlp only).
+function readAddForm() {
+  const urls = extractInputs($("#addInput").value);
   const args = {};
   const dest = $("#addDest").value.trim();
   const group = $("#addGroup").value.trim();
@@ -2176,50 +2608,104 @@ async function submitAdd(ev) {
   if ($("#addPaused").checked) args.start_paused = true;
   const extra = addOptionsFromForm({ limit: $("#addLimit").value, unit: $("#addLimitUnit").value, open: $("#addOpen").value, notify: $("#addNotify").value,
     channels: ticked($("#addChannels")), events: ticked($("#addEvents")), start: $("#addStart").value });
-  if (extra.error) { setHint(extra.error, true); return; }
+  if (extra.error) return { urls: urls, error: extra.error, group: "Speed", focus: "#addLimit" };
   Object.assign(args, extra.args);
-  const btn = $("#addBtn");
-  btn.disabled = true;
+  return { urls: urls, args: args, perTool: { dl_add_ytdlp: videoOptionsFromForm(videoFields()).args } };
+}
+
+function resetAddOneOffs() {
+  $("#addLimit").value = "";                  // one-off choices don't stick to the next add
+  $("#addStart").value = "";
+  $("#addOpen").value = "default";
+  $("#addNotify").value = "default";
+  untick($("#addChannels"));
+  untick($("#addEvents"));
+  $("#addVMode").value = "video";
+  ["#addVQuality", "#addVContainer", "#addVCodec", "#addVAudioFormat"].forEach((id) => { $(id).selectedIndex = 0; });
+  ["#addVAudioQuality", "#addVSubLangs", "#addVSponsor"].forEach((id) => { $(id).value = ""; });
+  ["#addVThumb", "#addVMeta", "#addVChapters", "#addVSubs", "#addVSubsEmbed", "#addVSkip"].forEach((id) => { $(id).checked = false; });
+}
+
+// Show what the calls came to, keep the links that were not added in the box, and say it once in the corner too.
+function finishAdd(entries, ctx, allUrls) {
+  addCtx = ctx;
+  const model = describeAdd(entries, { paused: ctx.paused });
+  if (model.queued) toast(model.headline, model.tone === "ok" ? "success" : "warn");
+  if (model.select) S.pendingSelect = model.select;               // show the one you just added
+  const left = remainingLinks(allUrls, entries, model.keep);
+  $("#addInput").value = left.join("\n");
+  if (!left.length) resetAddOneOffs();
+  else if (model.tone !== "ok") openGroupsWithValues();
+  addView = null;
+  if (left.length) previewHint(left);
+  else { hintSeq++; showLinks(null); setHint("", false); }
+  renderAddResult(model);
+  refreshAddUi();
+  if (model.queued) schedule(200);
+}
+
+async function submitAdd(ev) {
+  ev.preventDefault();
+  if (addBusy) return;                                            // one add at a time
+  const input = $("#addInput");
+  const form = readAddForm();
+  if (!form.urls.length) {
+    clearAddResult();
+    setHint("Paste a link first: it starts with http://, https:// or magnet:", true);
+    input.focus();
+    return;
+  }
+  if (form.error) {
+    clearAddResult();
+    setHint(form.error, true);
+    openAddGroup(form.group);
+    $(form.focus).focus();
+    return;
+  }
+  clearAddResult();
+  clearTimeout(hintTimer);
+  hintSeq++;                                                      // a preview still on its way must not overwrite what comes next
+  setAddBusy(true);
   try {
     // Ask the router which engine takes each link, then call that engine's add tool.
-    const pre = await callTool("dl_add", { urls: urls, dry_run: true });
-    const calls = addCalls(groupByAddTool(urls, pre && pre.decisions), args);
-    const results = [];
-    for (const c of calls) {
+    setHint("Adding " + form.urls.length + (form.urls.length === 1 ? " link" : " links") + "\u2026", false);
+    const checked = await dryRunAll(form.urls);
+    const calls = addCalls(groupByAddTool(form.urls, checked.decisions), form.args, form.perTool);
+    const entries = [];
+    for (let i = 0; i < calls.length; i++) {
+      const c = calls[i];
       const one = await callTool(c.tool, c.args);
-      results.push(one);
-      if (one && one.declined) break;
+      entries.push({ tool: c.tool, urls: c.args.magnet ? [c.args.magnet] : c.args.urls, result: one });
+      let why = "";
+      if (one && one.declined) why = "Not tried: you declined the question before it.";
       if (one && one.needs_clarification && one.torrent && c.args.magnet) {
         // N24: a torrent with several files asked which to take: nothing was queued; the list opens instead
         openPicker(c.args.magnet, "");
-        setHint(one.message || "This torrent has several files: choose which ones.", false);
-        return;
+        why = "Not tried yet: the torrent above needs your choice first.";
+      }
+      if (why) {
+        calls.slice(i + 1).forEach((rest) => entries.push({ tool: rest.tool, urls: rest.args.magnet ? [rest.args.magnet] : rest.args.urls, result: null, why: why }));
+        break;
       }
     }
-    const r = mergeAddResults(results);
-    if (r.declined) { setHint("Cancelled", false); return; }
-    if (r.ok) {
-      const added = r.added || [];
-      const dup = added.filter((a) => a.duplicate).length;
-      const when = added.length && added[0].start_at ? added[0].start_at : "";
-      toast((when ? "Scheduled " : "Queued ") + r.count + (dup ? " (" + dup + " already in the list)" : "") + (when ? ", starts " + when.replace("T", " ") : ""), "success");
-      if (r.note) toast(r.note, "warn");
-      if (r.skipped && r.skipped.length) toast(r.skipped[0].problem, "warn");
-      if (added.length === 1) S.pendingSelect = added[0].id;       // show the one you just added
-      input.value = "";
-      $("#addLimit").value = "";                  // one-off choices don't stick to the next add
-      $("#addStart").value = "";
-      $("#addOpen").value = "default";
-      $("#addNotify").value = "default";
-      untick($("#addChannels"));
-      untick($("#addEvents"));
-      setHint("", false);
-      schedule(200);
-    } else {
-      setHint(r.error || "That didn't work", true);
-    }
+    finishAdd(entries, { args: form.args, perTool: form.perTool, paused: !!form.args.start_paused }, form.urls);
   } finally {
-    btn.disabled = false;
+    setAddBusy(false);
+  }
+}
+
+// A button on a question the hub asked back (a playlist, a page only yt-dlp's generic extractor might read, a torrent's files).
+async function runFollowUp(ask) {
+  if (addBusy || !ask) return;
+  if (!ask.tool) { if (ask.source) openPicker(ask.source, ""); return; }
+  if (!addCtx) return;
+  setAddBusy(true);
+  try {
+    const args = Object.assign({}, addCtx.args, (addCtx.perTool && addCtx.perTool[ask.tool]) || {}, ask.extra, { urls: ask.urls });
+    const entry = { tool: ask.tool, urls: ask.urls, result: await callTool(ask.tool, args) };
+    finishAdd([entry], addCtx, extractInputs($("#addInput").value));
+  } finally {
+    setAddBusy(false);
   }
 }
 
@@ -2271,6 +2757,7 @@ function renderAddExtras() {
   const openSel = $("#addOpen");
   if (root.activeElement !== openSel && changed("addopen", [sum.after_download])) {
     fillSelect(openSel, openMenu(sum.after_download), openSel.value || "default");
+    refreshAddUi();
   }
   if (changed("adddest", [sum.library_root])) {
     $("#addDestHelp").textContent = sum.library_root
@@ -2434,14 +2921,19 @@ function openSettings(anchor) {
 $("#addForm").addEventListener("submit", submitAdd);
 $("#addInput").addEventListener("input", () => {
   clearTimeout(hintTimer);
-  $("#addChoose").hidden = !torrentSource($("#addInput").value);       // N24: a torrent can be opened as a list of files
+  clearAddResult();
   const urls = extractInputs($("#addInput").value);
-  if (!urls.length) { hintSeq++; setHint("", false); return; }
+  if (!urls.length) { hintSeq++; addView = null; showLinks(null); setHint("", false); refreshAddUi(); return; }
+  refreshAddUi();
   hintTimer = setTimeout(() => previewHint(urls), 400);
 });
 $("#addInput").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); $("#addForm").requestSubmit(); }
 });
+// Every choice in the form updates the button's words and what each closed group says about itself.
+$("#addForm").addEventListener("input", refreshAddUi);
+$("#addForm").addEventListener("change", refreshAddUi);
+$("#newBtn").addEventListener("click", clearAddResult);          // a new add starts clean: last time's result is gone
 // N14: Browse... beside "Save in folder". The picker (web/public/path-picker.js) only fills the box; the hub still
 // checks the folder when the download is added (library rules, the confirmation outside the library).
 $("#addDestBrowse").addEventListener("click", async () => {
@@ -2452,6 +2944,7 @@ $("#addDestBrowse").addEventListener("click", async () => {
   const chosen = await picker.open({ kind: "folder", title: "Save in folder", start: picker.startFor(box.value, libraryRoot) });
   if (chosen === null || chosen === undefined) { box.focus(); return; }
   box.value = picker.insideRoot(libraryRoot, chosen) || chosen;          // inside the library: just the sub-folder
+  refreshAddUi();
   box.focus();
 });
 $("#search").addEventListener("input", (e) => { S.search = e.target.value; render(); });

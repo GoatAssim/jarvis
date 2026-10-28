@@ -2,7 +2,7 @@
 
 For two readers. **You, the owner:** what can I do, where do I click, what do I say to Jarvis, what is the hub doing. **A developer:** how it is built, where to add a source, how it is tested. Sections 1 to 7 are for you, section 8 is for the developer, 9 and 10 are for both.
 
-**Checked against:** the code of `jarvis-main_163_` (its `build_info.py` says build 105, source hash `413bc8bef292`; that hash is out of date, see "When something goes wrong") and the Download Hub docs repo as it stood on 2026-10-23 (its `STATUS.md` is written as of `_162_`, so where it lags the code, this guide follows the code and says so). Written 2026-10-24.
+**Checked against:** sections 2 to 9 were first written against the code of `jarvis-main_163_` (build 105) and the docs repo of 2026-10-23. **On 2026-10-27 agent 9B (round 9) re-read the following against `jarvis-main_182_` (its `build_info.py` says build 115; I did not recompute its hash):** the tool tables and the owner-only paragraph (section 3), the tabs, History and Settings (section 4), the retention row (section 5), HTTP, yt-dlp and Steam (section 6), the layout and test tables (section 8) and "Not built yet" (section 9). Anything not named here still follows `_163_`. "Present in 182" means the code exists and I read it, not that it works. Nothing in this guide was tried for real. The Updates tab is not described here: its own text is written by the agent that builds it.
 
 **Paths.** A path such as `hub/daemon.py` or `actions/download_hub.py` is inside `jarvis-cli/jarvis/`. Paths that start with `tests/`, `web/` or `DOCUMENTATION/` are at the repo root. `~/.jarvis/` is Jarvis's folder in your home folder.
 
@@ -50,7 +50,7 @@ Every cell comes from a report or result file. **Nothing in this table is "works
 |---|---|---|
 | **HTTP file** (direct link) | Tested against a fake | Local test servers on loopback with real sockets, including a real daemon process killed mid-file that then resumes (`tests/test_hub_http_engine.py`, `test_hub_daemon_process.py`). No report records a download from a real website. Parallel parts (`http.segments`) are tested the same way and are off by default. |
 | **yt-dlp** (video and audio sites) | Tested against a fake | A fake worker process, and a real yt-dlp + ffmpeg layer against a local server that skips itself when either is missing (`tests/test_hub_ytdlp_level_b.py`). Not tried on YouTube, HLS or DASH. The reports disagree about the real yt-dlp layer, see below. |
-| yt-dlp **playlists as a group** | Written, not run (and not reachable) | The helper exists (`hub/engines/_ytdlp_playlist.py`), but no tool calls it: `dl_add_ytdlp` has no `playlist` argument. Tested against a fake only in the helper's own test. |
+| yt-dlp **playlists as a group** | Tested against a fake | `dl_add_ytdlp` has `playlist` (`one` or `all`) and `generic` in 182 (read); a playlist link asks, `all` queues one group of at most 50. Fake yt-dlp helper only (`tests/test_hub_ytdlp_playlists.py`, `test_hub_ytdlp_hook.py`). Never tried on YouTube. |
 | yt-dlp **generic extractor** | Written, not run | Switched off in code (`GENERIC_ENABLED = False` in `hub/engines/ytdlp.py`). |
 | **Torrent via qBittorrent** | Tested against a fake | A fake of qBittorrent's Web API (`tests/test_hub_qbittorrent_engine.py`). Never run against a real qBittorrent. |
 | **Stremio engine** (magnet, infohash, stream, `.torrent` link or file) | Tested against a fake | A fake Stremio server built from the owner's real 2026-10-18 measurements (`tests/_hub_fake_stremio.py`). The engine has never talked to a real server. |
@@ -69,18 +69,22 @@ Every cell comes from a report or result file. **Nothing in this table is "works
 | **Folder / file picker** | Tested against a fake | Headless Chromium against the real `hub_admin` back end. Not opened from the real panel. |
 | **In-chat status card** | Tested against a fake | `tests/test_download_status_card.py`. Not seen in a browser. |
 | **Notifications** (done, failed, Steam update size) | Tested against a fake | Fixtures and a real local store; no real Steam update. |
-| **Guest gates** (a chat guest cannot add downloads) | Tested against a fake | `tests/test_hub_guest_gates.py`. No real guest message in a real chat. |
-| **Sources tab**, **queue arrows and drag that work**, **equal-size Pause and Cancel buttons**, **a way from the Sources tab into Stremio's settings** | **In progress, not merged** | Another piece of work is building them. Do not rely on them. Today's code draws arrows and a grip on waiting rows, but you reported that they do nothing. |
-| **History and Settings rework** | Not built | Proposals only. |
+| **Guest gates** (a chat guest can only look at the queue) | Tested against a fake | The add tools, `torrent_files`, the season and library tools, the play and stack tools, the Steam tools and (with the 9B patch of round 9) every other hub tool refuse or are hidden from a guest; a guest keeps `dl_list`, `dl_status` and the status card. `tests/test_hub_guest_gates.py`, `tests/test_hub_control_gates.py` (simulated guest, direct call). No real guest message in a real chat. |
+| **Sources tab**, **queue arrows and drag**, **equal-size Pause and Cancel buttons**, **a way from the Sources tab into Stremio's settings** | Present in 182 (brief 24), not verified | The Sources tab is in `tool.html`, `sources` is a `hub_admin.py` op, `applyOrder` is in `tool.js`. Seen in headless Chromium on Linux against a fake hub, per the report; never in your browser. You reported that the arrows did nothing before; whether they work for you is not known. |
+| **History and Settings rework** | Tested against a fake | Present in 182 (brief 29b): the History tab (day groups, search, filters, Load more, Download again, Remove from history, an export) and Settings > Downloads (seven sections plus Other, a default and **Reset** per row). Headless Chromium on Linux; never in your browser. |
+| **Choosing files of a torrent** (N24) | Tested against a fake | `torrent_files`, `file_indexes` on `dl_add_stremio` and the panel's **Choose files** (`hub/stremio/torrent_files.py`, `tests/test_hub_torrent_files.py`, `test_hub_torrent_group.py`). Whether Stremio's server fetches only the chosen files was never measured. |
+| **Play in one call** (round 8) | Tested against a fake | `play_episode` resolves, searches, ranks and tries by itself and takes `pick`, `quality`, `audio`, `language`, `max_gb`, `min_seeders` (`hub/stremio/play_flow.py`, `tests/test_hub_play_flow.py`). Fake addons; never a real addon, server or player. Whether it is faster was never measured. |
+| **Update findings** (N23 backend) | Tested against a fake | The store tables, `UpdateRunner` in the hub daemon, a provider's `update_tool`, `dl_updates`, `dl_updates_check`. A fake update tool and clock; no real program. Steam and package-manager sources are not present. |
+| **History retention row** | Tested against a fake | `retention.keep_history_days` in Settings, asks first; rows only, never files. A fake page. |
 | **Covers** (thumbnails on downloads), **Epic / GOG watchers**, **Steam cancel recognition**, **Steam pause / cancel** | Not built | See section 9. |
 
 **Where the reports disagree (the newest word wins; the code wins over a report):**
 
 1. The old status table (written as of `_156_`) says the hub core and the panel are "written, untested". The current status page and the test files show them tested against fakes.
-2. The current status page (as of `_162_`) lists Dismiss, the Stremio card, mpv control, local `.torrent` paths, the guest gates and yt-dlp playlists as not merged. The code of `_163_` contains all of them except that nothing calls the playlist helper. This guide follows the code.
+2. (Old.) The status page as of `_162_` listed Dismiss, the Stremio card, mpv control, local `.torrent` paths, the guest gates and yt-dlp playlists as not merged. The code of `_163_` and of 182 contains all of them; in 182 `dl_add_ytdlp` also calls the playlist helper. This guide follows the code.
 3. The status page says a real yt-dlp + ffmpeg run against a local server happened. The older detail page says no real yt-dlp run yet, and the newest yt-dlp report could not repeat it (no yt-dlp installed). Not settled.
 4. Older pages say the qBittorrent engine was "written, not run". Its test file against the fake does run and pass; what has never happened is a run against a real qBittorrent.
-5. The yt-dlp playlist report says playlists "reach you once a small hook is added" in `actions/download_hub.py`. That hook is not in the code.
+5. (Old.) The yt-dlp playlist report said playlists "reach you once a small hook is added". The hook is in 182 (`playlist` and `generic` on `dl_add_ytdlp`).
 
 *Sources: `STATUS.md`, `docs/STATUS_DETAIL.md`, `docs/ROADMAP.md`, `docs/findings/00-stremio-server.md`, and the reports `TRACK_A` to `TRACK_E`, `PANEL_FIX_AND_N1`, `PANEL_DISMISS_AND_STREMIO_CARD`, `YTDLP_PLAYLISTS_AND_ENGINE_TESTS`, `STREMIO_TORRENT_FILES_AND_MPV`, `GUARDS_AND_DOWNLOADS_PACK`, `PHASE6_FOLLOWUPS`, `N5_STEAM_FALSE_STALL`, `MERGE_AND_BASELINE` (all in the docs repo's `docs/reports/`), and `try-by-hand-results.txt` in the code repo.*
 
@@ -96,20 +100,22 @@ The tool names below are the real ones. The sentences are examples of what you c
 |---|---|---|
 | `dl_add` (owner only) | Queues any link or magnet; the router picks the engine and the answer names it. Arguments: `url`, `urls`, `engine`, `dest`, `group`, `start_paused`, `start_at`, `dry_run`. More than 5 links in one call asks first; so does a `dest` outside the library. Also takes the path of a `.torrent` file on this PC. | `Download https://example.com/manual.pdf` |
 | `dl_add_ytdlp` (owner only) | A video or audio page with yt-dlp's own options: `mode`, `quality`, `container`, `video_codec`, `audio_format`, `audio_quality`, `embed_thumbnail`, `embed_metadata`, `embed_chapters`, `write_subs`, `embed_subs`, `sub_langs`, `sponsorblock_remove`, `skip_if_downloaded`, plus the shared `url`, `urls`, `dest`, `group`, `start_paused`, `start_at`, `dry_run`. One video per link. | `Queue this video as 1080p mp4 in the background` |
-| `dl_add_stremio` (owner only) | A torrent with the Stremio engine: `magnet` (also an infohash or a `.torrent` link) or `stream`, optionally `file_index`, plus `dest`, `group`, `start_paused`, `start_at`, `dry_run`. Needs Stremio's server. | `Download this magnet, file number 2 only` |
+| `dl_add_stremio` (owner only) | A torrent with the Stremio engine: `magnet` (also an infohash or a `.torrent` link) or `stream`, optionally `file_index` (one file) or `file_indexes` (several files of one torrent, at most 100, one group, one download per file; not together with `file_index`), plus `dest`, `group`, `start_paused`, `start_at`, `dry_run`. A torrent with many files and no choice asks which first. Needs Stremio's server. | `Download this torrent, only files 2 and 5` |
+| `dl_add_http` (owner only) | Plain file links with the HTTP engine and its own options: `segments` (1 to 16 parallel parts), `filename` (one link only), `referer`; no `headers` argument, so no Authorization or Cookie is ever stored. | `Download this file in 4 parts` |
+| `torrent_files` (owner only, read-only) | Lists the files inside a torrent (`source`: a magnet, an infohash, a `.torrent` link or the full path of a `.torrent` file) so you can choose; queues nothing. A magnet asks Stremio's server and may take up to half a minute. | `What's in this torrent?` |
 | `ytdl_download` with `background: true` | The older video tool; with `background` it queues into the hub instead of waiting. Not allowed together with `playlist` or `output_dir`. | `Download this video, but in the background` |
 | `bulk_plan`, then `bulk_run` (owner only; `bulk_run` asks first) | Plans a whole season through your Stremio addons and shows a table (queues nothing), then queues it as one group. `bulk_plan` takes `title` or `id`, `type`, `season`, `episodes`, `quality`, `audio`, `max_gb_per_episode`, `min_seeders`, `on_missing`; `bulk_run` takes `plan_id`, `override_caps`, `start_paused`. | `Plan season 1 of <show>, 1080p, dubbed` then `Run the plan` |
-| `dl_import_legacy` | Lists what the older video tool already saved as read-only history rows. Moves and deletes nothing. | `Show my old video downloads in the hub` |
+| `dl_import_legacy` (owner only) | Lists what the older video tool already saved as read-only history rows. Moves and deletes nothing. | `Show my old video downloads in the hub` |
 
 **Control**
 
 | Tool | What it does | You could say |
 |---|---|---|
-| `dl_pause`, `dl_resume`, `dl_retry` | One download (`id`), a batch (`group`), an engine (`engine`), a provider (`provider`) or everything (`all: true`). Pause keeps the partial file. | `Pause everything` |
-| `dl_cancel` (asks first) | Same targets. Deletes the partial file of a cancelled download; finished files are never deleted. | `Cancel that download` |
-| `dl_schedule` | `when` in your own words, plus a target. `now` starts it at once, `clear` removes the start time. One time, not a repeat. The daemon must be running. | `Start the big download tomorrow at 3am` |
+| `dl_pause`, `dl_resume`, `dl_retry` (owner only) | One download (`id`), a batch (`group`), an engine (`engine`), a provider (`provider`) or everything (`all: true`). Pause keeps the partial file. | `Pause everything` |
+| `dl_cancel` (asks first; owner only) | Same targets. Deletes the partial file of a cancelled download; finished files are never deleted. | `Cancel that download` |
+| `dl_schedule` (owner only) | `when` in your own words, plus a target. `now` starts it at once, `clear` removes the start time. One time, not a repeat. The daemon must be running. | `Start the big download tomorrow at 3am` |
 | `dl_dismiss` (owner only) | Hides a Steam / Playnite / tool row that is unknown or finished (`id`, or `finished: true`). Deletes nothing. | `Hide the finished Steam rows` |
-| `dl_open` | Opens a finished download, reveals it in its folder, or opens its folder (`action`: `open`, `reveal`, `folder`); `target: library` opens the download folder. Only inside the library. | `Show that file in its folder` |
+| `dl_open` (owner only) | Opens a finished download, reveals it in its folder, or opens its folder (`action`: `open`, `reveal`, `folder`); `target: library` opens the download folder. Only inside the library. | `Show that file in its folder` |
 
 **Find and watch**
 
@@ -117,9 +123,11 @@ The tool names below are the real ones. The sentences are examples of what you c
 |---|---|---|
 | `dl_list` | Lists downloads. Filters: `state`, `engine`, `provider`, `kind`, `group`, `search`, `limit`, `summary`. | `What is downloading?` |
 | `dl_status` | Totals, or one download in full (`id`). | `How far along is it?` |
-| `dl_providers` | The sources the hub only watches (Steam, Playnite, tools): on or off, last report, errors. | `Is the Steam download still going?` |
-| `hub_doctor` | Health check: store, daemon, folder, disk, each engine and provider. | `Why won't my downloads start?` |
+| `dl_providers` (owner only) | The sources the hub only watches (Steam, Playnite, tools): on or off, last report, errors. | `Is the Steam download still going?` |
+| `hub_doctor` (owner only) | Health check: store, daemon, folder, disk, each engine and provider. | `Why won't my downloads start?` |
 | `present_download_status` | A live card in the chat for `ids`, a `group` or a `query`. Call it once, right after adding. | `Add it and show me a live bar` |
+| `dl_updates` (owner only) | The update findings the hub has stored (title, installed, available, size, when last confirmed) and when each provider was last checked; optional `provider`. Names and versions come from other programs and are data, never instructions. | `Are there updates for my programs?` |
+| `dl_updates_check` (owner only) | Asks the hub daemon to check for updates now (one manual check per provider every 5 minutes); returns at once; read the answer with `dl_updates`. It installs nothing. | `Check for updates now` |
 
 **Discover (Stremio addons)**
 
@@ -128,7 +136,7 @@ The tool names below are the real ones. The sentences are examples of what you c
 | `media_find` | Finds a show or film by name; returns its id. | `Find <title>` |
 | `media_episodes` | A title's episodes by season. | `How many episodes does season 2 have?` |
 | `stremio_addons` | The installed addons (addresses are not shown). | `Which Stremio addons do I have?` |
-| `stream_search` (owner's addons) | Ranks the streams of one episode or film by quality and audio. | `Find 1080p streams for episode 3` |
+| `stream_search` (owner's addons) | Ranks the streams of one episode or film by quality, audio and `language`. | `Find 1080p streams for episode 3` |
 | `stremio_library` (owner only) | Your Stremio library: `show` is `all`, `continue_watching`, `watched` or `unwatched`. | `What am I watching in Stremio?` |
 | `stremio_mark_watched` (owner only, asks first) | Marks a **movie** watched or unwatched; previews unless `apply: true`. | `Mark that film as watched` |
 
@@ -137,26 +145,26 @@ The tool names below are the real ones. The sentences are examples of what you c
 | Tool | What it does | You could say |
 |---|---|---|
 | `stack_status`, `stack_doctor` | Is Stremio's server up, and if not, why in one sentence; `stack_doctor` also gives a copyable `diagnostic`. | `Is Stremio running?` |
-| `stack_start`, `stack_stop` | Start or stop the server and / or stremio-web (`what`: `server`, `web`, `both`). Stop only touches what Jarvis started. | `Start Stremio` |
+| `stack_start`, `stack_stop` (owner only) | Start or stop the server and / or stremio-web (`what`: `server`, `web`, `both`). Stop only touches what Jarvis started. | `Start Stremio` |
 | `stremio_prepare` (asks first) | Sets the server's cache to unlimited by default; optionally `cache_root`, `max_connections`, `speed_limit_mbps`. | `Get Stremio ready for downloading` |
-| `server_cache`, `server_cache_clear` (the second asks first) | What Stremio has cached; empty it. Refuses while a Stremio download runs. | `Clear Stremio's cache` |
+| `server_cache`, `server_cache_clear` (the second asks first; owner only) | What Stremio has cached; empty it. Refuses while a Stremio download runs. | `Clear Stremio's cache` |
 | `stremio_open` | Opens a stremio-web screen (`screen`, `imdb_id`, `season`, `episode`, `query`). | `Open Stremio's library` |
-| `play_episode` | Plays by `title` or `imdb_id` with `season` / `episode`, or a finished download (`item_id`), or a `stream`. Without a file or stream it opens stremio-web's stream list. | `Play episode 1 of <show>` |
-| `play_local` | Plays a finished download in mpv or VLC (`id` or `query`). | `Play the file I just downloaded` |
+| `play_episode` (owner only) | Plays by `title` or `imdb_id` with `season` / `episode`, or a finished download (`item_id`), or a `stream`. Since round 8 it searches, ranks and tries by itself: `quality`, `audio` (`dub`, `sub`, `any`), `language`, `max_gb`, `min_seeders`, and `pick` (a whole number from 1: row N of the last `stream_search` for that episode, kept about 10 minutes). When no player works it says so and opens nothing; the stremio-web stream list opens only when the call carries `via: "stremio"`. | `Play episode 1 of <show> in 1080p` |
+| `play_local` (owner only) | Plays a finished download in mpv or VLC (`id` or `query`). | `Play the file I just downloaded` |
 | `play_control` (owner only) | Controls the mpv Jarvis started: `action` is `pause`, `resume`, `toggle`, `seek` (`seconds`), `stop`, `volume` (`volume`) or `status`. | `Pause the video` |
 
 **Preferences**
 
 | Tool | What it does | You could say |
 |---|---|---|
-| `dl_prefs` | Reads or changes the everyday settings without a question (`set`), or one download's own speed limit / open-when-done / notifications (`id`); `test_notification` sends a sample. | `Limit downloads to 2 MB/s` |
-| `dl_settings` (asks first) | Reads or changes any writable setting, including `library_root` and `allow_private_hosts`. | `Move my download folder to D:/Downloads/Jarvis` |
-| `dl_provider_prefs` (asks first) | One provider's own choices: `enabled`, `interval_s`, `settings` (for example Steam's `notify_min_update_gb`). | `Turn the Playnite source off` |
-| `hub_demo_provider` (asks first), `hub_demo_pause`, `hub_demo_resume`, `hub_demo_cancel` | Fake demo downloads that show every look of the panel. | `Start the demo downloads` |
+| `dl_prefs` (owner only) | Reads or changes the everyday settings without a question (`set`), or one download's own speed limit / open-when-done / notifications (`id`); `test_notification` sends a sample. | `Limit downloads to 2 MB/s` |
+| `dl_settings` (asks first; owner only) | Reads or changes any writable setting, including `library_root`, `allow_private_hosts` and `retention.keep_history_days`. | `Move my download folder to D:/Downloads/Jarvis` |
+| `dl_provider_prefs` (asks first; owner only) | One provider's own choices: `enabled`, `interval_s`, `settings` (for example Steam's `notify_min_update_gb`). | `Turn the Playnite source off` |
+| `hub_demo_provider` (asks first; owner only), `hub_demo_pause`, `hub_demo_resume`, `hub_demo_cancel` | Fake demo downloads that show every look of the panel. The three `hub_demo_*` tools have no guest check; they touch fake rows only. | `Start the demo downloads` |
 
 **Typed shortcuts** (the Ask box's "/" palette): `/dl <link>`, `/dls [id]`, `/dlpause <id>`, `/dlpauseall`, `/dlresume <id>`, `/dlresumeall`, `/dlproviders`, `/stack`, `/play`. A bare `/dlpause` is refused on purpose, so it cannot pause everything by accident.
 
-**Owner only.** A person talking to Jarvis in a chat who is not you is refused by `dl_add`, `dl_add_ytdlp`, `dl_add_stremio`, `dl_dismiss`, `bulk_plan`, `bulk_run`, `stremio_library`, `stremio_mark_watched` and `play_control`. The refusal reads: "`<tool>` is the owner's: someone in a chat can't use it". A sender that cannot be read counts as a guest.
+**Owner only.** A person talking to Jarvis in a chat who is not you keeps **three** tools: `dl_list`, `dl_status` and the status card `present_download_status`. Every other tool on this page is yours: they are not offered to a guest, and the handler refuses one that is called anyway (a sender that cannot be read counts as a guest). The refusal reads: "`<tool>` is the owner's: in a chat you can only look at the queue (dl_list, dl_status)" (the older tools say "someone in a chat can't use it"). **What is the case in plain 182 and what the 9B patch of round 9 changes:** in 182 the add tools, `dl_dismiss`, `torrent_files`, the season and library tools, `play_control`, `play_episode`, the Steam tools and `dl_updates_check` refuse a guest in the handler; `play_local`, `stack_start`, `stack_stop` and `server_cache_clear` are hidden from a guest but their handlers do not refuse; the control, settings, providers, doctor and demo tools were neither hidden nor refused. The patch gates all of them (and `dl_updates`); the three `hub_demo_*` buttons' tools stay as they are. The set is `OWNER_ONLY_TOOLS` in `tools.py`.
 
 *Sources: `actions/download_hub.py`, `actions/bulk_download.py`, `actions/stremio_discovery.py`, `actions/stremio_stack.py`, `actions/play_media.py`, `actions/stremio_open.py`, `actions/download_status_card.py`, `actions/hub_demo_controls.py`, `actions/download_hub_commands.py`, `ytdl_tools.py`, `tools.py` (`OWNER_ONLY_TOOLS`); each name and argument was read from the loaded tool schemas.*
 
@@ -166,7 +174,7 @@ The tool names below are the real ones. The sentences are examples of what you c
 
 Open it from Menu > Downloads. The strip at the top shows one status line and the buttons that act on the whole list: **Pause all**, **Resume all**, **Clear finished**, a **Speed** limit menu, **Open folder**, **Settings** and **Refresh**. A small tag at the right of the tab bar says whether the panel is getting live updates or polling.
 
-**Three tabs: Downloads, Providers, History.**
+**Three tabs: Downloads, Sources, History.** (The Providers tab became **Sources**, which also lists the download engines. An Updates tab is not in 182.)
 
 ### Downloads tab (three columns)
 
@@ -174,6 +182,7 @@ Open it from Menu > Downloads. The strip at the top shows one status line and th
 
 **Middle: add a download, or the selected download.**
 - *Add form:* paste one or more links (several become one batch). Under **Options**: Save in folder (with **Browse...**), Start at, Speed limit for these downloads, When it finishes, Tell me when it finishes (follow my settings / always / never), Tell me through (channels), Tell me when it (events), Batch name, and **Add it paused, I will start it myself**; the button is **Add to downloads** (**+ New** brings the form back after you have looked at a download). The form asks the hub which engine would take each link, then uses that engine's own add tool.
+- *Choosing files of a torrent:* with a magnet, infohash or `.torrent` link in the box, **Choose files** ("See the files inside this torrent and tick the ones you want") lists its files and queues the ticked ones as one group. A magnet link can take up to half a minute to answer.
 - *Detail pane:* title, status, controls, an explanation for rows that cannot be controlled, the bar and the numbers. A finished row offers **Open**, **Show in folder** and **Open folder**.
 
 **Right: Overview.** Counts (Active, Queued, Paused, Scheduled, Stalled, Failed, Finished, Not reporting); **Downloads at once** with **- Fewer** and **+ More**; the next scheduled start; **Speed** (hub speed, other tools' speed, the limit, **Change limit**); **Storage** (free space, folder, **Open folder**, **Change...**); **When it finishes** and whether notifications are on; **Hub** (daemon running or not; if not, it says to start "Download hub" in Menu > Daemons); **Needs attention**; **Running now**; and **Try the panel** with **Start demo** and **Clear demo**.
@@ -185,8 +194,8 @@ A coloured dot, the title, a kind icon, and one **toggle button**; a bar; a line
 - The toggle says **Pause** while a download runs, **Resume** while it is paused, **Start now** for a download waiting for its start time, and **Retry** for a failed or cancelled one. It appears only when the row's own capabilities allow it. Pressing it shows "Pausing..." (or Resuming, Starting, Retrying) at once. The Space key does the same on the selected card (the hint says so; ⚠️ not seen in a browser).
 - Other buttons: **Retry** on a stalled row, **Cancel** (red; it asks first), and on a Steam or Playnite row **Dismiss** where allowed.
 - A Steam row shows "Steam runs this download; pause it in Steam" (or resume), a Playnite row "Playnite gives no progress or controls", and a running Steam row a second line with what Steam last reported and how old that is.
-- **Pause and Cancel are not the same size today** (the toggle is bigger). Equal sizes are in progress, not merged.
-- **Waiting rows of the hub's own** show **up and down arrows** and a **drag grip** while the live update stream is on. They are meant to change the order downloads start in (the first one listed starts first). You reported that neither works; whether it is a real fault is not known, and a fix is in progress, not merged.
+- **Pause and Cancel:** brief 24 made the toggle and Cancel one size (present in 182, read in the report and the code, not seen in your browser).
+- **Waiting rows of the hub's own** show **up and down arrows** and a **drag grip** while the live update stream is on. They are meant to change the order downloads start in (the first one listed starts first). You reported that neither worked; brief 24 changed `applyOrder` in `tool.js` (present in 182). Whether it works for you is not known.
 
 ### The states a row can be in
 
@@ -211,17 +220,17 @@ A coloured dot, the title, a kind icon, and one **toggle button**; a bar; a line
 - **Dismiss** hides a row that **another tool reported** and that is finished, failed, cancelled or unknown. It deletes nothing and touches no file, and asks nothing. The row comes back by itself if its tool reports it running again. A download the hub made itself is never dismissed: cancel it, or remove it from History. **Clear finished** (with a count) hides every such row. **Show hidden** lists hidden rows dimmed; **Show again** only lists the row normally until you reload the panel, and the hub keeps it hidden. The Show hidden switch is not remembered.
 - **Show in folder** (finished rows, detail pane) opens the file manager with the file selected. If it can only open the folder, a warning says so. Built to fix a case that opened Documents; the fix has never run on Windows.
 
-### Providers tab
+### Sources tab (it replaced the Providers tab)
 
-One card per tool that reports its own downloads (Steam, Playnite, tools, the demo): name, a badge, "Not reporting" when it has gone quiet, the last error, a **Turn off / Turn on** switch and **Settings...** (which opens Settings). With nothing registered it says "Game installs and other tools that report into the hub appear here." Playnite appears only after the first install Jarvis starts through it. A **Sources** tab that also lists the engines (HTTP, yt-dlp, Stremio, qBittorrent) is **in progress, not merged**.
+One card per download engine (HTTP, yt-dlp, Stremio, qBittorrent) under "Download engines", and one card per tool that reports its own downloads (Steam, Playnite, tools, the demo): name, a badge, "Not reporting" when it has gone quiet, the last error, a **Turn off / Turn on** switch and **Configure** (which opens Settings at that source's block). Playnite appears only after the first install Jarvis starts through it. Present in 182 (brief 24); seen in headless Chromium against a fake hub, never in your browser.
 
 ### History tab
 
-Finished, failed and cancelled downloads. Search; show All / Finished / Failed / Cancelled; filter by source; **Export CSV** and **Export JSON** (of what is listed); **Clear older (days)** (default 90) removes list entries, never files. Each row can offer its open buttons, **Save a copy** (through the browser), **Download again**, and **Remove** ("The file is not deleted").
+Finished, failed and cancelled downloads under day headers, with a summary of the whole filtered list, a search, a state filter, a sort, a date range and a source filter, pages of 100 with **Load more**, a "file missing" tag, an export of what is listed, and bulk **Remove from history** and **Download again** (no file is touched). Each row can offer its open buttons, **Save a copy** (through the browser), **Download again** and **Remove from history**. Present in 182 (brief 29b); a row's Retry, the bulk Download again and the export were not clicked by the agent that built it. How long finished rows are kept is set by `retention.keep_history_days` (section 5).
 
 ### Settings > Downloads
 
-The panel's **Settings** button opens the normal Settings dialog at its Downloads page. Groups: Where files go, Speed, Running at once, Connections, When a download finishes, Notifications, Lost downloads, Safety. It also holds Steam's update-size row and the **Stremio card**: the hub's one-sentence state of Stremio, buttons **Check again**, **Copy diagnostic**, **Locate program...**, **Locate server.js...** and **Start**. Every row is a setting from section 5, written through the hub's own checks; a refusal shows in the hub's own words. A retention row is not there (it waits for a decision, section 9).
+The panel's **Settings** button opens the normal Settings dialog at its Downloads page. It has a search bar and seven sections (Files, Speed and schedule, Running at once, Sources, Notifications, When a download finishes, Safety) plus "Other" for a setting the page has no wording for; every row shows its default and has a **Reset** link; each engine and each reporting program has its own block under Sources, including Steam's update-size row and the **Stremio card**: the hub's one-sentence state of Stremio, buttons **Check again**, **Copy diagnostic**, **Locate program...**, **Locate server.js...** and **Start**, plus the server-address and stremio-web rows and a repair offer for `stremio.json`. **"Keep finished downloads in History for"** (`retention.keep_history_days`, 0 = keep forever, under "When a download finishes") asks first when the change would remove History rows. Every row is a setting from section 5, written through the hub's own checks; a refusal shows in the hub's own words. Present in 182 (brief 29b, 7C); headless Chromium and a fake page; never in your browser.
 
 *Sources: `actions/hub_ui/tool.html`, `actions/hub_ui/tool.js`, `web/public/downloads-settings.js`, `hub/states.py`; the reports `PANEL_FIX_AND_N1`, `PANEL_DISMISS_AND_STREMIO_CARD`, `N2_SHOW_IN_FOLDER`, `TRACK_D`, and `docs/findings/03-first-manual-run-162.md` for what you reported. Everything above was read from the panel code; the browser runs behind it are the ones named in section 2.*
 
@@ -278,7 +287,7 @@ These are the keys the hub reports as writable (`hub_admin.py`, `settings` op: `
 
 **Asks first, whatever the tool:** choosing `open` for what happens after a download (it opens files unseen); queuing more than 5 links in one call; saving outside the library.
 
-**Defaults that exist but nothing can change today:** `retention.keep_history_days` (90; once an hour the daemon removes finished list rows older than this, never files; 0 or less keeps them forever) and `retention.auto_delete_files` (nothing reads it; the hub never deletes a file by itself), `http.connect_timeout`, `stremio.mode` (only `save` exists), the per-call `limits`, `provider_limits`, `allowed_link_schemes`, and the `demo` block.
+**Retention (7C, present in 182):** `retention.keep_history_days` (default 90, 0 = keep forever, at most 3650) is writable through `dl_settings` (it asks first, because it removes History rows) and from the Settings row; `dl_prefs` refuses it. Once an hour the daemon removes finished list **rows** older than this, never files. **`retention.auto_delete_files`** is still read by nothing and cannot be changed; the hub never deletes a file by itself. **Defaults that exist but nothing can change today:** `http.connect_timeout`, `stremio.mode` (only `save` exists), the per-call `limits`, `provider_limits`, `allowed_link_schemes`, and the `demo` block.
 
 *Sources: `hub/settings.py` (`DEFAULTS`, `WRITABLE`, `PREFS_WRITABLE`, `PROVIDER_SETTINGS`, the validators), `hub_admin.py`, `actions/download_hub.py`. The qBittorrent engine reads its own file instead (section 6).*
 
@@ -289,6 +298,7 @@ These are the keys the hub reports as writable (`hub_admin.py`, `settings` op: `
 ### Direct links (HTTP)
 - **Needs:** nothing installed.
 - **Can:** download a `http` or `https` file in the background, resume it after a pause or a daemon restart, and name and place it safely (nothing is ever written outside the download folder or a folder you chose). Parallel parts are available but off (`http.segments`).
+- **Options of one download (`dl_add_http`, 7C, present in 182):** `segments` (1 to 16 parallel parts), `filename` (exactly one link; a name, not a path), `referer` (no user name or password in it). There is no `headers` argument: no Authorization or Cookie is ever stored.
 - **Cannot:** fetch from a private or loopback address unless you allow it (`allow_private_hosts`); that guard checks every redirect too.
 - **Checksum (`verify`).** A caller may queue a link with the item option `verify = {"algo": "sha1" | "sha256" | "sha512", "value": "<hex>", "size": <bytes, optional>}` (the Minecraft tools use it). Only the `http` engine honours it: it hashes the finished `.part`, and a mismatch fails the row without retry and deletes only that row's own file; `size` is a ceiling (a response announcing more than it, give or take 4 KB, is refused, and so is a stream that runs past it). If another engine takes the link the option is not stored, the add still succeeds, and the add result's `note` says `verify` was ignored; a link already queued keeps the options it was queued with (the note says so). **A caller that needs integrity must read that `note` before it says "checked".**
 - **Limits:** tested only against local servers.
@@ -296,7 +306,8 @@ These are the keys the hub reports as writable (`hub_admin.py`, `settings` op: `
 ### Video sites (yt-dlp)
 - **Needs:** the `yt_dlp` Python package and `ffmpeg` on PATH. Without them the hub says "yt-dlp isn't installed" or "ffmpeg isn't installed or not on PATH".
 - **Can:** YouTube and sites with their own yt-dlp extractor, with quality, container, audio-only, subtitles, thumbnail, chapters and SponsorBlock options; live percent, speed and time left; merging shown as a labelled phase; pause that keeps the partial file; cancel that leaves no half-written final file. It runs the same code as `ytdl_download`.
-- **Cannot:** playlists are not reachable (see section 2); the generic fallback for unknown sites is off; no cookies, proxy or account.
+- **Playlists (present in 182):** `dl_add_ytdlp` takes `playlist`: a playlist or channel link is never taken silently; `all` queues up to 50 of its videos as one group, `one` just the single video the link names, and without it nothing is queued and Jarvis asks. Tested against a fake yt-dlp helper only.
+- **Cannot:** the generic fallback for unknown sites is off (`generic` exists as an argument but only after you said yes for that link); no cookies, proxy or account.
 - **Limits:** not tried on YouTube, HLS or DASH.
 
 ### Torrents (Stremio)
@@ -321,6 +332,7 @@ These are the keys the hub reports as writable (`hub_admin.py`, `settings` op: `
 - **Can:** show installs and updates Steam is doing, however they were started. Updates are announced only above `notify_min_update_gb`.
 - **Cannot:** show a live percent, speed or time left (Steam does not write them while it downloads); a running row says what Steam last reported and how old that is. It is called stalled only when the manifest, the downloading folder and Steam's disk writes are all flat for 60 seconds. **Pause and cancel are not possible from Jarvis**, and **recognising a Steam cancel is not built**. When Steam is closed the rows go to Not reporting, never to failed.
 - **Limits:** one 145-second real run, not to the end.
+- **Installing and updating from chat (`steam_library`, `steam_install_game`, `steam_update_game`, owner only):** they hand a `steam://install/<digits>` link to Steam. **Where the code is:** the launcher (`install_url`, `OPEN_URL`, `launch_install`) lives in `actions/steam_tools.py`, not in `hub/steam.py`: `hub/steam.py` only watches (it has no `subprocess` import, per the rule that the hub core starts nothing). Present in 182 (6G); nothing was tried with a real Steam.
 
 ### Playnite (watched)
 - **Needs:** Playnite with its bridge plugin (on `localhost:19821`) and the token in `~/.jarvis/playnite.json`.
@@ -352,7 +364,7 @@ Start with `hub_doctor` (or ask "why won't my downloads start?"): it checks the 
 | "Could not start" / "Started but not answering" | The program stopped or never answered. | **Copy diagnostic** (it includes the console's last line); `stack_doctor`. |
 | A torrent fails with "no seeders" | No peers answered within `stremio.metadata_timeout` (90 s). | Retry later, pick another release, or raise the setting. Not retried by itself. |
 | yt-dlp says it isn't installed / ffmpeg missing | The package or the program is missing. | `pip install yt-dlp` (or `pip install -e .[ytdl]` in `jarvis-cli/`), install ffmpeg. |
-| A video page is queued as one video, not a playlist | Playlists are not wired to any tool. | Not known beyond that; no report ran it. |
+| A video page is queued as one video, not a playlist | A playlist link without `playlist` queues nothing and asks ("one" or "all"). | Answer the question, or pass `playlist: all` (up to 50 videos, one group). |
 | A Steam row has no percent or speed | By design: Steam does not write them. | Read the row's note; open Steam for the real progress. |
 | A Steam row says Stalled | Manifest, downloading folder and disk writes were all flat for 60 s. | Check Steam itself. |
 | Steam rows show "Not reporting" | Steam is closed. | Open Steam. They are never marked failed for this. |
@@ -360,10 +372,10 @@ Start with `hub_doctor` (or ask "why won't my downloads start?"): it checks the 
 | Playnite is missing from the Providers tab | It registers itself on the first install Jarvis starts. | Start one with `playnite_install_game`. |
 | A Playnite row has no percent | By design: Playnite gives none. | Wait for "installed". |
 | No Pause button on a card | The row's tool gave no pause (Steam, Playnite, read-only tools); or the installed copy of Jarvis is older than the files. | Read the note on the card; reinstall with `script.bat` and check `jarvis version` against `jarvis-cli/jarvis/build_info.py`. |
-| The queue arrows or drag do nothing | Known open fault (the arrows only draw on waiting hub rows while the live stream is on). | A fix is in progress, not merged. Cause not known. |
+| The queue arrows or drag do nothing | They only draw on waiting hub rows while the live stream is on; brief 24 changed the code (present in 182) but nothing was seen in your browser. | Tell us what you saw. |
 | "Show in folder" opens the wrong place | The Windows command was fixed but never run on Windows. | Tell us what it opened. |
 | A change to a setting is refused | The value is outside its range, or the key needs `dl_settings`. | The message names the allowed range or tool. |
-| "`<tool>` is the owner's: someone in a chat can't use it" | A chat guest, or an unreadable sender, tried an owner tool. | Use it yourself in the Jarvis page. |
+| "`<tool>` is the owner's: ..." | A chat guest, or an unreadable sender, tried an owner tool (every hub tool except `dl_list`, `dl_status` and the status card, after the 9B patch). | Use it yourself in the Jarvis page. |
 | `hub_doctor` warns about `psutil` | Steam is here and `psutil` is not installed. | `pip install psutil` in the Python Jarvis uses. |
 | `tests/test_build_info.py` fails, or `jarvis version` does not match `build_info.py` | The stored build hash is older than the source. | Run `script.bat` (never edit `build_info.py` by hand). |
 
@@ -392,8 +404,9 @@ pip install psutil
 | `hub/router.py` | "Which engine takes this input?" Engines declare their own rules. |
 | `hub/engines/` | One module per engine, discovered by name: `http.py`, `ytdlp.py`, `stremio.py`, `qbittorrent.py` (`base.py` is the contract; names starting with `_` are helpers). |
 | `hub/providers.py` | Registering and polling providers (`TOOL_DOWNLOADS`, Steam, Playnite). |
-| `hub/steam.py`, `hub/playnite_provider.py`, `hub/demo.py`, `hub/legacy.py` | The built-in providers. |
-| `hub/stremio/` | Config, detection, status words, links, server API, players, mpv control, ranking, addons, discovery, bulk, `.torrent` files. |
+| `hub/steam.py`, `hub/playnite_provider.py`, `hub/demo.py`, `hub/legacy.py` | The built-in providers. `hub/steam.py` starts nothing; the Steam launcher is in `actions/steam_tools.py`. |
+| `hub/updates.py`, `hub/updates_admin.py` | N23: the stored update findings, the runner thread inside the daemon (`UpdateRunner`), the admin ops `updates`, `updates_check`, `updates_dismiss`. |
+| `hub/stremio/` | Config, detection, status words, links, server API, players, mpv control, ranking, addons, discovery, bulk, `.torrent` files and the torrent file list, and round 8's `play_flow.py`, `title_cache.py`, `pick_store.py`, `stream_cache.py`, `addon_health.py`. |
 | `hub/notify.py` | When to speak (events, coalescing, once-only). Delivery is Jarvis's notifier. |
 | `hub/doctor.py`, `hub/netguard.py`, `hub/naming.py`, `hub/paths.py`, `hub/reveal.py` | Health checks, the SSRF guard, safe names and folders, where things live, "show in folder". |
 | `hub_admin.py`, `hub_browse.py`, `hub_client.py` | The panel's back end (`jarvis hub-admin`), the folder picker's listing, and the small client a tool uses to report progress. |
@@ -462,7 +475,7 @@ node tests/verify_hub_panel.js
 | Providers, Steam, Playnite | `test_hub_providers.py`, `test_hub_provider_lifecycle.py`, `test_hub_steam_alive.py` (needs a fixture the shared copy leaves out), `test_hub_steam_threshold.py`, `test_steam_checks.py`, `test_hub_store_checks.py` |
 | Panel back end and picker | `test_hub_admin.py`, `test_hub_browse.py`, `test_download_status_card.py`, `test_hub_reveal.py`, `test_hub_demo_controls.py` |
 | Minecraft mod sources (queue with `verify`) | `test_minecraft_download.py`, `test_minecraft_integration.py` (the checksum on the stored row), `test_minecraft_guards.py` |
-| Guest gates and pack text | `test_hub_guest_gates.py`, `test_channels_pack_instruction.py`, `test_l28b_followups.py` |
+| Guest gates and pack text | `test_hub_guest_gates.py`, `test_hub_control_gates.py` (every hub tool's handler against a simulated guest), `test_hub_updates_gates.py`, `test_hub_play_gates.py`, `test_hub_play_stack_gates.py`, `test_channels_pack_instruction.py`, `test_l28b_followups.py` (the exact owner-only set) |
 | Panel and Settings pages (Node) | `verify_hub_panel.js`, `verify_hub_settings.js`, `verify_hub_add_form.js`, `verify_path_picker.js`, `verify_hub_browse_routes.js` |
 
 Test helpers (not tests): `_hub_testserver.py`, `_hub_fake_stremio.py`, `_hub_fake_addon.py`, `_hub_fake_qbittorrent.py`, `_hub_ytdlp_media.py`.
@@ -492,22 +505,23 @@ Several pieces of work touch the same files, so each change to one must be small
 
 | What | Waits for |
 |---|---|
-| Sources tab, working queue arrows and drag, equal Pause and Cancel buttons, a way from the Sources tab into Stremio's settings | In progress, not merged. |
-| A rework of the History tab and of Settings > Downloads | Nobody has started; the scopes are proposals only. |
+| The Updates tab (N23): findings in the panel, "Check now", "Ignore this version" | Handed to another agent in round 9; not in 182. Its own text describes it. |
+| Update sources for Steam and for package managers (winget, choco, scoop, npm) | The Steam source waits for the shared probe `tests/steam_update_checks.py`, the package managers for `tests/package_update_checks.py`; neither was run on a real PC. |
 | Covers (thumbnails) on every download | Your four cover decisions (N3 a to d): the Steam cover source, the cache folder, `thumb_v` versus data URIs, and the tint rule. |
-| A retention row in Settings (`keep_history_days`, `auto_delete_files`) | Decision D2: make retention writable. |
+| Deleting files by retention (`retention.auto_delete_files`) | Nothing reads it and nothing can change it; not decided. (The `keep_history_days` row is built.) |
 | Steam cancel recognition (a cancelled Steam download settles as Cancelled, not Unknown) | Your re-run of `steam-checks.py` to the end, with a cancel inside it. |
 | Pausing or cancelling a Steam download from Jarvis | Decision S2 (recommended: keep Steam read-only). |
 | Epic and GOG watchers | Your probe report from `tests/store_checks.py`. |
-| yt-dlp playlists reachable from a tool | A change in `actions/download_hub.py` that nobody has been given. |
 | The yt-dlp generic extractor switched on | A decision on the safety conditions (flag `GENERIC_ENABLED`). |
 | Moving the per-download notification, after-download and speed arguments out of every add tool | Decision N4. |
 | Stremio `warm` mode; pausing torrents while something plays; cleaning one torrent's cache | A real Stremio server answer to build them from (decision 6 says `save`, so `warm` is unused). |
 | Dub / sub words, season-pack preference, anime pack numbering, episode-level watched state | Your addon probe (the command is under this table). |
 | Scheduled "grab new episodes", watched-state sync, a rename | Listed as stretch work; not started. |
-| Browser downloads into the hub, Steam install, Steam library and updates, removing the provider filters from the panel, repairing `~/.jarvis/stremio.json` from the Stremio card | Your four decisions N22 a to d (written up only, nothing built). |
+| A real run of the N22 pieces (browser downloads, Steam install / library / update, the `stremio.json` repair) | Built in the code, none tried on a real PC; your four decisions N22 a to d: not re-read. |
+| Whether Stremio's server fetches only the files you chose from a torrent (N24) | The four experiments in `OWNER_TODO.md`; never measured. |
+| `dl_add_http` with a `headers` argument | Decided against: a `referer` only, so no secret is stored. |
 | Playnite name and cover lookup for Steam rows; a per-provider notification switch | Not scheduled. |
-| A hub settings block for qBittorrent | An edit to the shared `hub/settings.py`; the track that wrote the engine asked, nobody has decided. Decision 11 (the engine's shape, including its cancel behaviour) is still waiting for your confirmation. |
+| A real run of the qBittorrent engine | The settings block and `concurrency.qbittorrent` exist (brief 31); the engine has never run against a real qBittorrent. Decision 11 (the engine's shape, including its cancel behaviour) is still waiting for your confirmation. |
 | A way to un-hide a dismissed row for good, and remembering Show hidden | Not scheduled. |
 
 The addon probe, with a Stremio addon installed that has streams, and a show you may download:
