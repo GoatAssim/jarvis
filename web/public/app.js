@@ -10734,6 +10734,7 @@
         daemons: () => window.JarvisDaemons?.open(),
         backlog: () => window.JarvisBacklog?.open(),
         minecraft: () => window.JarvisMinecraft?.open(),
+        updates: () => window.JarvisUpdates?.open(),
         // Log search is switched off for the person using the UI (jarvis-plan.md 4): the
         // panel, its routes and its tests still exist, there is just no way in from here.
         setup: openSetup,
@@ -10814,6 +10815,7 @@
   qs("#menu-item-daemons")?.addEventListener("click", () => { closePanelMenu(); window.JarvisDaemons?.open(); });
   qs("#menu-item-backlog")?.addEventListener("click", () => { closePanelMenu(); window.JarvisBacklog?.open(); });
   qs("#menu-item-minecraft")?.addEventListener("click", () => { closePanelMenu(); window.JarvisMinecraft?.open(); });
+  qs("#menu-item-updates")?.addEventListener("click", () => { closePanelMenu(); window.JarvisUpdates?.open(); });
   qs("#menu-item-calendar")?.addEventListener("click", () => { closePanelMenu(); window.JarvisCalendar?.open(); });
   // (no click handler for #menu-item-logsearch: the item is hidden in index.html, see jarvis-plan.md 4)
   qs("#menu-item-setup")?.addEventListener("click", () => { closePanelMenu(); openSetup(); });

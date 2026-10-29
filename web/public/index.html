@@ -25,6 +25,7 @@
 <link rel="stylesheet" href="daemons.css">
 <link rel="stylesheet" href="backlog.css">
 <link rel="stylesheet" href="minecraft-panel.css">
+<link rel="stylesheet" href="updates-panel.css">
 <link rel="stylesheet" href="calendar.css">
 <link rel="stylesheet" href="logsearch.css">
 <link rel="stylesheet" href="log-conversation.css">
@@ -267,6 +268,10 @@
               <button class="panel-menu__item" id="menu-item-minecraft" type="button" role="menuitem">
                 <span class="panel-menu__item-label">Minecraft</span>
                 <span class="panel-menu__item-hint">Find mods on Modrinth and CurseForge, queue a download, fetch OptiFine, make a pack</span>
+              </button>
+              <button class="panel-menu__item" id="menu-item-updates" type="button" role="menuitem">
+                <span class="panel-menu__item-label">Updates<span class="up-badge" id="menu-item-updates-badge" hidden></span></span>
+                <span class="panel-menu__item-hint">What is out of date: mods, games, package managers and more &mdash; update it, or let it update by itself</span>
               </button>
               <button class="panel-menu__item" id="menu-item-logsearch" type="button" role="menuitem" hidden aria-hidden="true" tabindex="-1">
                 <span class="panel-menu__item-label">Log search</span>
@@ -1972,6 +1977,7 @@
 <script src="daemons.js"></script>
 <script src="backlog.js"></script>
 <script src="minecraft-panel.js"></script>
+<script src="updates-panel.js"></script>
 <script src="calendar.js"></script>
 <script src="log-conversation.js"></script>
 <script src="logsearch.js"></script>

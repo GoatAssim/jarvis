@@ -403,8 +403,10 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
   // ---- static wiring of the new tabs
   const htmlT = fs.readFileSync(path.join(ui, "tool.html"), "utf8");
-  check("the tab strip is a real tablist: four tabs, one selected, each controls a pane", /role="tablist"/.test(htmlT) && (htmlT.match(/role="tab"/g) || []).length === 4
-    && (htmlT.match(/aria-selected="true"/g) || []).length === 1 && /role="tabpanel"/.test(htmlT) && /aria-controls="sourcesPane"/.test(htmlT) && /aria-controls="updatesPane"/.test(htmlT) && /aria-controls="historyPane"/.test(htmlT));
+  // Round 5 (H2): the Updates tab moved to Menu > Updates, so the strip has three tabs and a link where the fourth was.
+  check("the tab strip is a real tablist: three tabs, one selected, each controls a pane; Updates is only a link now", /role="tablist"/.test(htmlT) && (htmlT.match(/role="tab"/g) || []).length === 3
+    && (htmlT.match(/aria-selected="true"/g) || []).length === 1 && /role="tabpanel"/.test(htmlT) && /aria-controls="sourcesPane"/.test(htmlT) && /aria-controls="historyPane"/.test(htmlT)
+    && !/updatesPane|tabUpdates/.test(htmlT) && /id="updatesLink"/.test(htmlT));
   check("the arrow keys, Home and End move between tabs", /ArrowRight/.test(source) && /ArrowLeft/.test(source) && /"Home"/.test(source) && /"End"/.test(source));
   check("the writes to the hub's web routes carry the header the server requires, and removing history asks first",
     /"X-Jarvis-Hub": "1"/.test(source) && /askFirst\("Remove from the history\?"/.test(source) && /askFirst\("Clear old history\?"/.test(source) && /dry_run: true/.test(source));

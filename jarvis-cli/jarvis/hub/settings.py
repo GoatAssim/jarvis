@@ -25,6 +25,13 @@ from pathlib import Path
 
 from . import naming, paths
 
+# The groups the Updates panel sorts findings into (the Updates rework).  tool_downloads.UPDATE_GROUPS repeats this
+# list for the provider validator (that module must stay import-light); tests/test_hub_updates_validate.py checks the
+# two agree.  `label` is what the panel shows.
+UPDATE_GROUPS = ("mods", "games", "packages", "apps", "other")
+UPDATE_GROUP_LABELS = {"mods": "Mods", "games": "Games", "packages": "Packages", "apps": "Apps", "other": "Other"}
+UPDATES_AUTO_MAX_DEFAULT = 10
+
 DEFAULTS = {
     "library_root": "",          # "" = paths.default_library_root()
     "concurrency": {"total": 4, "http": 3, "ytdlp": 2, "stremio": 3, "qbittorrent": 2},
@@ -91,6 +98,13 @@ DEFAULTS = {
     },
     "limits": {"max_items_per_call": 50, "confirm_above_items": 5, "max_bytes_per_call_gb": 150},
     "demo": {"enabled": False, "started_at": 0},
+    # The Updates rework (hub/updates.py).  `auto_update` is the MASTER switch and is OFF until the owner ticks it in the
+    # Updates panel; a provider also needs its own `auto_update` tick (UPDATE_SETTINGS below).  `include_groups`: only
+    # findings of these groups are applied by themselves.  `auto_max_per_cycle`: at most this many applies are queued by
+    # one automatic step (one provider's finished check).  Not writable through dl_settings / dl_prefs on purpose: only the
+    # Updates panel's own op (hub/updates_admin.py `updates_set`) writes them, with `UPDATES_WRITABLE`.
+    "updates": {"auto_update": False, "include_groups": list(UPDATE_GROUPS),
+                "auto_max_per_cycle": UPDATES_AUTO_MAX_DEFAULT},
 }
 
 # key -> checker(value) -> (ok_value, error).  Nested keys are written as "a.b".
@@ -496,6 +510,50 @@ UPDATE_SETTINGS = {
     "update_interval_h": (UPDATE_INTERVAL_H_DEFAULT, _check_hours("update_interval_h")),
 }
 
+# The Updates rework: a third per-provider setting, kept OUT of UPDATE_SETTINGS so `update_settings()` keeps returning
+# the two keys it always did.
+#   auto_update   True = once the master switch (`updates.auto_update`) is also on, the hub applies this provider's
+#                 findings by itself, after each of its checks.  Default False.  The model's own path
+#                 (`dl_provider_prefs`) cannot set it: see `validate_provider_settings`.
+AUTO_UPDATE_DEFAULT = False
+_check_auto_update = _bool("auto_update")
+
+
+def provider_auto_update(stored):
+    """True only when the provider's stored `auto_update` is exactly True (anything else, a missing key, a string, a
+    1, is off: an automatic change to the machine is never switched on by a value that merely looks truthy)."""
+    return isinstance(stored, dict) and stored.get("auto_update") is True
+
+
+def _check_include_groups(value):
+    """updates.include_groups: a list of group ids (each one of UPDATE_GROUPS), kept in the canonical order without
+    repeats.  An empty list is allowed (nothing updates by itself)."""
+    message = "updates.include_groups must be a list drawn from %s" % ", ".join(UPDATE_GROUPS)
+    if not isinstance(value, (list, tuple)):
+        return None, message
+    if any(not isinstance(g, str) or g not in UPDATE_GROUPS for g in value):
+        return None, message
+    return [g for g in UPDATE_GROUPS if g in value], None
+
+
+UPDATES_WRITABLE = frozenset(("updates.auto_update", "updates.include_groups", "updates.auto_max_per_cycle"))
+
+
+def update_global_settings(stored_or_merged):
+    """The effective {"auto_update", "include_groups", "auto_max_per_cycle"} out of a merged settings dict (or the
+    stored overrides): a value that no longer validates falls back to its default, so a damaged setting can never
+    switch automatic updating ON."""
+    block = (stored_or_merged or {}).get("updates")
+    block = block if isinstance(block, dict) else {}
+    auto = block.get("auto_update") is True
+    groups, err = _check_include_groups(block.get("include_groups", list(UPDATE_GROUPS)))
+    if err:
+        groups = list(UPDATE_GROUPS)
+    cap, err = _int_in(block.get("auto_max_per_cycle", UPDATES_AUTO_MAX_DEFAULT), 1, 50, "auto_max_per_cycle")
+    if err:
+        cap = UPDATES_AUTO_MAX_DEFAULT
+    return {"auto_update": auto, "include_groups": groups, "auto_max_per_cycle": cap}
+
 
 def update_settings(stored, starting_interval_h=None):
     """The effective update settings of one provider: {"update_checks": bool, "update_interval_h": float}.
@@ -519,13 +577,16 @@ def update_settings(stored, starting_interval_h=None):
     return out
 
 
-def validate_provider_settings(provider_id, settings):
-    """{\"notify_min_update_gb\": \"2.5\"} -> (clean, errors) for one provider's settings block.
+def validate_provider_settings(provider_id, settings, allow_auto_update=False):
+    """{"notify_min_update_gb": "2.5"} -> (clean, errors) for one provider's settings block.
 
     Keys the hub knows for THIS provider are range-checked and normalised.  A key that belongs to
     another provider is an error (a setting that silently does nothing looks like success).  Any
     other key is passed through unchanged, which keeps Steam's `root` and tool-defined keys working.
     `update_checks` and `update_interval_h` are known for every provider (UPDATE_SETTINGS).
+    `auto_update` (the Updates rework) is known for every provider too, but only the Updates panel's own op may set it
+    (`allow_auto_update=True`): through `dl_provider_prefs` it is an error, so the model can never tick the box that
+    lets the hub change the machine by itself.
     """
     known = PROVIDER_SETTINGS.get(str(provider_id or ""), {})
     foreign = {k: pid for pid, block in PROVIDER_SETTINGS.items() if pid != provider_id for k in block}
@@ -539,6 +600,15 @@ def validate_provider_settings(provider_id, settings):
                 clean[key] = checked
         elif key in UPDATE_SETTINGS:
             checked, err = UPDATE_SETTINGS[key][1](value)
+            if err:
+                errors.append(err)
+            else:
+                clean[key] = checked
+        elif key == "auto_update":
+            if not allow_auto_update:
+                errors.append("auto_update is switched on in the Updates panel (Menu > Updates), not from chat")
+                continue
+            checked, err = _check_auto_update(value)
             if err:
                 errors.append(err)
             else:
@@ -658,6 +728,10 @@ _CHECKS = {
     "unknown_settle_hours": lambda v: _int_in(v, 1, 720, "unknown_settle_hours"),
     "retention.keep_history_days": _check_keep_history_days,
 }
+# The Updates rework: checked here like every other setting, but NOT in WRITABLE (see UPDATES_WRITABLE).
+_CHECKS["updates.auto_update"] = _bool("updates.auto_update")
+_CHECKS["updates.include_groups"] = _check_include_groups
+_CHECKS["updates.auto_max_per_cycle"] = lambda v: _int_in(v, 1, 50, "updates.auto_max_per_cycle")
 for _kind in FOLDER_KINDS:
     _CHECKS["folders." + _kind] = _check_kind_folder("folders." + _kind)
 for _provider in NOTIFY_PROVIDERS:

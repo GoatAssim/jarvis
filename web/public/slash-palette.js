@@ -1400,7 +1400,7 @@
   }
 
   const PANEL_VERBS = new Set(["guides", "debug", "checklist", "schedule", "calendar", "mcp", "ctools", "channels",
-    "daemons", "logsearch", "setup", "subagents", "notifications", "logs", "config", "skin", "minecraft"]);
+    "daemons", "logsearch", "setup", "subagents", "notifications", "logs", "config", "skin", "minecraft", "updates"]);
 
   const HANDLERS = {
     async new() { await host().newChat(); },

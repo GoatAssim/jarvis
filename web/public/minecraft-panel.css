@@ -69,6 +69,7 @@
 /* ---- results: a minimum height so a short answer does not pull the page up */
 .mc-results{ display: flex; flex-direction: column; gap: 10px; min-height: 9rem; }
 .mc-results--tray{ min-height: 0; }
+.mc-results--tight{ min-height: 0; }
 .mc-lastsearch{ min-height: 1.3em; margin: -4px 0 6px; }
 .mc-empty{ border: 1px dashed var(--border-strong); border-radius: 4px; padding: 14px 12px; color: var(--text-dim); font-size: 12.5px; display: flex; flex-direction: column; gap: 6px; }
 .mc-subhead{ font-size: 12.5px; font-weight: 600; color: var(--accent-soft); margin: 8px 0 2px; }
@@ -157,6 +158,15 @@
 .mc-count__k{ font-size: 11px; color: var(--text-dim); }
 .mc-count--ok .mc-count__n{ color: var(--green); }
 .mc-count--warn .mc-count__n{ color: var(--red); }
+
+/* ---- the Updates tab: three sections (watched folders, check and update, undo) */
+.mc-section{ display: flex; flex-direction: column; gap: 8px; margin: 0 0 18px; padding-top: 10px; border-top: 1px solid var(--border); }
+.mc-section:first-of-type{ border-top: 0; padding-top: 0; }
+.mc-section__title{ font-size: 14px; margin: 0; }
+.mc-section .mc-note-inline{ margin: 0; overflow-wrap: anywhere; }
+.mc-watchform{ display: flex; flex-direction: column; gap: 10px; border-color: var(--border-strong); }
+.mc-watchform[hidden]{ display: none; }
+.mc-lines{ margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 3px; font-size: 12.5px; color: var(--text-dim); overflow-wrap: anywhere; }
 
 /* ---- the tray */
 .mc-tray{ min-height: 0; display: flex; flex-direction: column; border-left: 1px solid var(--border); background: var(--bg-panel-2); }

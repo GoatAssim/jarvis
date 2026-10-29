@@ -25,6 +25,14 @@ const vm = require("vm");
 
 const PUBLIC = path.join(__dirname, "..", "web", "public");
 
+// The counts the palette tests below expect are READ from the real registry, not typed in: a literal drifted twice (logsearch is
+// hidden from the palette by HIDDEN_VERBS in slash-palette.js, and notExposed grew), and every new panel verb (/updates, round 5)
+// moves them. SHOWN_VERBS is what the palette lists; the +1 wherever it is used is the "show the other commands" toggle row.
+const REGISTRY = JSON.parse(/\/\*JSON-BEGIN\*\/([\s\S]*)\/\*JSON-END\*\//.exec(fs.readFileSync(path.join(PUBLIC, "slash-commands-data.js"), "utf8"))[1]);
+const SHOWN_VERBS = REGISTRY.verbs.filter((v) => v.verb !== "logsearch").length;
+const CLI_RUNNABLE = Object.keys(REGISTRY.passthrough).length;
+const CLI_BLOCKED = Object.keys(REGISTRY.notExposed).length;
+
 let pass = 0, fail = 0;
 function check(name, cond, detail) {
   if (cond) { pass++; console.log("ok   " + name); }
@@ -257,6 +265,8 @@ async function main() {
     check("/guides opens the guides panel", last(env)[0] === "openPanel" && last(env)[1] === "guides");
     await submit(env, "/minecraft");
     check("/minecraft opens the Minecraft panel (S3)", last(env)[0] === "openPanel" && last(env)[1] === "minecraft");
+    await submit(env, "/updates");
+    check("/updates opens the Updates panel (round 5, H2)", last(env)[0] === "openPanel" && last(env)[1] === "updates");
     await submit(env, "/tools");
     check("alias /tools resolves to /debug", last(env)[0] === "openPanel" && last(env)[1] === "debug");
     await submit(env, "/SCHED");
@@ -400,11 +410,11 @@ async function main() {
     await flush();
     check("typing / opens the popover", env.palette.hidden === false);
     const rowsAll = env.palette.querySelectorAll(".slash-row").length;
-    check("empty query lists every verb (41) plus the 'show the other commands' toggle", rowsAll === 42, `got ${rowsAll}`);
+    check(`empty query lists every shown verb (${SHOWN_VERBS}) plus the 'show the other commands' toggle`, rowsAll === SHOWN_VERBS + 1, `got ${rowsAll}`);
     check("headings: the six groups from I.2.5 plus 'More'", env.palette.querySelectorAll(".slash-heading").length === 7
       && ["Chat", "Model", "Skills", "Run", "Panels", "View"].every((g) => env.palette.querySelectorAll(".slash-heading").some((h) => h.textContent === g)));
-    check("every verb row carries a visible risk badge (D-I4)", env.palette.children[0].querySelectorAll(".slash-badge").length === 41);
-    check("the live region announces the count", env.palette.querySelectorAll(".slash-sr")[0].textContent === "41 commands", env.palette.querySelectorAll(".slash-sr")[0].textContent);
+    check("every verb row carries a visible risk badge (D-I4)", env.palette.children[0].querySelectorAll(".slash-badge").length === SHOWN_VERBS);
+    check("the live region announces the count", env.palette.querySelectorAll(".slash-sr")[0].textContent === `${SHOWN_VERBS} commands`, env.palette.querySelectorAll(".slash-sr")[0].textContent);
 
     env.input.value = "/ne";
     env.input.dispatchEvent(new Event("input"));
@@ -662,12 +672,12 @@ async function main() {
     key("End");
     let k = key("Enter");
     await flush(); await flush();
-    check("the toggle row expands every other command (32 runnable CLI + 30 that can't)", env.palette.querySelectorAll(".slash-row").length === 41 + 32 + 30, env.palette.querySelectorAll(".slash-row").length);
+    check(`the toggle row expands every other command (${CLI_RUNNABLE} runnable CLI + ${CLI_BLOCKED} that can't)`, env.palette.querySelectorAll(".slash-row").length === SHOWN_VERBS + CLI_RUNNABLE + CLI_BLOCKED + 1, env.palette.querySelectorAll(".slash-row").length);
     check("...under their own headings", ["CLI commands", "Can't run from chat"].every((h) => env.palette.querySelectorAll(".slash-heading").some((x) => x.textContent === h)));
-    check("...and the ones that can't run are disabled", env.palette.querySelectorAll(".slash-row").filter((r) => /is-disabled/.test(r.className)).length === 30);
+    check("...and the ones that can't run are disabled", env.palette.querySelectorAll(".slash-row").filter((r) => /is-disabled/.test(r.className)).length === CLI_BLOCKED);
     key("Escape");
     await type("/");
-    check("closing resets the expansion", env.palette.querySelectorAll(".slash-row").length === 41);
+    check("closing resets the expansion", env.palette.querySelectorAll(".slash-row").length === SHOWN_VERBS + 1);
 
     // IME
     await type("/gu");

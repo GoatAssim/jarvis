@@ -12,6 +12,12 @@
             "update_tool": "check_model_updates",   # optional, any mode: a read-only tool of THIS file that
                                               # answers {"updates": [...], "complete": bool}  (N23)
             "update_interval_h": 24,          # optional: starting hours between two checks (0.5 to 720)
+            "update_group": "packages",       # optional: mods | games | packages | apps | other (default other)
+            "update_args": {"manager": "pip"},   # optional: arguments of every update_tool call (at most 512 bytes of JSON)
+            "apply_tool": "apply_model_update",  # optional: a CONFIRM-GATED tool of THIS file that applies ONE finding
+            "apply_args": {},                 # optional: arguments merged into every apply call (never `id` / `dry_run`)
+            "apply_timeout_s": 600,           # optional: 30 to 3600 seconds per apply call (default 600)
+            "updates_only": False,            # optional: True = "push" provider that only reports / applies updates
             "capabilities": ["pause", "resume", "cancel", "retry", "open", "reveal"],
             "controls": {"pause": "model_fetch_pause", ...},    # capability -> a tool of THIS file
             "open_roots": ["D:/Models"],      # open / reveal / play only inside these folders
@@ -35,6 +41,30 @@ policy scores as a read (get_ / list_ / check_), and must not be a control tool;
 `poll_tool` (the two answer in different shapes, and a poll is given 5 seconds while a check may take 60).
 `update_interval_h` is only a starting value, written once: the owner owns it afterwards.  Valid in any mode.
 
+Applying updates (the Updates rework, contract v1).  Four more keys let a provider say how an update is APPLIED, and the
+hub's own runner (hub/updates.py `ApplyRunner`) calls it; the hub itself never builds an install command, a shell string or a
+package-manager call: only the provider's own apply tool changes the machine.
+
+  update_group      which group the panel puts the provider's findings in and toggles them by: mods, games, packages,
+                    apps or other (default other).  Valid only with an `update_tool`.
+  update_args       an object (at most 512 bytes of JSON) passed as the arguments of EVERY call to `update_tool`, so
+                    several providers can share one tool ({"manager": "winget"}).  Valid only with an `update_tool`.
+  apply_tool        a tool of THIS file that applies ONE finding.  Load rules: it is a tool of this file; it is listed in
+                    the file's TOOL_CONFIRM_REQUIRED (the model and chat still have to ask first; the owner's click or the
+                    owner's standing auto-update tick is the consent for the hub's own call); it is not the poll, the
+                    update or a control tool; and, when the loader hands over the schemas, its schema accepts `id`
+                    (string) and `dry_run` (boolean).  Valid only with an `update_tool`.
+  apply_args        an object (at most 512 bytes) merged into every apply call.  It may not name `id` or `dry_run`: those
+                    two are always the hub's (a finding's id exactly as the source gave it, and whether it is a trial run).
+  apply_timeout_s   seconds the hub waits for ONE apply call (30 to 3600, default 600).  Valid only with an `apply_tool`.
+  updates_only      True = a provider that only reports and applies updates and supplies no downloads.  It must be
+                    `"mode": "push"` with an `update_tool`; the panels do not list it as a download source.
+
+An apply tool answers {"ok": bool, "state": "done" | "started" | "unchanged" | "failed", "message": "<one sentence>",
+"plan": "<dry_run only>", "installed": "<optional>", "needs_restart": <optional bool>, "error": "<optional>"}.  With
+`dry_run: true` it changes NOTHING and fills `plan`.  The same bad-entry rule applies: a bad entry is logged and dropped,
+the file's tools still load.  The same goes for a tool the owner made in ~/.jarvis/tools/ (same loader, same validator).
+
 Trust: declaring a provider is the owner's code on the owner's machine, the same trust as
 TOOL_UI and DAEMONS.  There is no model-facing way to create one.  A `poll_tool` must be
 read-only: it is rejected when it is listed in TOOL_CONFIRM_REQUIRED or when the risk policy
@@ -48,7 +78,20 @@ from pathlib import Path
 MAX_PER_FILE = 8
 MAX_SETTINGS_BYTES = 4096
 ALLOWED_KEYS = frozenset(("id", "label", "mode", "kind", "icon", "poll_tool", "interval_s", "capabilities",
-                          "controls", "open_roots", "settings", "update_tool", "update_interval_h"))
+                          "controls", "open_roots", "settings", "update_tool", "update_interval_h",
+                          "update_group", "update_args", "apply_tool", "apply_args", "apply_timeout_s",
+                          "updates_only"))
+# The groups the Updates panel sorts findings into (contract item 1).  hub/settings.py repeats them for the
+# `updates.include_groups` setting; tests/test_hub_updates_validate.py checks the two lists agree.
+UPDATE_GROUPS = ("mods", "games", "packages", "apps", "other")
+DEFAULT_UPDATE_GROUP = "other"
+MAX_ARGS_BYTES = 512
+APPLY_TIMEOUT_MIN_S = 30
+APPLY_TIMEOUT_MAX_S = 3600
+APPLY_TIMEOUT_DEFAULT_S = 600
+# What an apply tool's schema must accept (checked when the loader hands the schemas over; hub/updates.py checks
+# it again on the runner's side, so a tool file that changes later is never trusted blindly).
+APPLY_REQUIRED_PARAMS = {"id": "string", "dry_run": "boolean"}
 MAX_READ_RISK = 10          # policy._base_risk of a get_/list_/search_/read_/check_ name is 5
 
 
@@ -70,8 +113,50 @@ def _read_risk(name):
         return 10 ** 6
 
 
-def validate_downloads(raw, filename, tool_names, confirm_required=()):
-    """Validate a file's TOOL_DOWNLOADS.  Returns (entries, errors); a bad entry is dropped."""
+def _args_problem(value, label):
+    """None when `value` is an object of at most MAX_ARGS_BYTES of plain JSON, else a sentence."""
+    if not isinstance(value, dict):
+        return "'%s' must be an object" % label
+    try:
+        import json
+        if len(json.dumps(value)) > MAX_ARGS_BYTES:
+            return "'%s' must be at most %d bytes of JSON" % (label, MAX_ARGS_BYTES)
+    except (TypeError, ValueError):
+        return "'%s' must be plain JSON values" % label
+    return None
+
+
+def apply_schema_problem(tool_name, schemas):
+    """None when the schema of `tool_name` accepts `id` (string) and `dry_run` (boolean), else one sentence.
+
+    `schemas` is a list of tool schema dicts ({"name", "parameters": {"properties": {...}}}) or a dict name -> schema.
+    A tool with no schema in the list is a problem (the contract needs both parameters declared); the caller decides
+    whether it has the list at all (validate_downloads skips this check when `schemas` is None)."""
+    found = None
+    items = schemas.values() if isinstance(schemas, dict) else (schemas or ())
+    for schema in items:
+        if isinstance(schema, dict) and schema.get("name") == tool_name:
+            found = schema
+            break
+    if found is None:
+        return "its schema was not found"
+    params = found.get("parameters")
+    props = params.get("properties") if isinstance(params, dict) else None
+    if not isinstance(props, dict):
+        return "its schema declares no parameters"
+    for name, kind in APPLY_REQUIRED_PARAMS.items():
+        spec = props.get(name)
+        if not isinstance(spec, dict) or spec.get("type") != kind:
+            return "its schema must accept '%s' (%s)" % (name, kind)
+    return None
+
+
+def validate_downloads(raw, filename, tool_names, confirm_required=(), schemas=None):
+    """Validate a file's TOOL_DOWNLOADS.  Returns (entries, errors); a bad entry is dropped.
+
+    `schemas` (optional) is the file's TOOL_SCHEMAS; when given, an `apply_tool`'s schema is checked for `id` and
+    `dry_run` right here.  tool_loader.py does not pass it yet (see the Updates core report, "For the merge"), so the
+    same check also runs in hub/updates.py before a provider is allowed to apply anything."""
     st = _states()
     errors, entries = [], []
     if not isinstance(raw, (list, tuple)):
@@ -185,6 +270,53 @@ def validate_downloads(raw, filename, tool_names, confirm_required=()):
             errors.append("%s: 'update_interval_h' is only used with an 'update_tool' - dropped" % where)
             continue
 
+        group = item.get("update_group", DEFAULT_UPDATE_GROUP)
+        update_args = item.get("update_args")
+        apply_tool = item.get("apply_tool")
+        apply_args = item.get("apply_args")
+        apply_timeout = item.get("apply_timeout_s")
+        updates_only = item.get("updates_only", False)
+        problem = None
+        if group not in UPDATE_GROUPS:
+            problem = "'update_group' must be one of %s" % ", ".join(UPDATE_GROUPS)
+        elif "update_group" in item and update_tool is None:
+            problem = "'update_group' is only used with an 'update_tool'"
+        elif update_args is not None and update_tool is None:
+            problem = "'update_args' is only used with an 'update_tool'"
+        elif update_args is not None and _args_problem(update_args, "update_args"):
+            problem = _args_problem(update_args, "update_args")
+        elif apply_tool is not None and update_tool is None:
+            problem = "'apply_tool' is only used with an 'update_tool'"
+        elif apply_tool is None and (apply_args is not None or apply_timeout is not None):
+            problem = "'apply_args' and 'apply_timeout_s' are only used with an 'apply_tool'"
+        elif not isinstance(updates_only, bool):
+            problem = "'updates_only' must be true or false"
+        elif updates_only and (update_tool is None or mode != "push"):
+            problem = "'updates_only' needs mode 'push' and an 'update_tool'"
+        elif apply_tool is not None:
+            if not isinstance(apply_tool, str) or apply_tool not in names:
+                problem = "'apply_tool' %r must be a tool of this file" % (apply_tool,)
+            elif apply_tool not in confirm:
+                problem = ("apply_tool %r must be listed in this file's TOOL_CONFIRM_REQUIRED (an apply changes the "
+                           "machine, so the model and chat must ask first)" % apply_tool)
+            elif apply_tool in (controls_raw or {}).values():
+                problem = "apply_tool %r is also a control tool" % apply_tool
+            elif apply_tool in (poll_tool, update_tool):
+                problem = "apply_tool %r is also the poll_tool or the update_tool" % apply_tool
+            elif apply_args is not None and _args_problem(apply_args, "apply_args"):
+                problem = _args_problem(apply_args, "apply_args")
+            elif isinstance(apply_args, dict) and set(apply_args) & {"id", "dry_run"}:
+                problem = "'apply_args' may not name 'id' or 'dry_run' (the hub sets those two)"
+            elif apply_timeout is not None and (
+                    isinstance(apply_timeout, bool) or not isinstance(apply_timeout, (int, float))
+                    or not APPLY_TIMEOUT_MIN_S <= float(apply_timeout) <= APPLY_TIMEOUT_MAX_S):
+                problem = "'apply_timeout_s' must be a number from %d to %d" % (APPLY_TIMEOUT_MIN_S, APPLY_TIMEOUT_MAX_S)
+            elif schemas is not None and apply_schema_problem(apply_tool, schemas):
+                problem = "apply_tool %r: %s" % (apply_tool, apply_schema_problem(apply_tool, schemas))
+        if problem:
+            errors.append("%s: %s - dropped" % (where, problem))
+            continue
+
         interval = item.get("interval_s", 3)
         if isinstance(interval, bool) or not isinstance(interval, (int, float)) or not 0.5 <= float(interval) <= 3600:
             errors.append("%s: 'interval_s' must be a number from 0.5 to 3600 - dropped" % where)
@@ -226,5 +358,12 @@ def validate_downloads(raw, filename, tool_names, confirm_required=()):
             "capabilities": caps, "controls": {c: t for c, t in (controls_raw or {}).items()},
             "open_roots": roots, "settings": dict(settings), "source_file": filename,
             "update_tool": update_tool, "update_interval_h": update_hours if update_tool else None,
+            "update_group": group if update_tool else DEFAULT_UPDATE_GROUP,
+            "update_args": dict(update_args) if update_tool and isinstance(update_args, dict) else {},
+            "apply_tool": apply_tool,
+            "apply_args": dict(apply_args) if apply_tool and isinstance(apply_args, dict) else {},
+            "apply_timeout_s": (float(apply_timeout) if apply_timeout is not None else float(APPLY_TIMEOUT_DEFAULT_S))
+            if apply_tool else None,
+            "updates_only": bool(updates_only),
         })
     return entries, errors

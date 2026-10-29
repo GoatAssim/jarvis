@@ -64,6 +64,70 @@ _SHOW_TITLES = 3
 _GAME_ACTIONS = {"install": "installing", "update": "updating"}
 
 
+# The Updates rework: what an applied update says.  Not one of the download events above (no per-event switch, no
+# coalescing, no `notices` row): a finished apply batch is announced once, by hub/updates.py's ApplyRunner, as one message.
+# An all-good batch is the quiet one-line toast (the same look and tone as `queue_empty`, read from EVENT_LOOKS so the ids
+# stay the notify_registry's); anything that failed is left to the notifier, which draws a failure as a full card.
+UPDATES_EVENT = "updates_applied"
+EVENT_LOOKS[UPDATES_EVENT] = ("compact", "success")
+_SHOW_UPDATE_TITLES = 3
+
+
+def compose_updates(summary):
+    """(title, message, failed) for one finished apply batch.  `summary` is {"origin": "auto" | "manual", "done": [..],
+    "started": [..], "unchanged": [..], "failed": [..]}, each entry {"title", "message"}.  Provider text in the entries
+    is already capped; it is only ever shown, never interpreted."""
+    lists = {k: list((summary or {}).get(k) or []) for k in ("done", "started", "unchanged", "failed")}
+    n_ok = len(lists["done"]) + len(lists["started"]) + len(lists["unchanged"])
+    n_bad = len(lists["failed"])
+    auto = (summary or {}).get("origin") == "auto"
+    total = n_ok + n_bad
+
+    def names(entries):
+        shown = [e.get("title") or "an update" for e in entries[:_SHOW_UPDATE_TITLES]]
+        more = len(entries) - len(shown)
+        return ", ".join(shown) + (" and %d more" % more if more > 0 else "")
+
+    if total == 1:
+        entry = (lists["failed"] or lists["done"] or lists["started"] or lists["unchanged"])[0]
+        name = entry.get("title") or "an update"
+        note = (entry.get("message") or "").strip()
+        if n_bad:
+            return "Update failed", "%s: %s" % (name, note or "it failed"), True
+        if lists["started"]:
+            return "Update started", "%s: %s" % (name, note or "finish it in the program"), False
+        if lists["unchanged"]:
+            return "Nothing to update", "%s: %s" % (name, note or "nothing needed doing"), False
+        return "Update applied", "%s%s" % (name, (": " + note) if note and note != "applied" else ""), False
+    parts = []
+    if lists["done"]:
+        parts.append("%d applied" % len(lists["done"]))
+    if lists["started"]:
+        parts.append("%d started" % len(lists["started"]))
+    if lists["unchanged"]:
+        parts.append("%d needed nothing" % len(lists["unchanged"]))
+    if n_bad:
+        parts.append("%d failed" % n_bad)
+    title = "%d update%s %s" % (total, "" if total == 1 else "s", "applied automatically" if auto and not n_bad else "processed")
+    body = "%s." % ", ".join(parts)
+    if n_bad:
+        body += " Failed: %s." % names(lists["failed"])
+    elif lists["done"] or lists["started"]:
+        body += " %s." % names(lists["done"] + lists["started"])
+    return title, body, bool(n_bad)
+
+
+def announce_updates(summary, deliver=None):
+    """Send ONE notification for a finished apply batch through the notifier (`deliver` = default_deliver when None).
+    Returns the notifier's record, or None when there was nothing to say."""
+    if not summary or not any((summary.get(k) or []) for k in ("done", "started", "unchanged", "failed")):
+        return None
+    title, message, failed = compose_updates(summary)
+    send = deliver or default_deliver
+    kwargs = {} if failed else _look_kwargs(UPDATES_EVENT)
+    return send(title, message, failed=failed, **kwargs)
+
+
 def game_action(item):
     """'install' / 'update' for a game row a provider reports (Steam says which in `subtitle`),
     else ''.  Only provider-owned game rows: a hub download is never called an install."""

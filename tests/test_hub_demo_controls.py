@@ -92,8 +92,11 @@ def test_declared():
     check("the demo declares pause, resume and cancel", provider["capabilities"] == ["pause", "resume", "cancel"])
     check("each verb has a control tool", provider["controls"] == {"pause": "hub_demo_pause", "resume": "hub_demo_resume", "cancel": "hub_demo_cancel"})
     check("the control tools are the ones in demo.CONTROLS", provider["controls"] == demo.CONTROLS)
-    check("those tools exist in the tool file", set(hub_demo_controls.TOOLS) == set(demo.CONTROLS.values())
-          and {s["name"] for s in hub_demo_controls.TOOL_SCHEMAS} == set(demo.CONTROLS.values()))
+    # the file also holds the fake update source's two tools (the Updates rework; tests/test_hub_updates_apply.py covers them)
+    update_tools = {"check_demo_updates", "apply_demo_update"}
+    check("those tools exist in the tool file", set(hub_demo_controls.TOOLS) - update_tools == set(demo.CONTROLS.values())
+          and {s["name"] for s in hub_demo_controls.TOOL_SCHEMAS} - update_tools == set(demo.CONTROLS.values())
+          and update_tools <= set(hub_demo_controls.TOOLS))
     check("and the loader really registered them (not 'unknown tool')",
           all("unknown" not in str(tools.execute_tool(name, {"id": "x"}).get("error", "")).lower() for name in demo.CONTROLS.values()))
     check("none of them asks for confirmation (a demo row has nothing real to lose)",

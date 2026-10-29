@@ -619,6 +619,21 @@ window.JARVIS_SLASH_COMMANDS = /*JSON-BEGIN*/
       "preview": "Open the Minecraft panel."
     },
     {
+      "verb": "updates",
+      "aliases": [],
+      "group": "panels",
+      "menu": "menu-item-updates",
+      "summary": "Open the Updates panel: see what is out of date, update it, switch automatic updates on or off",
+      "riskTier": "safe",
+      "instant": true,
+      "whileReplying": true,
+      "confirm": false,
+      "args": [],
+      "covers": [],
+      "example": "/updates",
+      "preview": "Open the Updates panel."
+    },
+    {
       "verb": "debug",
       "aliases": [
         "tools"

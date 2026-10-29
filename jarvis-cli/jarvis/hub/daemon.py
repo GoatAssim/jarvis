@@ -27,7 +27,9 @@ their answers; the declared providers are (re)registered at start and every minu
 
 Update checks (N23): `updates.UpdateRunner` runs on a thread of its own, started in `start_up` and stopped in
 `stop` (set JARVIS_HUB_NO_UPDATES=1 to not start it).  It never runs in the tick, so a one-minute check can't
-delay a poll or a download.
+delay a poll or a download.  Applying updates (the Updates rework): `updates.ApplyRunner` is a second thread, started
+and stopped with it (the same switch), that applies the findings the owner (or the owner's auto-update ticks) queued,
+one at a time.
 
 Run as `python <tool dir>/_hub_daemon.py` (what DAEMONS declares) or `python -m jarvis.hub.daemon`.
 """
@@ -127,6 +129,7 @@ class HubDaemon:
         self._provider_sync_running = False
         self.declared_providers = None       # tests: a list instead of reading the tool files
         self._updates = updates.UpdateRunner(self.store, clock=clock, declared=self._declared_for_updates)
+        self._applying = updates.ApplyRunner(self.store, clock=clock, deliver=deliver)
 
     # ------------------------------------------------------------------ settings
 
@@ -224,6 +227,10 @@ class HubDaemon:
             self._updates.start()
         except Exception:  # noqa: BLE001 - update checks are never allowed to stop the downloads
             log.exception("starting the update runner failed")
+        try:
+            self._applying.start()
+        except Exception:  # noqa: BLE001 - nor is applying an update
+            log.exception("starting the apply runner failed")
 
     def tick(self):
         self._reap()
@@ -267,6 +274,10 @@ class HubDaemon:
             self._updates.stop()
         except Exception:  # noqa: BLE001
             log.exception("stopping the update runner failed")
+        try:
+            self._applying.stop()
+        except Exception:  # noqa: BLE001
+            log.exception("stopping the apply runner failed")
         try:
             self._finish_pass()                              # whatever finished while stopping
             self._notifier.flush_now(self.settings())        # and anything still being held back

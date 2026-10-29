@@ -168,17 +168,48 @@ _LATE_TABLES = (
         running_since REAL, requested_at REAL, manual_at REAL, started_at REAL,
         checked_at REAL, ok_at REAL, error TEXT, problems_json TEXT
     )""",
+    # The Updates rework: one row per finding the owner (or the auto-update step) asked to APPLY.  It is the apply
+    # queue (state 'queued', read by the daemon's ApplyRunner) and the memory of what happened (done / started /
+    # failed), kept after the finding itself is cleared, so "never retry the same failed `available` version" holds
+    # even when a check drops the finding and lists it again.  `available` is the finding's version text at the time.
+    """CREATE TABLE IF NOT EXISTS update_applies(
+        provider TEXT NOT NULL, local_id TEXT NOT NULL, available TEXT NOT NULL DEFAULT '',
+        state TEXT NOT NULL, message TEXT NOT NULL DEFAULT '', at REAL NOT NULL,
+        batch TEXT, origin TEXT NOT NULL DEFAULT 'manual', queued_at REAL,
+        PRIMARY KEY(provider, local_id)
+    )""",
+    "CREATE INDEX IF NOT EXISTS update_applies_state ON update_applies(state, queued_at)",
 )
 MAX_UPDATES_PER_PROVIDER = 500          # findings per provider (the same cap as polled rows)
+# Columns of `update_checks` added by the Updates rework (what a provider declared about applying updates, copied in
+# by the update runner's sync so the panel, the admin op and the chat tool never need the tool registry).  Added to a
+# database that already has the table with ALTER TABLE ... ADD COLUMN, once per process, the same way `_LATE_COLUMNS`
+# does for `items`; additive only, so no SCHEMA_VERSION bump and an older Jarvis never looks at them.
+#   update_group      mods | games | packages | apps | other
+#   update_args_json  the arguments of every update_tool call
+#   apply_tool        the confirm-gated tool that applies ONE finding (NULL = this provider cannot apply)
+#   apply_args_json   arguments merged into every apply call
+#   apply_timeout_s   seconds the ApplyRunner waits for one apply call
+#   updates_only      1 = the provider only reports / applies updates (no downloads)
+#   apply_problem     why an apply_tool that was declared is NOT usable (its schema lacks `id` / `dry_run`), or NULL
+_LATE_CHECK_COLUMNS = (("update_group", "TEXT"), ("update_args_json", "TEXT"), ("apply_tool", "TEXT"),
+                       ("apply_args_json", "TEXT"), ("apply_timeout_s", "REAL"), ("updates_only", "INTEGER"),
+                       ("apply_problem", "TEXT"))
+_CHECK_COLUMNS_CHECKED = set()
 _CHECK_FIELDS = frozenset((
     "update_tool", "start_interval_h", "running_since", "requested_at", "manual_at", "started_at",
-    "checked_at", "ok_at", "error", "problems_json"))
+    "checked_at", "ok_at", "error", "problems_json",
+    "update_group", "update_args_json", "apply_tool", "apply_args_json", "apply_timeout_s", "updates_only",
+    "apply_problem"))
+APPLY_STATES = ("queued", "running", "done", "started", "failed")
+APPLY_KEEP_S = 90 * 86400.0             # a finished apply's row is forgotten after this long
 
 
 def _ensure_tables(conn):
     have = {r[0] for r in conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('updates','update_checks')").fetchall()}
-    if len(have) == 2:
+        "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('updates','update_checks','update_applies')"
+    ).fetchall()}
+    if len(have) == 3:
         return
     for statement in _LATE_TABLES:
         try:
@@ -186,6 +217,24 @@ def _ensure_tables(conn):
         except sqlite3.OperationalError as exc:         # another process created it a moment ago
             if "already exists" not in str(exc).lower():
                 raise
+
+
+def _ensure_check_columns(conn, db_path):
+    """Add the Updates rework's columns to `update_checks` when this database predates them (see
+    _LATE_CHECK_COLUMNS).  One cheap PRAGMA per process and database, then nothing."""
+    key = str(db_path)
+    if key in _CHECK_COLUMNS_CHECKED:
+        return
+    names = {r[1] for r in conn.execute("PRAGMA table_info(update_checks)").fetchall()}
+    for column, kind in _LATE_CHECK_COLUMNS:
+        if names and column not in names:
+            try:
+                conn.execute("ALTER TABLE update_checks ADD COLUMN %s %s" % (column, kind))
+            except sqlite3.OperationalError as exc:     # the daemon or the web server got there first
+                if "duplicate column" not in str(exc).lower():
+                    raise
+    if names:
+        _CHECK_COLUMNS_CHECKED.add(key)
 
 
 def _dest_kind(dest):
@@ -284,6 +333,7 @@ class Store:
                 raise
         _ensure_columns(conn, self.path)
         _ensure_tables(conn)
+        _ensure_check_columns(conn, self.path)
         return conn
 
     @contextlib.contextmanager
@@ -1149,6 +1199,10 @@ class Store:
         for row in rows:
             st = dict(row)
             st["problems"] = _loads(st.pop("problems_json", None), [])
+            # The Updates rework's columns, decoded (a database row made before them reads as "no apply tool")
+            st["update_args"] = _loads(st.pop("update_args_json", None), {}) or {}
+            st["apply_args"] = _loads(st.pop("apply_args_json", None), {}) or {}
+            st["updates_only"] = bool(st.get("updates_only"))
             out[st["provider"]] = st
         return out
 
@@ -1186,6 +1240,106 @@ class Store:
                 return "limited", limit_s - (now - float(row["manual_at"]))
             conn.execute("UPDATE update_checks SET requested_at=?, manual_at=? WHERE provider=?", (now, now, pid))
             return "requested", 0.0
+
+    # ------------------------------------------------------------------ applying updates (the Updates rework)
+
+    def applying_info(self, provider=None):
+        """{(provider, local_id): row} of every finding that was ever asked to apply (state, message, time, the
+        `available` text it was for, batch, origin).  Rows outlive the finding (see _LATE_TABLES)."""
+        sql, args = "SELECT * FROM update_applies", []
+        if provider:
+            sql += " WHERE provider=?"
+            args.append(str(provider))
+        with self._read() as conn:
+            rows = conn.execute(sql, args).fetchall()
+        return {(r["provider"], r["local_id"]): dict(r) for r in rows}
+
+    def applying_queue(self, provider_id, local_id, *, batch, origin, now=None):
+        """Ask for ONE finding to be applied: one transaction, so two asks (the panel and an auto-update step, say)
+        can't both queue it.  Returns (status, row): 'queued', 'already_running' (it is queued or running now),
+        'missing' (no such finding) or 'hidden' (the owner ignored this version: it is never applied)."""
+        pid = str(provider_id or "")
+        local = states.clean_text(local_id, 120)
+        now = self.now() if now is None else now
+        with self._write() as conn:
+            found = conn.execute("SELECT available, dismissed_at, dismissed_version FROM updates "
+                                 "WHERE provider=? AND local_id=?", (pid, local or "")).fetchone()
+            if found is None:
+                return "missing", None
+            available = found["available"] or ""
+            if found["dismissed_at"] is not None and (found["dismissed_version"] or "") == available:
+                return "hidden", None
+            row = conn.execute("SELECT state FROM update_applies WHERE provider=? AND local_id=?", (pid, local)).fetchone()
+            if row is not None and row["state"] in ("queued", "running"):
+                return "already_running", dict(row)
+            conn.execute(
+                "INSERT INTO update_applies(provider, local_id, available, state, message, at, batch, origin, queued_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(provider, local_id) DO UPDATE SET available=excluded.available, "
+                "state=excluded.state, message=excluded.message, at=excluded.at, batch=excluded.batch, "
+                "origin=excluded.origin, queued_at=excluded.queued_at",
+                (pid, local, available, "queued", "", now, str(batch or ""), "auto" if origin == "auto" else "manual", now))
+            return "queued", {"provider": pid, "local_id": local, "available": available, "state": "queued"}
+
+    def applying_claim(self, now=None):
+        """The daemon's ApplyRunner takes the OLDEST queued apply and marks it running (one transaction).  Returns
+        {provider, local_id, available, batch, origin, title} or None.  A queued apply whose finding has gone (a check
+        cleared it meanwhile) is dropped without being run."""
+        now = self.now() if now is None else now
+        with self._write() as conn:
+            while True:
+                row = conn.execute("SELECT * FROM update_applies WHERE state='queued' ORDER BY queued_at, rowid LIMIT 1").fetchone()
+                if row is None:
+                    return None
+                found = conn.execute("SELECT title, available FROM updates WHERE provider=? AND local_id=?",
+                                     (row["provider"], row["local_id"])).fetchone()
+                if found is None:
+                    conn.execute("DELETE FROM update_applies WHERE provider=? AND local_id=?", (row["provider"], row["local_id"]))
+                    continue
+                available = found["available"] or ""
+                conn.execute("UPDATE update_applies SET state='running', at=?, message='', available=? "
+                             "WHERE provider=? AND local_id=?", (now, available, row["provider"], row["local_id"]))
+                out = dict(row)
+                out["title"] = found["title"]
+                out["available"] = available
+                return out
+
+    def applying_finish(self, provider_id, local_id, state, message, *, now=None):
+        """Record how an apply ended (done / started / failed).  True when the row was there."""
+        if state not in APPLY_STATES or state in ("queued", "running"):
+            raise ValueError("an apply ends in done, started or failed")
+        now = self.now() if now is None else now
+        with self._write() as conn:
+            return conn.execute("UPDATE update_applies SET state=?, message=?, at=? WHERE provider=? AND local_id=?",
+                                (state, states.clean_text(message, 200) or "", now, str(provider_id or ""),
+                                 str(local_id or ""))).rowcount > 0
+
+    def applying_pending(self, batch):
+        """How many applies of this batch are still queued or running."""
+        with self._read() as conn:
+            return conn.execute("SELECT COUNT(*) FROM update_applies WHERE batch=? AND state IN ('queued','running')",
+                                (str(batch or ""),)).fetchone()[0]
+
+    def applying_counts(self):
+        """(queued, running) over every provider."""
+        with self._read() as conn:
+            rows = conn.execute("SELECT state, COUNT(*) AS n FROM update_applies WHERE state IN ('queued','running') "
+                                "GROUP BY state").fetchall()
+        got = {r["state"]: r["n"] for r in rows}
+        return got.get("queued", 0), got.get("running", 0)
+
+    def applying_recover(self, now=None):
+        """The daemon has just started: nothing of an earlier run is still going.  A queued apply is forgotten (it never
+        ran, so the finding can be asked again); one that was RUNNING is marked failed with a plain sentence, because
+        nobody knows whether it finished (and it then is not retried by itself).  Returns (dropped, interrupted)."""
+        now = self.now() if now is None else now
+        with self._write() as conn:
+            dropped = conn.execute("DELETE FROM update_applies WHERE state='queued'").rowcount
+            interrupted = conn.execute(
+                "UPDATE update_applies SET state='failed', at=?, message=? WHERE state='running'",
+                (now, "the hub stopped while this was running; check whether it finished")).rowcount
+            conn.execute("DELETE FROM update_applies WHERE state IN ('done','started','failed') AND at < ?",
+                         (now - APPLY_KEEP_S,))
+        return dropped, interrupted
 
     # ------------------------------------------------------------------ notices (notify.py)
 

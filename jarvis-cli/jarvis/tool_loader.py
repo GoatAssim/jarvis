@@ -84,6 +84,10 @@ A file can also declare downloads of its own for Menu > Downloads:
 ...see tool_downloads.py for the fields. Registered by the hub daemon; a bad entry is dropped.
     An entry may also carry `update_tool` (a read-only tool of the same file that lists available updates)
     and `update_interval_h`; the loader passes both through as validated (N23, hub/updates.py runs them).
+    The Updates rework adds `update_group`, `update_args`, `apply_tool` (a confirm-gated tool of the same
+    file that applies ONE finding), `apply_args`, `apply_timeout_s` and `updates_only`; the loader passes
+    them through as validated too (see tool_downloads.py for the rules; the same goes for a file in
+    ~/.jarvis/tools/).
     An entry may carry an `add` block; the loader then GENERATES a `dl_add_<id>` tool from it
     (tool_download_add.py), which exists exactly as long as the file does.
 

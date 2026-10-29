@@ -26,7 +26,14 @@ Covers (static and declarative: nothing here opens a browser or the network):
      narrow-width, focus and reduced-motion rules, and its own hand_m5_* fixtures parse and hold no key-like text.
      The baseline zip carries no hand_s3_* / hand_m2_* fixtures, so those are only checked when present.
 
-Run: python3 tests/test_minecraft_panel.py        (written by the S3, M2 and M5 agents; not run by them)
+  11. M3: the reworked Updates tab (watched folders, check and update, undo). The panel now names ELEVEN tools: the six it
+     already used plus check_mc_watched, apply_mc_update, mc_watch, list_mc_replaced and undo_mc_update (the one-off
+     check_mc_updates run is gone from the tab; the tool itself is untouched). The tool-list checks compare only with the
+     action files that exist in the tree: minecraft_update_source.py (patch M1) and minecraft_undo.py (patch M2) are
+     imported when they are there. What can only hold once those two patches are applied is in test_needs_m1_* and
+     test_needs_m2_* below; everything else passes with only the M3 patch applied.
+
+Run: python3 tests/test_minecraft_panel.py        (written by the S3, M2, M5 and M3 agents; not run by them)
 """
 import json
 import os
@@ -56,6 +63,12 @@ JS = PUBLIC / "minecraft-panel.js"
 CSS = PUBLIC / "minecraft-panel.css"
 SIX = {"search_mc_mods", "get_mc_project", "list_optifine_versions", "download_mc_file", "download_optifine",
        "make_modpack_file"}
+# M3: the five tools of the Updates tab. M1 declares the first three (actions/minecraft_update_source.py), M2 the last two
+# (actions/minecraft_undo.py); both files come from other patches, so nothing below needs them to exist except test_needs_*.
+M1_TOOLS = {"check_mc_watched", "apply_mc_update", "mc_watch"}
+M2_TOOLS = {"list_mc_replaced", "undo_mc_update"}
+NEW_FIVE = M1_TOOLS | M2_TOOLS
+ELEVEN = SIX | NEW_FIVE
 
 
 def read(path):
@@ -123,21 +136,81 @@ check("only the lookup file names TOOL_COMMANDS (downloads and packs are never t
       all("TOOL_COMMANDS" not in read(ROOT / "jarvis-cli" / "jarvis" / "actions" / f)
           for f in ("minecraft_download.py", "minecraft_optifine.py", "minecraft_packs.py")))
 
-# --- 4. the six tools ------------------------------------------------------------------------
+# --- 4. the tools the panel names -------------------------------------------------------------
 from jarvis.actions import minecraft_download, minecraft_optifine, minecraft_packs, minecraft_updates  # noqa: E402
 
 declared = set()
 for mod in (lookup, minecraft_download, minecraft_optifine, minecraft_packs, minecraft_updates):
     declared |= {s_["name"] for s_ in mod.TOOL_SCHEMAS}
 check("the five action files declare exactly the seven tools", declared == SEVEN, declared)
+
+# M3: the two action files of the Updates tab come from the M1 and M2 patches. Import them when they are there; compare
+# only with what imports (a missing file is not a failure of THIS patch: test_needs_m1_* / test_needs_m2_* say so).
+import importlib  # noqa: E402
+
+
+def optional_module(name):
+    try:
+        return importlib.import_module("jarvis.actions." + name)
+    except ImportError:
+        return None
+
+
+update_source = optional_module("minecraft_update_source")
+undo_mod = optional_module("minecraft_undo")
+declared_all = set(declared)
+absent = set()
+for mod_, tools_ in ((update_source, M1_TOOLS), (undo_mod, M2_TOOLS)):
+    if mod_ is None:
+        absent |= tools_
+    else:
+        declared_all |= {s_["name"] for s_ in mod_.TOOL_SCHEMAS}
 js = read(JS)
 m = re.search(r"const TOOLS = \[([^\]]*)\]", js)
 panel_tools = set(re.findall(r'"([a-z_]+)"', m.group(1))) if m else set()
-check("the panel's own list matches them", panel_tools == SEVEN, panel_tools)
+check("the panel's own list is the six tools it always had plus the five of the Updates tab", panel_tools == ELEVEN, panel_tools)
+check("every tool the action files declare is in the panel's list, except the one-off check_mc_updates the tab no longer runs",
+      (declared_all - {"check_mc_updates"}) <= panel_tools, sorted((declared_all - {"check_mc_updates"}) - panel_tools))
+check("every tool in the panel's list is declared by an action file that exists (or belongs to a patch that is not applied yet)",
+      panel_tools <= (declared_all | absent), sorted(panel_tools - (declared_all | absent)))
 used = set(re.findall(r'runTool\("([a-z_]+)"', js)) | set(re.findall(r'call\("([a-z_]+)"', js))
-check("every tool the panel runs is one of the seven", used and used <= SEVEN, used)
-check("the panel has an Updates tab that runs check_mc_updates", '["updates", "Updates"]' in js and 'runTool("check_mc_updates"' in js)
-check("check_mc_updates is a read: it asks for no confirmation of its own", "check_mc_updates" not in minecraft_updates.TOOL_CONFIRM_REQUIRED)
+check("every tool the panel runs is one of the eleven", used and used <= ELEVEN, used)
+check("the Updates tab runs check_mc_watched, mc_watch (list), list_mc_replaced and, through its flows, apply_mc_update, mc_watch and undo_mc_update",
+      '[["find", "Find"], ["updates", "Updates"]' in js.replace("\n", "") and 'runTool("check_mc_watched"' in js and 'runTool("mc_watch"' in js
+      and 'runTool("list_mc_replaced"' in js and 'call("apply_mc_update"' in js and 'call("undo_mc_update"' in js and 'call("mc_watch"' in js)
+check("the one-off check_mc_updates is not run by the panel any more, and it stays a read in its own file",
+      'runTool("check_mc_updates"' not in js and "check_mc_updates" not in minecraft_updates.TOOL_CONFIRM_REQUIRED)
+
+# What needs the M1 and M2 patches (they come before this one in the owner's order, so these hold once all are applied).
+def test_needs_m1_update_source_tools():
+    check("M1 (needs patch M1): actions/minecraft_update_source.py imports and declares exactly check_mc_watched, apply_mc_update and mc_watch",
+          update_source is not None and {s_["name"] for s_ in update_source.TOOL_SCHEMAS} == M1_TOOLS,
+          None if update_source is None else {s_["name"] for s_ in update_source.TOOL_SCHEMAS})
+    if update_source is None:
+        return
+    confirm = set(getattr(update_source, "TOOL_CONFIRM_REQUIRED", ()))
+    check("M1 (needs patch M1): apply_mc_update is confirm-gated by name and check_mc_watched is a read", "apply_mc_update" in confirm and "check_mc_watched" not in confirm, confirm)
+    props = {s_["name"]: s_["parameters"]["properties"] for s_ in update_source.TOOL_SCHEMAS}
+    check("M1 (needs patch M1): check_mc_watched takes no arguments the panel would have to send", not props.get("check_mc_watched"), props.get("check_mc_watched"))
+    check("M1 (needs patch M1): apply_mc_update takes id and dry_run", {"id", "dry_run"} <= set(props.get("apply_mc_update", {})), props.get("apply_mc_update"))
+    check("M1 (needs patch M1): mc_watch takes every argument the panel sends",
+          {"action", "folder", "label", "mc_version", "loader", "channel", "auto", "dry_run"} <= set(props.get("mc_watch", {})), props.get("mc_watch"))
+    actions = props.get("mc_watch", {}).get("action", {}).get("enum")
+    check("M1 (needs patch M1): mc_watch's action accepts list, add, remove and set (the four the panel sends)", not actions or {"list", "add", "remove", "set"} <= set(actions), actions)
+
+
+def test_needs_m2_undo_tools():
+    check("M2 (needs patch M2): actions/minecraft_undo.py imports and declares exactly list_mc_replaced and undo_mc_update",
+          undo_mod is not None and {s_["name"] for s_ in undo_mod.TOOL_SCHEMAS} == M2_TOOLS,
+          None if undo_mod is None else {s_["name"] for s_ in undo_mod.TOOL_SCHEMAS})
+    if undo_mod is None:
+        return
+    confirm = set(getattr(undo_mod, "TOOL_CONFIRM_REQUIRED", ()))
+    check("M2 (needs patch M2): undo_mc_update is confirm-gated by name and list_mc_replaced is a read", "undo_mc_update" in confirm and "list_mc_replaced" not in confirm, confirm)
+    props = {s_["name"]: s_["parameters"]["properties"] for s_ in undo_mod.TOOL_SCHEMAS}
+    check("M2 (needs patch M2): undo_mc_update takes id and dry_run", {"id", "dry_run"} <= set(props.get("undo_mc_update", {})), props.get("undo_mc_update"))
+    check("M2 (needs patch M2): list_mc_replaced takes nothing the panel would have to send", not props.get("list_mc_replaced"), props.get("list_mc_replaced"))
+
 
 # --- 5. panel rules --------------------------------------------------------------------------
 code = strip_js_comments(js)
@@ -149,7 +222,7 @@ check("the panel only calls the tool routes", set(re.findall(r'"(/api/[^"]*)"', 
 check("the panel makes no request to a vendor", re.search(r"fetch\(\s*[\"']https?:", code) is None)
 check("vendor links are made only through safeUrl", "target: \"_blank\"" in code and code.count("target:") == 1 and "safeUrl(url)" in code)
 check("the panel keeps the preview-then-run gate", code.index('"/api/tools/preview"') < code.index('"/api/tools/run"'))
-check("a real write is always confirmed (sure: true on queue, the tray's batch, OptiFine and pack: dry run + real pack = 2)", code.count("sure: true") == 5)
+check("a real write is always confirmed (sure: true on queue, the tray's batch, OptiFine, pack: dry run + real pack = 2, and M3's watched-folder change, update and undo = 3)", code.count("sure: true") == 8)
 check("no word 'install' in any text the panel shows, except as \"not installed\" (nothing is ever installed)",
       not [t for t in re.findall(r'"(?:[^"\\\n]|\\.)*"', code) if re.search(r"install", re.sub(r"not installed", "", t, flags=re.I), re.I)])
 css = read(CSS)
@@ -195,7 +268,8 @@ import shutil  # noqa: E402
 import subprocess  # noqa: E402
 
 SCHEMAS = {}
-for mod in (lookup, minecraft_download, minecraft_optifine, minecraft_packs, minecraft_updates):
+# M3: the M1 and M2 files count too when they are in the tree, so the panel's argument names are compared with their real schemas.
+for mod in [m_ for m_ in (lookup, minecraft_download, minecraft_optifine, minecraft_packs, minecraft_updates, update_source, undo_mod) if m_ is not None]:
     for sc in mod.TOOL_SCHEMAS:
         SCHEMAS[sc["name"]] = sc["parameters"]["properties"]
 node = shutil.which("node")
@@ -216,7 +290,12 @@ const out = {
   download_optifine: P.optifineArgs({ mc_version: '1.20.1', version: 'I6', preview: true, dest: 'D:/x', filename: 'o.jar' }, true),
   make_modpack_file: P.packArgs({ format: 'curseforge', entries_from: 'modrinth', download_to_match: true, name: 'n', version: '1', author: 'a', summary: 's', mc_version: '1.20.1',
     loader: 'fabric', loader_version: '0.15', entries: 'a | f | beta', channel: 'beta', src: 'D:/s', dest: 'D:/d', filename: 'f', include_dependencies: false, overwrite: true }, false),
-  check_mc_updates: P.updatesArgs({ folder: 'D:/m', mc_version: '1.20.1', loader: 'fabric', channel: 'beta' }),
+  mc_watch_list: P.watchArgs('list', {}, false),
+  mc_watch_add: P.watchArgs('add', { folder: 'D:/m', label: 'L', mc_version: '1.20.1', loader: 'fabric', channel: 'beta', auto: true }, true),
+  mc_watch_set: P.watchArgs('set', { folder: 'D:/m', label: 'L', mc_version: '1.20.1', loader: 'fabric', channel: 'beta', auto: false }, false),
+  mc_watch_remove: P.watchArgs('remove', { folder: 'D:/m' }, true),
+  apply_mc_update: P.applyArgs('mod-id-1', true),
+  undo_mc_update: P.applyArgs('rep-id-1', false),
 };
 process.stdout.write(JSON.stringify(out));
 """
@@ -228,16 +307,27 @@ process.stdout.write(JSON.stringify(out));
     check("the panel's argument builders ran under node", isinstance(built, dict), done.stderr[:300])
     if isinstance(built, dict):
         for tool, args in sorted(built.items()):
-            check("%s: every argument name the panel sends is in the tool's schema" % tool, set(args) <= set(SCHEMAS[tool]), sorted(set(args) - set(SCHEMAS[tool])))
+            real = "mc_watch" if tool.startswith("mc_watch") else tool
+            if real not in SCHEMAS:
+                continue                    # the M1 / M2 tools: compared in test_needs_m1_* / test_needs_m2_* once their files exist
+            check("%s: every argument name the panel sends is in the tool's schema" % tool, set(args) <= set(SCHEMAS[real]), sorted(set(args) - set(SCHEMAS[real])))
         entry_keys = set(SCHEMAS["make_modpack_file"]["entries"]["items"]["properties"])
         for e in built["make_modpack_file"]["entries"]:
             check("a pack entry only has keys the schema declares", set(e) <= entry_keys, sorted(set(e) - entry_keys))
-        enums = {"channel": ("make_modpack_file", "check_mc_updates", "download_mc_file"), "loader": ("check_mc_updates",)}
+        enums = {"channel": ("make_modpack_file", "download_mc_file"), "loader": ()}
         for key, tools_ in enums.items():
             for t in tools_:
                 allowed = SCHEMAS[t][key].get("enum")
                 if allowed and key in built[t]:
                     check("%s.%s: the value the panel sends is one the schema allows" % (t, key), built[t][key] in allowed, built[t][key])
+        # M3: what the watched-folder builder sends is only ever an argument name from the brief and the value sets the panel knows.
+        for name_, args_ in sorted(built.items()):
+            if name_.startswith("mc_watch"):
+                check("%s: only the argument names the M3 brief lists" % name_, set(args_) <= {"action", "folder", "label", "mc_version", "loader", "channel", "auto", "dry_run"}, sorted(args_))
+        check("apply_mc_update / undo_mc_update: only id and dry_run", set(built["apply_mc_update"]) <= {"id", "dry_run"} and set(built["undo_mc_update"]) <= {"id", "dry_run"})
+        check("a real call carries no dry_run, a dry run does, the read carries neither",
+              "dry_run" not in built["mc_watch_set"] and built["mc_watch_add"].get("dry_run") is True and built["apply_mc_update"].get("dry_run") is True
+              and "dry_run" not in built["undo_mc_update"] and set(built["mc_watch_list"]) == {"action"})
         check("make_modpack_file: entries_from and download_to_match are real arguments", {"entries_from", "download_to_match"} <= set(SCHEMAS["make_modpack_file"]))
 
 # --- 8. /api/tools/run: the one place confirm_ui means anything --------------------------------
@@ -249,7 +339,7 @@ check("confirm_ui appears only inside the /api/tools/run handler", server.count(
 check("it is read as a strict boolean", "req.body?.confirm_ui === true" in handler)
 tools_m = re.search(r"const MINECRAFT_TOOLS = \[([^\]]*)\]", handler)
 listed = set(re.findall(r'"([a-z_]+)"', tools_m.group(1))) if tools_m else set()
-check("only the Minecraft group's seven tools can use it", listed == SEVEN, listed)
+check("only the Minecraft group's tools can use it: the seven it had plus the five of the Updates tab", listed == SEVEN | NEW_FIVE, listed)
 check("the tool name is checked against that list", "MINECRAFT_TOOLS.includes(name)" in handler)
 check("the yes is fed on stdin as a fixed number of lines", '"y\\n".repeat(64)' in handler)
 check("a confirm_ui run is allowed 120000 ms", "120000" in handler)
@@ -315,6 +405,22 @@ dl_src = read(ROOT / "jarvis-cli" / "jarvis" / "actions" / "minecraft_download.p
 check("a download's dry run carries the message, the folder and the dependencies the dialog shows",
       all(w in dl_src for w in ('out["message"]', '"dest": landing', "dependencies_would_queue", "dry_run")))
 check("the dry-run message says nothing was downloaded or installed (the dialog adds 'downloaded, not installed')", "nothing was downloaded or installed" in dl_src)
+
+# --- 11. M3: the Updates tab ---------------------------------------------------------------------
+check("the Updates tab says plainly what it is: runs on this PC, old file in a backup folder, the CurseForge route unverified",
+      "Updates run on this PC; Jarvis keeps the old file in a backup folder; the CurseForge route is unverified." in js)
+check("the Updates tab says the folder's own tick is not enough: the hub's master switch in Menu > Updates has to be on too",
+      "Jarvis updates it by itself only when the master switch in Menu > Updates is also on" in js)
+check("the Updates tab has the three parts, in order: watched folders, check and update, undo",
+      0 < js.index('"Watched folders"') < js.index('"Check and update"') < js.index('"Undo"'))
+check("a folder is added with the path picker the other tabs use", "pickFolder(form, \"folder\")" in js and "global.JarvisPathPicker" in js)
+check("a watched-folder change, an update and an undo each make a dry run first and then ONE dialog (their flows are in the panel)",
+      all(("async function %s(" % f_) in js for f_ in ("watchSteps", "applySteps", "undoSteps")) and "WATCH_DIALOG" in js)
+check("the stylesheet has the Updates tab's classes", all(w in css for w in (".mc-section", ".mc-watchform", ".mc-lines", ".mc-results--tight")))
+
+# Run the checks that need another agent's patch last, so a missing patch is one clearly named group of failures.
+test_needs_m1_update_source_tools()
+test_needs_m2_undo_tools()
 
 print("\n%d passed, %d failed" % (len(PASS), len(FAIL)))
 sys.exit(1 if FAIL else 0)

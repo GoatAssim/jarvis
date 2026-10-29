@@ -11,7 +11,7 @@ Covers:
   * (brief 6F) steam_library, steam_install_game and steam_update_game are in OWNER_ONLY_TOOLS too, real tools, hidden
     from a guest by hidden_from_sender() (not from the owner, not with no chat context), and their handlers still refuse one.
   * (9B) the rest of the hub group (dl_pause, dl_resume, dl_cancel, dl_retry, dl_schedule, dl_open, dl_settings, dl_prefs,
-    dl_providers, dl_provider_prefs, dl_import_legacy, hub_doctor, hub_demo_provider, dl_updates, dl_updates_check) is in
+    dl_providers, dl_provider_prefs, dl_import_legacy, hub_doctor, hub_demo_provider, dl_updates, dl_updates_check, dl_updates_apply) is in
     OWNER_ONLY_TOOLS, hidden from a guest, refused by its handler before the service is touched, and dl_list, dl_status and
     present_download_status stay open (the full matrix is tests/test_hub_control_gates.py).
   * the four names are in tools.OWNER_ONLY_TOOLS; tools.hidden_from_sender() hides them, and every loaded

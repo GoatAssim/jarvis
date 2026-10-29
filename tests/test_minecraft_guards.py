@@ -25,6 +25,18 @@ key file nor the key variable and never call get_key(), so the allow-lists below
 all seven names in OWNER_ONLY_TOOLS.  What did need a fix: `_handler()` did not know minecraft_updates, so G3 could not
 find check_mc_updates' handler.
 
+ROUND OF THE UPDATE SOURCE (agent M1, the only agent allowed to edit this file): the group grows by seven tools that
+arrive in three files written by three agents, so the checks below cover the group "as it will be after all eight
+patches" while still passing with only the first of them applied:
+  * `_handler()` searches `minecraft_update_source` (M1), `minecraft_undo` (M2) and `minecraft_packread` (M4) IF they
+    import (a module that does not exist yet is skipped; a module that exists but fails to import fails the run);
+  * the expected tool set grows by `check_mc_watched`, `apply_mc_update`, `mc_watch` (M1), `list_mc_replaced`,
+    `undo_mc_update` (M2) and `inspect_modpack`, `update_modpack_file` (M4), for the files that exist;
+  * WRITERS gains `apply_mc_update`, `mc_watch`, `undo_mc_update` and `update_modpack_file`; the other new tools read and
+    must not be confirm-gated (the hub calls `check_mc_watched` unattended);
+  * G11 pins that no Minecraft file outside a short allow-list renames, moves or deletes a file;
+  * `test_needs_h1_*` checks need H1's patch (tools.py puts the new names in OWNER_ONLY_TOOLS) and fail until it is applied.
+
 Run: python3 tests/test_minecraft_guards.py   (plain script, prints "ok" / "FAILED", exits 1 on any failure)
 No network, no real home folder: HOME is a temp folder and the transport is replaced.  Fixture prefix: hand_p7_
 (this file needs none: its vendor answers are written inline).
@@ -61,6 +73,25 @@ from jarvis.actions import minecraft_updates as mu  # noqa: E402
 from jarvis.hub import service  # noqa: E402
 from jarvis.modhosts import cache, config, hosts, net, untrusted  # noqa: E402
 
+
+def _optional(name):
+    """A Minecraft action module of this round, or None when it is not there yet (the other patches may not be applied).
+    A module that exists but cannot be imported is NOT skipped: the error is the finding."""
+    import importlib
+    full = "jarvis.actions." + name
+    try:
+        return importlib.import_module(full)
+    except ModuleNotFoundError as exc:
+        if exc.name == full:
+            return None
+        raise
+
+
+mus = _optional("minecraft_update_source")      # M1: check_mc_watched, apply_mc_update, mc_watch
+mundo = _optional("minecraft_undo")             # M2: list_mc_replaced, undo_mc_update
+mpackread = _optional("minecraft_packread")     # M4: inspect_modpack, update_modpack_file
+ROUND_MODULES = [m for m in (mus, mundo, mpackread) if m is not None]
+
 # The hub refuses a link whose host does not resolve to a public address; this file never touches DNS.
 socket.getaddrinfo = lambda host, port, *a, **k: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port or 443))]
 service._store(None).set_settings({"library_root": str(Path(HOME) / "library")})
@@ -69,7 +100,15 @@ PASS, FAIL = [], []
 SIX = ("search_mc_mods", "get_mc_project", "download_mc_file", "make_modpack_file",
        "list_optifine_versions", "download_optifine")
 SEVEN = SIX + ("check_mc_updates",)
-WRITERS = ("download_mc_file", "make_modpack_file", "download_optifine")
+# The tools of this round, by the file that declares them.  Only the files that exist count (see _optional above).
+ROUND_TOOLS = (("minecraft_update_source", ("check_mc_watched", "apply_mc_update", "mc_watch")),
+               ("minecraft_undo", ("list_mc_replaced", "undo_mc_update")),
+               ("minecraft_packread", ("inspect_modpack", "update_modpack_file")))
+ROUND_WRITERS = ("apply_mc_update", "mc_watch", "undo_mc_update", "update_modpack_file")
+NEW_NAMES = tuple(n for module, names in ROUND_TOOLS
+                  if any(m.__name__.endswith("." + module) for m in ROUND_MODULES) for n in names)
+EXPECTED = SEVEN + NEW_NAMES
+WRITERS = ("download_mc_file", "make_modpack_file", "download_optifine") + tuple(n for n in ROUND_WRITERS if n in NEW_NAMES)
 GROUP = "minecraft"
 FAKE_KEY = "FAKE-KEY-P7-3c9d41e07b5a28f6"
 GUEST = json.dumps({"platform": "discord", "user_id": "42", "is_owner": False})
@@ -195,13 +234,20 @@ def test_g1_group_is_loaded():
     index = tools._tool_index()
     names = group_tools()
     check("the minecraft group lists tools", bool(names), names)
-    for name in SEVEN:
+    for name in EXPECTED:
         check("%s is a loaded tool in the minecraft group" % name, name in index and name in names)
     for module, tool_names in ((lk, ("search_mc_mods", "get_mc_project")), (dl, ("download_mc_file",)),
                                (mp, ("make_modpack_file",)), (mo, ("list_optifine_versions", "download_optifine")),
                                (mu, ("check_mc_updates",))):
         check("%s declares its tools" % module.__name__.rsplit(".", 1)[-1], all(n in module.TOOLS for n in tool_names))
         check("%s joins the %s group" % (module.__name__.rsplit(".", 1)[-1], GROUP), module.TOOL_GROUP == GROUP)
+    for module in ROUND_MODULES:
+        label = module.__name__.rsplit(".", 1)[-1]
+        check("%s (this round) joins the %s group" % (label, GROUP), module.TOOL_GROUP == GROUP)
+        check("%s: every tool it declares is in the group" % label, all(n in names for n in module.TOOLS),
+              sorted(n for n in module.TOOLS if n not in names))
+        check("%s declares no pack instruction and no settings (the group has ONE of each, in minecraft_lookup.py)" % label,
+              not getattr(module, "TOOL_PACK_INSTRUCTION", "") and not getattr(module, "TOOL_SETTINGS", None))
 
 
 # =====================================================================================================================
@@ -211,6 +257,8 @@ def test_g2_owner_only_set():
     for name in SEVEN:
         check("%s is in OWNER_ONLY_TOOLS" % name, name in tools.OWNER_ONLY_TOOLS)
     for name in group_tools():
+        if name in NEW_NAMES:
+            continue                       # H1's patch adds these to the set: test_needs_h1_new_tools_are_owner_only
         check("%s (a minecraft tool) is in OWNER_ONLY_TOOLS" % name, name in tools.OWNER_ONLY_TOOLS)
     with Sender(GUEST):
         hidden = set(tools.hidden_from_sender())
@@ -221,8 +269,23 @@ def test_g2_owner_only_set():
     check("the owner is offered all of them", not (set(group_tools()) & hidden), sorted(set(group_tools()) & hidden))
 
 
+def test_needs_h1_new_tools_are_owner_only():
+    """Needs H1's patch (tools.py is H1's file): the seven names of this round are in OWNER_ONLY_TOOLS, so a chat guest is
+    not offered them.  Fails until that patch is applied; the handlers refuse a guest anyway (G3)."""
+    check("the update-source tools of this round exist (else this check has nothing to say)", bool(NEW_NAMES) or not ROUND_MODULES)
+    for name in NEW_NAMES:
+        check("%s is in OWNER_ONLY_TOOLS (H1)" % name, name in tools.OWNER_ONLY_TOOLS)
+    with Sender(GUEST):
+        hidden = set(tools.hidden_from_sender())
+    for name in NEW_NAMES:
+        check("a chat guest is not offered %s (H1)" % name, name in hidden)
+    with Sender(OWNER):
+        hidden = set(tools.hidden_from_sender())
+    check("the owner is offered every new tool", not (set(NEW_NAMES) & hidden), sorted(set(NEW_NAMES) & hidden))
+
+
 def _handler(name):
-    for module in (lk, dl, mp, mo, mu):
+    for module in (lk, dl, mp, mo, mu, *ROUND_MODULES):
         if name in module.TOOLS:
             return module.TOOLS[name]
     return None
@@ -256,6 +319,16 @@ def test_g4_writers_are_confirm_gated():
     for module in (lk, mu):
         check("%s only reads: its own confirm set is empty" % module.__name__.rsplit(".", 1)[-1],
               not module.TOOL_CONFIRM_REQUIRED, module.TOOL_CONFIRM_REQUIRED)
+    # Every file of the group: its confirm set is exactly its writers (a reader is never confirm-gated: the hub calls
+    # check_mc_watched on its own thread, and a gated update tool is refused at load).
+    for module in (dl, mp, mo, *ROUND_MODULES):
+        label = module.__name__.rsplit(".", 1)[-1]
+        writers_here = {n for n in module.TOOLS if n in WRITERS}
+        check("%s: its confirm set is exactly the tools that write (%s)" % (label, ", ".join(sorted(writers_here)) or "none"),
+              set(module.TOOL_CONFIRM_REQUIRED) == writers_here, sorted(module.TOOL_CONFIRM_REQUIRED))
+    for name in NEW_NAMES:
+        if name not in WRITERS:
+            check("%s only reads: it is not confirm-gated" % name, name not in tool_safety.DEFAULT_CONFIRM_REQUIRED)
 
 
 # =====================================================================================================================
@@ -304,6 +377,10 @@ def test_g6_only_net_py_opens_connections():
     check("the scan covers the S1 and S2 files (crossmatch, updates, minecraft_updates)",
           {"modhosts/crossmatch.py", "modhosts/updates.py", "actions/minecraft_updates.py"} <= {rel(p) for p in scanned},
           sorted(rel(p) for p in scanned))
+    if mus is not None:
+        check("the scan covers the M1 files (watched.py, minecraft_update_source.py)",
+              {"modhosts/watched.py", "actions/minecraft_update_source.py"} <= {rel(p) for p in scanned},
+              sorted(rel(p) for p in scanned))
     offenders = {}
     for path in scanned:
         hits = sorted(m for m in _imports(path) if m.split(".")[0] in NET_MODULES or m == "urllib.request")
@@ -467,6 +544,148 @@ def test_g10_results_never_claim_an_install():
         claims = re.findall(r"[^.]{0,60}\binstalled\b[^.]{0,30}", text, re.I)
         bad = [c for c in claims if not re.search(r"\b(not|never|nothing|no)\b", c, re.I)]
         check("%s: every use of 'installed' is a denial" % label, not bad, bad)
+
+
+# =====================================================================================================================
+# G10b  the update source never claims an install either (values only: `installed` is also a field name of the contract)
+# =====================================================================================================================
+def _string_values(value):
+    """Every string VALUE of a result (keys are not text a person reads: `installed` is a field of the updates contract)."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from _string_values(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _string_values(item)
+
+
+def _unnegated_install_claims(value):
+    bad = []
+    for text in _string_values(value):
+        for claim in re.findall(r"[^.]{0,60}\binstalled\b[^.]{0,30}", text, re.I):
+            if not re.search(r"\b(not|never|nothing|no)\b", claim, re.I):
+                bad.append(claim)
+    return bad
+
+
+def test_g10b_the_update_source_never_claims_an_install():
+    if mus is None:
+        check("the update source is not in this tree yet (nothing to check)", True)
+        return
+    import hashlib
+    import types
+    from jarvis.modhosts import updates as mod_updates
+    from jarvis.modhosts import watched
+    folder = Path(HOME) / "g10b-mods"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "sodium-old.jar").write_bytes(b"old jar bytes")
+    sha1 = hashlib.sha1(b"old jar bytes").hexdigest()
+    added = watched.add(str(folder), mc_version="1.20.1", loader="fabric")
+    check("the scenario's folder went on the watched list", added.get("ok") is True, added)
+    fake_answer = {"ok": True, "folder": str(folder), "checked": 1, "updates_available": 1,
+                   "updates": [{"file": "sodium-old.jar", "project": {"id": "AANobbMI", "name": "Sodium"},
+                                "installed": {"version": "0.5.0", "channel": "release", "date": "2026-01-01"},
+                                "latest": {"version": "0.5.8", "file_id": "abc12345", "channel": "release",
+                                           "date": "2026-02-01", "file_name": "sodium-new.jar", "size": 123},
+                                "get_with": {"tool": "download_mc_file", "source": "modrinth", "project": "AANobbMI",
+                                             "file": "abc12345"}}],
+                   "up_to_date": [], "not_checked": []}
+    engine = types.SimpleNamespace(apply_update=lambda folder, old_sha1, plan, *, dry_run=False, deadline_seconds=0: {
+        "ok": True, "state": "unchanged" if dry_run else "done", "plan": "swap sodium-old.jar for sodium-new.jar",
+        "message": ("Dry run: nothing was changed." if dry_run else "sodium-old.jar was replaced by sodium-new.jar."),
+        "installed": "0.5.8", "backup": str(folder / "backup" / "sodium-old.jar")})
+    real_check, real_engine = mod_updates.check_folder, sys.modules.get("jarvis.modhosts.apply")
+    import jarvis.modhosts as modhosts_pkg
+    had_attr = hasattr(modhosts_pkg, "apply")
+    real_attr = getattr(modhosts_pkg, "apply", None)
+    try:
+        mod_updates.check_folder = lambda **kw: json.loads(json.dumps(fake_answer))
+        sys.modules["jarvis.modhosts.apply"] = engine
+        modhosts_pkg.apply = engine
+        results = {"check": mus.tool_check_mc_watched({}), "watch_dry": mus.tool_mc_watch(
+            {"action": "set", "folder": str(folder), "channel": "beta", "dry_run": True})}
+        findings = results["check"].get("updates") or []
+        check("the scenario produced one finding", len(findings) == 1, results["check"])
+        fid = findings[0]["id"] if findings else "f00000000:" + sha1
+        check("the finding id is <folder id>:<sha1> and short enough for the hub", fid.endswith(":" + sha1) and len(fid) <= 120, fid)
+        results["apply_dry"] = mus.tool_apply_mc_update({"id": fid, "dry_run": True})
+        results["apply"] = mus.tool_apply_mc_update({"id": fid})
+    finally:
+        mod_updates.check_folder = real_check
+        if real_engine is None:
+            sys.modules.pop("jarvis.modhosts.apply", None)
+        else:
+            sys.modules["jarvis.modhosts.apply"] = real_engine
+        if had_attr:
+            modhosts_pkg.apply = real_attr
+        elif hasattr(modhosts_pkg, "apply"):
+            del modhosts_pkg.apply
+        watched.remove(str(folder))
+    for label, res in results.items():
+        bad = _unnegated_install_claims(res)
+        check("%s: no text says a mod was installed" % label, not bad, bad)
+    check("a replaced file is reported as replaced, not installed",
+          "replaced" in str(results["apply"].get("message", "")) and results["apply"].get("state") == "done", results["apply"])
+
+
+# =====================================================================================================================
+# G11  nothing in the Minecraft code renames, moves or deletes a file unless it is on a short list
+# =====================================================================================================================
+# What each file may call, derived from jarvis-main_185_ by reading (every call below was found there, and each file's reason
+# is the comment).  A NEW file, or a new kind of call in an old one, fails this test on purpose: decide it, then add it here
+# and say why in AGENTS.md.  Static search only: it sees os.* / shutil.* calls and Path-style .unlink / .rename / .rmdir
+# calls, not Path.replace (indistinguishable from str.replace without types).
+FILE_CALLS_ALLOWED = {
+    "actions/minecraft_optifine.py": {"os.replace", "os.unlink"},      # its own .part file -> the OptiFine file the owner asked for
+    "modhosts/cache.py": {"os.replace"},                               # its own cache.json
+    "modhosts/outdir.py": {"os.rename", "os.replace", "os.unlink", "os.rmdir"},   # the shared safe writer: a NEW file, its temp file
+    "modhosts/updates.py": {"os.replace"},                             # its own update_state.json
+    "modhosts/watched.py": {"os.replace", "os.unlink"},                # (M1) its own watched.json and its temp file
+}
+# New this round, and the only two files that may change a file of the owner's (M2's engine; M4's NEW pack file).
+FILE_CALLS_ANY = {"modhosts/apply.py", "modhosts/packupdate.py"}
+_FS_ATTRS = {"replace", "rename", "renames", "remove", "unlink", "rmdir", "removedirs", "move", "rmtree"}
+_PATH_ATTRS = {"unlink", "rename", "rmdir"}
+
+
+def _file_calls(path):
+    found = set()
+    tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module in ("os", "shutil") and node.level == 0:
+            found |= {"%s.%s" % (node.module, a.name) for a in node.names if a.name in _FS_ATTRS}
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            base = node.func.value
+            if isinstance(base, ast.Name) and base.id in ("os", "shutil") and node.func.attr in _FS_ATTRS:
+                found.add("%s.%s" % (base.id, node.func.attr))
+            elif node.func.attr in _PATH_ATTRS and not (isinstance(base, ast.Name) and base.id in ("os", "shutil")):
+                found.add("path.%s" % node.func.attr)
+    return found
+
+
+def test_g11_only_the_listed_files_rename_move_or_delete():
+    scanned = py_files("modhosts") + sorted((PKG / "actions").glob("minecraft_*.py"))
+    check("the scan sees the modhosts package and the minecraft action files", len(scanned) >= 12, len(scanned))
+    offenders = {}
+    for path in scanned:
+        name = rel(path)
+        if name in FILE_CALLS_ANY:
+            continue
+        extra = _file_calls(path) - FILE_CALLS_ALLOWED.get(name, set())
+        if extra:
+            offenders[name] = sorted(extra)
+    check("no Minecraft file renames, moves or deletes a file outside the allow-list", not offenders, offenders)
+    for name, allowed in FILE_CALLS_ALLOWED.items():
+        if (PKG / name).exists():
+            check("%s exists and is scanned (the allow-list is not stale)" % name, any(rel(p) == name for p in scanned))
+    for name in FILE_CALLS_ANY:
+        check("%s is the only kind of file allowed free rein, and is named here on purpose" % name, name.startswith("modhosts/"))
+    for name in ("actions/minecraft_update_source.py", "actions/minecraft_updates.py", "actions/minecraft_lookup.py",
+                 "actions/minecraft_download.py", "actions/minecraft_packs.py"):
+        if (PKG / name).exists():
+            check("%s calls no rename / move / delete at all" % name, not _file_calls(PKG / name), sorted(_file_calls(PKG / name)))
 
 
 def main():

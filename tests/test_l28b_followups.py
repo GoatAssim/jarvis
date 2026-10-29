@@ -210,14 +210,27 @@ def test_the_handlers_still_refuse_a_non_owner():
           "no such tool" not in json.dumps(r3).lower(), r3)
 
 
+# The Updates rework pre-allocated twelve tool names across eight patches (H1 owns tools.py and lists them all in
+# OWNER_ONLY_TOOLS).  dl_updates_apply is H1's own; the other eleven arrive with the other agents' patches, so with ONLY
+# the H1 patch applied they are not loaded tools yet.  "Names real tools" checks every name except those eleven;
+# test_needs_updates_agents_names_are_real_tools checks the eleven once all eight patches are in.
+UPDATES_OTHER_AGENTS = {
+    "check_pkg_updates", "apply_pkg_update", "check_steam_updates", "apply_steam_update",
+    "check_mc_watched", "apply_mc_update", "mc_watch", "list_mc_replaced", "undo_mc_update",
+    "inspect_modpack", "update_modpack_file",
+}
+
+
 def test_owner_only_set_is_exactly_what_the_handlers_gate():
-    check("OWNER_ONLY_TOOLS names real tools",
-          all(n in system_tools._tool_index() for n in system_tools.OWNER_ONLY_TOOLS))
+    check("OWNER_ONLY_TOOLS names real tools (the eleven other agents' Updates names aside)",
+          all(n in system_tools._tool_index()
+              for n in system_tools.OWNER_ONLY_TOOLS - UPDATES_OTHER_AGENTS))
     check("it is send_dm + recent_dms + recent_spaces (S10c) + the L.21-L.23 person tools + the Download Hub's "
           "add / dismiss / season / Stremio-library tools + torrent_files (N24) + the rest of the hub group except "
           "dl_list, dl_status and the status card (9B) + play_control (brief 31) + the three Steam tools (N22b/c) + "
           "play_local, play_episode, stack_start, stack_stop, server_cache_clear (7A) + the two Minecraft lookups "
-          "+ the two OptiFine tools + download_mc_file, make_modpack_file and check_mc_updates",
+          "+ the two OptiFine tools + download_mc_file, make_modpack_file and check_mc_updates "
+          "+ the twelve Updates-rework names (dl_updates_apply and the eleven pre-allocated to the other agents)",
           system_tools.OWNER_ONLY_TOOLS == {
               "send_dm", "recent_dms", "recent_spaces", "person_remember", "person_forget",
               "person_instruct", "person_recall", "person_review", "await_reply",
@@ -229,8 +242,16 @@ def test_owner_only_set_is_exactly_what_the_handlers_gate():
               "steam_library", "steam_install_game", "steam_update_game",
               "play_local", "play_episode", "stack_start", "stack_stop", "server_cache_clear",
               "search_mc_mods", "get_mc_project", "list_optifine_versions", "download_optifine",
-              "download_mc_file", "make_modpack_file", "check_mc_updates"},
+              "download_mc_file", "make_modpack_file", "check_mc_updates",
+              "dl_updates_apply"} | UPDATES_OTHER_AGENTS,
           sorted(system_tools.OWNER_ONLY_TOOLS))
+
+
+def test_needs_updates_agents_names_are_real_tools():
+    """Needs ALL eight Updates patches: the eleven names pre-allocated to the other agents are loaded tools."""
+    check("the eleven pre-allocated Updates names are real tools once every patch is applied",
+          all(n in system_tools._tool_index() for n in UPDATES_OTHER_AGENTS),
+          sorted(n for n in UPDATES_OTHER_AGENTS if n not in system_tools._tool_index()))
 
 
 def test_ask_level_guest_offer_excludes_owner_only_tools():

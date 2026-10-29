@@ -8,10 +8,14 @@
  *     "Show files" opens the project: a files table with the recommended file marked and why, and its dependencies.
  *   - The tray (client-side only) holds the projects or files you picked. From it you queue downloads (one dialog for
  *     the whole batch) or make a pack. The tray is just a list in memory: nothing happens until you press a button.
- *   - Updates, OptiFine and Make a pack are the same tools as before, now reading the shared version and loader.
+ *   - OptiFine and Make a pack are the same tools as before, now reading the shared version and loader.
+ *   - Updates (wave M3) has three parts: the watched mod folders (which folder, for which Minecraft version and
+ *     loader), a check that lists the newer files with an Update button each, and an undo list for the last
+ *     replacements. It replaced the one-off check_mc_updates run: a file is replaced only inside a watched folder.
  *
- * It is a thin face on the SEVEN Minecraft tools (search_mc_mods, get_mc_project, list_optifine_versions,
- * download_mc_file, download_optifine, make_modpack_file, check_mc_updates) and nothing else:
+ * It is a thin face on the ELEVEN Minecraft tools (search_mc_mods, get_mc_project, list_optifine_versions,
+ * download_mc_file, download_optifine, make_modpack_file, and, for the Updates tab, check_mc_watched,
+ * apply_mc_update, mc_watch, list_mc_replaced, undo_mc_update) and nothing else:
  *
  *   - It never talks to a vendor. Every action is /api/tools/preview (the same confirmation gate the Debug panel
  *     uses) and then /api/tools/run.
@@ -21,6 +25,9 @@
  *     textContent / setAttribute only, never as HTML, and a link is made only for an https address on a vendor's own
  *     host.
  *   - Nothing is installed. A queued download goes to Downloads ("downloaded, not installed"); a pack is a file.
+ *     The one thing that touches a file you already have is Update (and Undo) in the Updates tab: only inside a
+ *     folder you put on the watched list, only after the owner's yes in a dialog that shows Jarvis's own plan
+ *     line, and the old file is moved to a backup folder, never deleted.
  *   - Every write is: a dry run first (no dialog: it writes nothing), then ONE dialog that shows the dry-run message,
  *     the exact arguments, the folder and, for a pack that downloads files to match them, the file count and total
  *     size. Only a yes goes through. A batch from the tray is one dialog for the whole batch.
@@ -36,9 +43,11 @@
   "use strict";
 
   const TOOLS = ["search_mc_mods", "get_mc_project", "list_optifine_versions",
-    "download_mc_file", "download_optifine", "make_modpack_file", "check_mc_updates"];
+    "download_mc_file", "download_optifine", "make_modpack_file",
+    "check_mc_watched", "apply_mc_update", "mc_watch", "list_mc_replaced", "undo_mc_update"];
   // The tools that write something. Only these can ever be sent a confirm_ui, and never on a dry run.
-  const WRITERS = ["download_mc_file", "download_optifine", "make_modpack_file"];
+  // (mc_watch also has a read, action "list": it is never sent a yes, see mayPassYes.)
+  const WRITERS = ["download_mc_file", "download_optifine", "make_modpack_file", "apply_mc_update", "mc_watch", "undo_mc_update"];
   const PLATFORMS = ["modrinth", "curseforge"];
   const KINDS = ["mod", "modpack", "resourcepack", "shader", "datapack"];
   const LOADERS = ["fabric", "forge", "neoforge", "quilt"];
@@ -267,7 +276,11 @@
     if (kind === "search") return args.query ? "" : "Type what to search for.";
     if (kind === "project" || kind === "download") return args.project ? "" : "Say which project: its slug or id.";
     if (kind === "optifine-download") return args.mc_version ? "" : "Say the Minecraft version you play in the bar at the top, like 1.20.1.";
-    if (kind === "updates") return "";                       // every field is optional: the tool has its own folder default
+    if (kind === "watch-add" || kind === "watch-set" || kind === "watch-remove") {
+      if (!args.folder) return kind === "watch-add" ? "Choose the folder to watch: type its path or press Browse." : "Jarvis has no folder to change: pick one from the list.";
+      return "";                                              // version and loader are optional: an empty one means the check will ask
+    }
+    if (kind === "apply" || kind === "undo") return args.id ? "" : "Jarvis gave no id this panel can send back for that row, so it cannot be " + (kind === "apply" ? "updated" : "undone") + " here.";
     if (kind === "pack") {
       if (!args.name) return "Give the pack a name.";
       if (!args.mc_version) return "Say the Minecraft version you play in the bar at the top, like 1.20.1.";
@@ -456,55 +469,109 @@
     return lines.concat(typed).join("\n");
   }
 
-  // ------------------------------------------------------------------ Updates tab (M2)
+  // ------------------------------------------------------------------ Updates tab (M3): the pure helpers
+  //
+  // The tab talks to FIVE tools whose schemas are written by other agents at the same time (M1: check_mc_watched,
+  // apply_mc_update, mc_watch; M2: list_mc_replaced, undo_mc_update). The ARGUMENT names below come from the brief and
+  // the pinned contract and nothing else is sent. Every ANSWER is read defensively: a key that is not there is simply
+  // not drawn, and the whole answer stays visible in the "Raw answer" fold.
 
-  function updatesArgs(f) {
-    const args = { channel: oneOf(f.channel, CHANNELS, "release") };
-    put(args, "folder", f.folder);                              // empty = the tool's own default (last folder, else the default one)
-    put(args, "mc_version", f.mc_version);
-    const loader = oneOf(f.loader, LOADERS, "");
-    if (loader) args.loader = loader;
+  const WATCH_ACTIONS = ["list", "add", "remove", "set"];
+  const APPLY_STATES = ["done", "started", "unchanged", "failed"];
+  // The one honest line the tab carries (the owner's words).
+  const RUNS_HERE = "Updates run on this PC; Jarvis keeps the old file in a backup folder; the CurseForge route is unverified.";
+  const AUTO_WORDS = "\u201cAutomatic\u201d is this folder's own wish. Jarvis updates it by itself only when the master switch in Menu > Updates is also on.";
+  const APPLY_NOTE = "The old file is moved to a backup folder, not deleted. Updates run on this PC.";
+
+  // The first non-empty plain value among `keys` of an answer, as clipped text. A nested object (a file) gives its
+  // file name or name. Used for answers whose exact key names are another agent's to fix.
+  function pick(o, keys, max) {
+    if (!o || typeof o !== "object") return "";
+    for (let i = 0; i < keys.length; i += 1) {
+      let v = Object.prototype.hasOwnProperty.call(o, keys[i]) ? o[keys[i]] : undefined;
+      if (v && typeof v === "object" && !Array.isArray(v)) v = v.file_name || v.file || v.name || v.version;
+      if (typeof v === "number" && isFinite(v)) return String(v);
+      if (typeof v === "string" && v.trim()) return text(v.trim(), max || 300);
+    }
+    return "";
+  }
+
+  // A finding's or a replacement's id goes back to the tool EXACTLY as the tool gave it, so it is either usable as it
+  // is or not usable at all (never trimmed, never cleaned): no control characters, not blank, not huge.
+  function safeId(v) {
+    return typeof v === "string" && v.trim() !== "" && v.length <= 512 && text(v) === v ? v : "";
+  }
+
+  // `mc_watch` arguments. Empty optional fields are left out (the tool's own meaning for "not given" applies). A real
+  // call carries no dry_run; a dry run carries it; the read (action list) carries neither.
+  function watchArgs(action, f, dry) {
+    const form = f && typeof f === "object" ? f : {};
+    const act = oneOf(action, WATCH_ACTIONS, "");
+    const args = { action: act };
+    if (act === "list") return args;
+    // A folder the tool itself listed goes back exactly as listed (exact: true); one the owner typed is trimmed.
+    if (typeof form.folder === "string" && form.folder.trim()) args.folder = form.exact === true ? form.folder : form.folder.trim();
+    if (act === "add" || act === "set") {
+      put(args, "label", form.label);
+      put(args, "mc_version", form.mc_version);
+      const loader = oneOf(form.loader, LOADERS, "");
+      if (loader) args.loader = loader;
+      args.channel = oneOf(form.channel, CHANNELS, "release");
+      args.auto = form.auto === true;
+    }
+    if (dry) args.dry_run = true;
     return args;
   }
 
-  // What one "Queue download" button of the Updates list stands for: the fields of the download form, taken from
-  // the tool's own get_with (never rebuilt from a name). null = nothing to queue.
-  function updateDownloadFields(update, f) {
-    const g = update && typeof update === "object" ? update.get_with : null;
-    if (!g || typeof g !== "object" || g.tool !== "download_mc_file") return null;
-    const project = trimmed(g.project);
-    const file = trimmed(g.file);
-    if (!project || !file) return null;
-    const out = { project, file, source: oneOf(g.source, PLATFORMS, "modrinth"), kind: "mod",
-      channel: oneOf((f || {}).channel, CHANNELS, "release") };
-    put(out, "mc_version", (f || {}).mc_version);
-    const loader = oneOf((f || {}).loader, LOADERS, "");
-    if (loader) out.loader = loader;
-    put(out, "dest", (f || {}).dest);
+  // `apply_mc_update` / `undo_mc_update`: the id and nothing else.
+  function applyArgs(id, dry) {
+    const args = { id: safeId(id) };
+    if (dry) args.dry_run = true;
+    return args;
+  }
+
+  // The watched list of an answer (check_mc_watched or mc_watch list): [{ folder, label, mc_version, loader, channel, auto, exact }].
+  // `folder` is the exact string the tool gave (it names the entry in a later remove or set); `exact` says it can be sent back.
+  function watchedOf(result) {
+    const list = result && typeof result === "object" && Array.isArray(result.watched) ? result.watched : [];
+    const out = [];
+    list.slice(0, 100).forEach((w) => {
+      if (!w || typeof w !== "object" || typeof w.folder !== "string" || !w.folder.trim()) return;
+      out.push({ folder: w.folder, exact: w.folder.length <= 1000 && text(w.folder) === w.folder,
+        label: trimmed(text(w.label, 80)), mc_version: trimmed(text(w.mc_version, 20)), loader: oneOf(w.loader, LOADERS, ""),
+        channel: oneOf(w.channel, CHANNELS, "release"), auto: w.auto === true });
+    });
     return out;
   }
 
-  // The same update as a tray item (so it can be queued with the rest). null = nothing to add.
-  function updateTrayItem(update) {
-    const g = update && typeof update === "object" ? update.get_with : null;
-    if (!g || typeof g !== "object" || g.tool !== "download_mc_file") return null;
-    const proj = update.project && typeof update.project === "object" ? update.project : {};
-    const late = update.latest && typeof update.latest === "object" ? update.latest : {};
-    return trayItemFrom({ source: g.source, id: g.project, slug: proj.slug, name: proj.name || g.project, kind: "mod" },
-      { file_id: g.file, version: late.version, name: late.file_name });
+  // The findings of check_mc_watched (the pinned contract: id, title, installed, available, size_bytes, source, detail).
+  function findingsOf(result) {
+    const list = result && typeof result === "object" && Array.isArray(result.updates) ? result.updates : [];
+    const out = [];
+    list.slice(0, 500).forEach((u) => {
+      if (!u || typeof u !== "object") return;
+      const proj = u.project && typeof u.project === "object" ? u.project : {};
+      const id = safeId(u.id);
+      out.push({ id, title: pick(u, ["title"], 120) || pick(proj, ["name", "slug"], 120) || text(id, 80) || "(no name)",
+        installed: pick(u, ["installed"], 200), available: pick(u, ["available"], 200),
+        size: typeof u.size_bytes === "number" ? size(u.size_bytes) : "", source: pick(u, ["source"], 20),
+        detail: pick(u, ["detail"], 240), folder: pick(u, ["folder"], 300), page_url: trimmed(u.page_url || proj.page_url) });
+    });
+    return out;
   }
 
   const WHY_WORDS = {
     not_on_modrinth: "Modrinth does not know this file. It may come from CurseForge or somewhere else, and Jarvis does not guess from a name or a size.",
-    needs_mc_version: "It works on several Minecraft versions. Say which one you play.",
-    needs_loader: "It works with several loaders. Say which one you use.",
+    needs_mc_version: "It works on several Minecraft versions. Say which one you play: press Edit on the folder and fill it in.",
+    needs_loader: "It works with several loaders. Say which one you use: press Edit on the folder and fill it in.",
     no_minecraft_version: "Modrinth lists no Minecraft version for it.",
     no_loader: "Modrinth lists no loader for it.",
-    other_minecraft_version: "It is built for another Minecraft version than the one you chose, so no update was looked up.",
-    other_loader: "It is built for another loader than the one you chose, so no update was looked up.",
-    offline: "Modrinth could not be reached.",
-    rate_limited: "Modrinth asked Jarvis to slow down.",
-    vendor_changed: "Modrinth's answer was not what Jarvis expected.",
+    other_minecraft_version: "It is built for another Minecraft version than the one chosen for the folder, so no update was looked up.",
+    other_loader: "It is built for another loader than the one chosen for the folder, so no update was looked up.",
+    offline: "The site could not be reached.",
+    rate_limited: "The site asked Jarvis to slow down.",
+    vendor_changed: "The site's answer was not what Jarvis expected.",
+    not_distributable: "The author does not allow downloads from third parties, so Jarvis tries nothing else.",
   };
 
   // A not-checked code in plain words. A code the panel does not know (a newer tool may add some) shows the
@@ -515,29 +582,95 @@
     return text(detail, 240) || (code ? "Not checked (" + text(code, 40) + ")." : "Not checked.");
   }
 
-  const FOLDER_FROM = { given: "the folder you named", last_checked: "the last folder checked", default: "your default download folder" };
-
-  function folderFromWords(how) {
-    const k = trimmed(how);
-    return Object.prototype.hasOwnProperty.call(FOLDER_FROM, k) ? FOLDER_FROM[k] : text(k, 60);
-  }
-
-  // Which inputs a needs_clarification answer is asking for. An ask the panel cannot read still gets both.
-  function clarifyNeeds(result) {
-    const out = { mc_version: false, loader: false };
-    if (!result || typeof result !== "object" || result.needs_clarification !== true || result.needs_folder === true) return out;
-    (Array.isArray(result.not_checked) ? result.not_checked : []).forEach((u) => {
-      if (u && u.why === "needs_mc_version") out.mc_version = true;
-      if (u && u.why === "needs_loader") out.loader = true;
-    });
-    if (!out.mc_version && !out.loader) { out.mc_version = true; out.loader = true; }
+  // What was NOT checked, in words, with the reason: one line per entry of `problems` (the contract's {source, error},
+  // read with a few optional extras) and per entry of `not_checked` when the answer has one. Never fewer lines than
+  // entries (the list is cut at 50 with a visible "and N more").
+  function problemLines(res) {
+    const out = [];
+    if (!res || typeof res !== "object") return out;
+    const add = (p) => {
+      if (typeof p === "string") { out.push(text(p, 300)); return; }
+      if (!p || typeof p !== "object") return;
+      const who = pick(p, ["file", "title", "folder", "label"], 90);
+      const src = pick(p, ["source"], 24);
+      const known = Object.prototype.hasOwnProperty.call(SITE, src.toLowerCase()) ? SITE[src.toLowerCase()] : src;
+      const why = pick(p, ["why", "reason", "code"], 40);
+      const detail = pick(p, ["error", "detail", "message"], 240);
+      const words = whyWords(why, detail);
+      out.push((who ? who + ": " : "") + (known ? known + " \u2014 " : "") + words);
+    };
+    (Array.isArray(res.problems) ? res.problems : []).forEach(add);
+    (Array.isArray(res.not_checked) ? res.not_checked : []).forEach(add);
+    if (out.length > 50) { const more = out.length - 50; out.length = 50; out.push("\u2026and " + more + " more (see the Raw answer)."); }
     return out;
   }
 
-  // The tool has no folder to read yet: it asks, and may suggest the default download folder.
-  function needsFolder(result) {
-    if (!result || typeof result !== "object" || result.needs_folder !== true) return null;
-    return { ask: text(result.ask, 400), suggested: trimmed(result.suggested_folder) };
+  // The tool asked a question (which Minecraft version or loader?) that the panel answers through the folder's own fields.
+  function needsAnswer(res) {
+    return !!res && typeof res === "object" && res.needs_clarification === true;
+  }
+
+  // What an apply or undo answer means, as one of the pinned four (done, started, unchanged, failed) or the owner's own
+  // cancel. NOTHING is "done" unless the tool said ok AND state done: a contradiction (ok false with state done), an
+  // unknown state or a missing one is "failed" with words that say the folder should be looked at, never a claim.
+  // -> { kind, message, restart, backup, plan, uncertain }
+  function applyOutcome(result) {
+    const r = result && typeof result === "object" ? result : null;
+    if (!r) return { kind: "failed", message: "Jarvis gave no answer.", restart: false, backup: "", plan: "", uncertain: true };
+    const plan = text(r.plan, 700);
+    if (r.reason === "cancelled" || (r.cancelled === true && /cancel/i.test(text(r.error)))) {
+      return { kind: "cancelled", message: text(r.error || "Cancelled: nothing was run.", 200), restart: false, backup: "", plan, uncertain: false };
+    }
+    const err = text(r.error || "", 300);
+    const timedOut = r.reason === "timeout" || /timed out/i.test(err);
+    const state = typeof r.state === "string" ? r.state.trim().toLowerCase() : "";
+    if (r.ok !== true || APPLY_STATES.indexOf(state) < 0 || state === "failed") {
+      let message = err || text(r.message, 300);
+      let uncertain = timedOut;
+      if (r.ok === true && APPLY_STATES.indexOf(state) < 0) {
+        message = "Jarvis's answer did not say whether anything changed. Look in the folder and the backup folder before trying again.";
+        uncertain = true;
+      }
+      if (timedOut) message = (message ? message + " " : "") + "It may still have finished: look in the folder and the backup folder, then check again.";
+      return { kind: "failed", message: text(message || "That did not work.", 400), restart: false, backup: "", plan, uncertain };
+    }
+    const done = state === "done";
+    return { kind: state, message: text(r.message, 300), restart: done && r.needs_restart === true,
+      backup: done ? pick(r, ["backup", "backup_dir", "backup_path", "backup_folder", "moved_to"], 400) : "", plan, uncertain: false };
+  }
+
+  // The last replacements (list_mc_replaced). WARNING, A GUESS: the contract pins the TOOL'S ARGUMENTS (none) but not the shape of
+  // its answer, so these key names are a best guess that the panel tolerates being wrong about: whatever it cannot read
+  // is not drawn, an entry without a usable id gets no Undo button, and the whole answer stays in the Raw answer fold.
+  function replacedOf(result) {
+    const r = result && typeof result === "object" ? result : {};
+    const list = ["replaced", "items", "replacements", "entries"].map((k) => r[k]).find((v) => Array.isArray(v)) || [];
+    return list.slice(0, 200).filter((x) => x && typeof x === "object").map((x) => {
+      const at = x.at !== undefined ? x.at : (x.replaced_at !== undefined ? x.replaced_at : (x.date !== undefined ? x.date : x.when));
+      let when = "";
+      if (typeof at === "number" && isFinite(at) && at > 0) {
+        const d = new Date((at < 1e12 ? at * 1000 : at));
+        when = isNaN(d.getTime()) ? "" : d.toISOString().slice(0, 16).replace("T", " ");
+      } else if (typeof at === "string") when = text(at.trim(), 40);
+      return { id: safeId(x.id), title: pick(x, ["title", "project", "name"], 120), oldFile: pick(x, ["old_file", "old", "from", "installed"], 200),
+        newFile: pick(x, ["new_file", "new", "to", "available"], 200), when, folder: pick(x, ["folder", "dest"], 300),
+        backup: pick(x, ["backup", "backup_dir", "backup_path", "backup_folder"], 400) };
+    });
+  }
+
+  // Did the answer carry a list at all (an empty list is "nothing replaced", a missing one is "could not read it").
+  function replacedListed(result) {
+    const r = result && typeof result === "object" ? result : {};
+    return ["replaced", "items", "replacements", "entries"].some((k) => Array.isArray(r[k]));
+  }
+
+  const CHANNEL_WORDS = { release: "releases only", beta: "releases and betas", alpha: "every file" };
+
+  // One watched folder in words, for its card and for the dialog.
+  function watchedWords(w) {
+    const x = w && typeof w === "object" ? w : {};
+    return [x.mc_version ? "Minecraft " + x.mc_version : "Minecraft version: the check will ask",
+      x.loader ? LOADER_NAME[x.loader] : "loader: the check will ask", CHANNEL_WORDS[oneOf(x.channel, CHANNELS, "release")]];
   }
 
   // ------------------------------------------------------------------ cross-platform pack (M2)
@@ -623,13 +756,18 @@
   // The panel may send confirm_ui only for a write the owner just said yes to in its own dialog, and never on
   // a dry run. `shown` = the dialog was shown and answered yes for THIS call; `wanted` = the caller asked for it.
   function mayPassYes(name, args, shown, wanted) {
-    return wanted === true && shown === true && WRITERS.indexOf(name) >= 0 && !(args && args.dry_run === true);
+    return wanted === true && shown === true && WRITERS.indexOf(name) >= 0 && !(args && args.dry_run === true) && !isWatchRead(name, args);
+  }
+
+  // mc_watch with action "list" only reads the watched list: it is not a write, so it is never sent a yes.
+  function isWatchRead(name, args) {
+    return name === "mc_watch" && !!args && typeof args === "object" && args.action === "list";
   }
 
   // A dry run of a writer writes nothing, so it opens no dialog of its own: the ONE dialog comes after it and
   // shows what the dry run said. (Every other call keeps the server's confirmation setting.)
   function dryRunNeedsNoDialog(name, args) {
-    return WRITERS.indexOf(name) >= 0 && !!args && typeof args === "object" && args.dry_run === true;
+    return (WRITERS.indexOf(name) >= 0 && !!args && typeof args === "object" && args.dry_run === true) || isWatchRead(name, args);
   }
 
   const NOT_INSTALLED = "Downloaded, not installed: Jarvis never opens, unzips or runs it.";
@@ -646,6 +784,33 @@
     // The cross-platform question ends with a line written for the model ("Ask the owner; ..."): not for the dialog.
     const message = text(d.message || "", 900).replace(/\s*Ask the owner;[\s\S]*$/, "");
     if (message) lines.push(message);
+
+    // Updates tab (M3). An update or an undo: Jarvis's own `plan` line (exact folder, exact file names, where the old file
+    // goes) IS the dialog. A dry run that gives no plan line gets no yes passed on.
+    if (kind === "apply" || kind === "undo") {
+      const planLine = text(d.plan, 700);
+      if (!planLine) {
+        return { ok: false, folder: "", summary: "", why: "Jarvis's check did not say exactly what it would do (it gave no plan line), so this panel will not pass your yes on. Ask for it in chat instead: Jarvis asks you itself." };
+      }
+      const where = trimmed(d.folder) || trimmed(d.dest);
+      const own = lines.filter((l) => l !== planLine);
+      own.push("Plan: " + planLine);
+      if (where && planLine.indexOf(where) < 0) own.push("Folder: " + where);
+      if (kind === "apply") own.push(APPLY_NOTE);
+      return { ok: true, folder: where, summary: own.join("\n"), why: "" };
+    }
+    // Adding, changing or removing a watched folder: the dialog shows the exact folder and, for a folder that updates
+    // itself, what that means.
+    if (kind === "watch") {
+      const where = trimmed(d.folder) || trimmed(d.dest) || trimmed(a.folder);
+      if (!where) return { ok: false, folder: "", summary: "", why: "Choose the folder first." };
+      lines.push("Folder: " + where);
+      if (a.action === "add" || a.action === "set") {
+        lines.push("Minecraft version: " + (a.mc_version || "not set, the check will ask") + ". Loader: " + (a.loader ? LOADER_NAME[a.loader] : "not set, the check will ask") + ". Include: " + CHANNEL_WORDS[oneOf(a.channel, CHANNELS, "release")] + ".");
+        if (a.auto === true) lines.push("Automatic is ticked: once the master switch in Menu > Updates is also on, Jarvis may replace files in this folder by itself. The old file always goes to a backup folder.");
+      }
+      return { ok: true, folder: where, summary: lines.join("\n"), why: "" };
+    }
 
     // The folder: the dry run names it (its `dest`). A pack that has to download files is answered by a
     // question that does not name it, so there the owner must have typed it.
@@ -951,6 +1116,59 @@
     const result = await call("make_modpack_file", args, { sure: true, title: "Write this pack file?", confirmLabel: "Write",
       summary: plan.summary, passYes: true });
     return { stage: "done", result, need };
+  }
+
+  // ---- Updates tab (M3): the three write flows. Same order as every other write: a dry run (no dialog), ONE dialog that
+  // shows Jarvis's own plan, then the real call that asks for the yes to be passed on. `call` is runTool in the panel.
+
+  const WATCH_DIALOG = {
+    add: ["Watch this folder?", "Watch"],
+    set: ["Change this watched folder?", "Save"],
+    remove: ["Stop watching this folder?", "Stop watching"],
+  };
+
+  async function watchSteps(action, f, call) {
+    const act = oneOf(action, ["add", "remove", "set"], "");
+    if (!act) return { stage: "invalid", message: "Jarvis does not know that change." };
+    const args = watchArgs(act, f, false);
+    const bad = problem("watch-" + act, args);
+    if (bad) return { stage: "invalid", message: bad };
+    const check = await call("mc_watch", watchArgs(act, f, true), {});
+    if (!check || check.ok === false || check.needs_clarification === true) return { stage: "check", result: check };
+    const plan = confirmPlan("watch", check, args);
+    if (!plan.ok) return { stage: "blocked", result: check, message: plan.why };
+    const result = await call("mc_watch", args, { sure: true, title: WATCH_DIALOG[act][0], confirmLabel: WATCH_DIALOG[act][1],
+      summary: plan.summary, passYes: true });
+    return { stage: "done", result };
+  }
+
+  // One update: `id` is the finding's id exactly as check_mc_watched gave it.
+  async function applySteps(id, call) {
+    const args = applyArgs(id, false);
+    const bad = problem("apply", args);
+    if (bad) return { stage: "invalid", message: bad };
+    const check = await call("apply_mc_update", applyArgs(id, true), {});
+    // A dry run changes nothing, so its own state is not read as "nothing to do": what stops it is a failure, a question
+    // or an answer with no plan line.
+    if (!check || check.ok !== true || check.needs_clarification === true || trimmed(check.state) === "failed") return { stage: "check", result: check };
+    const plan = confirmPlan("apply", check, args);
+    if (!plan.ok) return { stage: "blocked", result: check, message: plan.why };
+    const result = await call("apply_mc_update", args, { sure: true, title: "Replace this mod file?", confirmLabel: "Replace",
+      summary: plan.summary, passYes: true });
+    return { stage: "done", result, outcome: applyOutcome(result) };
+  }
+
+  async function undoSteps(id, call) {
+    const args = applyArgs(id, false);
+    const bad = problem("undo", args);
+    if (bad) return { stage: "invalid", message: bad };
+    const check = await call("undo_mc_update", applyArgs(id, true), {});
+    if (!check || check.ok !== true || check.needs_clarification === true || trimmed(check.state) === "failed") return { stage: "check", result: check };
+    const plan = confirmPlan("undo", check, args);
+    if (!plan.ok) return { stage: "blocked", result: check, message: plan.why };
+    const result = await call("undo_mc_update", args, { sure: true, title: "Undo this replacement?", confirmLabel: "Undo",
+      summary: plan.summary, passYes: true });
+    return { stage: "done", result, outcome: applyOutcome(result) };
   }
 
   // ------------------------------------------------------------------ the panel's state (outlives the window)
@@ -1286,96 +1504,134 @@
 
   // ------------------------------------------------------------------ Updates and cross-platform packs: drawing
 
-  // `ctx`: { form, again(overrides), queue(update), addToTray(update) }
-  function renderUpdates(res, host, ctx) {
-    const shown = { folder: res.folder, folder_chosen: folderFromWords(res.folder_from), minecraft_version: res.mc_version,
-      loader: res.loader, channel: res.channel, files_checked: res.checked, newer_files: res.updates_available };
-    const facts = factsOf(shown, Object.keys(shown));
-    if (facts) host.appendChild(facts);
-    if (res.partial === true) host.appendChild(notice("warn", "The check stopped early, so this list is partial. Check again to carry on: files already read are remembered."));
-    if (Array.isArray(res.unreadable) && res.unreadable.length) {
-      host.appendChild(notice("warn", "Could not be read (left out): " + res.unreadable.slice(0, 10).map((n) => text(n, 60)).join(", ")));
-    }
-    if (res.ignored && typeof res.ignored === "object") {
-      const bits = Object.keys(res.ignored).filter((k) => typeof res.ignored[k] === "number" && res.ignored[k] > 0)
-        .map((k) => res.ignored[k] + " " + k.replace(/_/g, " "));
-      if (bits.length) host.appendChild(el("div", { class: "mc-muted mc-small", text: "Counted but never opened: " + bits.join(", ") + "." }));
-    }
-    const folderAsk = needsFolder(res);
-    if (folderAsk) {
-      const box = input("ask_folder", folderAsk.suggested, { placeholder: "D:/Minecraft/mods" });
-      host.appendChild(el("div", { class: "mc-card" }, [
-        el("div", { class: "mc-subhead", text: "Which folder?" }),
-        el("p", { class: "mc-card__summary", text: folderAsk.ask || "Say which folder to check." }),
-        field("Folder to check", box, "Only this folder is read, not its sub-folders."),
-        el("div", { class: "mc-actions" }, [button(folderAsk.suggested ? "Check this folder" : "Check", "btn--primary", (e) => {
-          const v = trimmed(box.value);
-          if (!v) { say("Type a folder first.", "warn"); return; }
-          guarded(e.currentTarget, () => ctx.again({ folder: v }));
-        })]),
-      ]));
+  // ------------------------------------------------------------------ Updates tab (M3): drawing
+  //
+  // Everything from a tool (a project name, a file name, a folder, a message) is put on the page with textContent only
+  // (el() does that), and a link is made only by link() -> safeUrl(). Nothing here is HTML built from text.
+
+  function baseName(p) {
+    const parts = trimmed(p).split(/[\\/]+/).filter(Boolean);
+    return parts.length ? parts[parts.length - 1] : trimmed(p);
+  }
+
+  // The watched folders as cards. `ctx`: { edit(w), remove(w), auto(w, on) }.
+  function renderWatched(list, host, ctx) {
+    host.textContent = "";
+    host.removeAttribute("aria-busy");
+    if (!list.length) {
+      host.appendChild(el("div", { class: "mc-empty", text: "No folder is watched yet. Press \u201cAdd a folder\u201d and choose the folder your mods are in: Jarvis can then check it and swap in newer files." }));
       return;
     }
-    const updates = Array.isArray(res.updates) ? res.updates.filter((u) => u && typeof u === "object") : [];
-    if (updates.length) {
-      host.appendChild(el("div", { class: "mc-subhead", text: "Newer files (" + updates.length + ")" }));
-      host.appendChild(plainTable(["File", "Project", "Now", "Newer", ""], updates.map((u) => {
-        const inst = u.installed && typeof u.installed === "object" ? u.installed : {};
-        const late = u.latest && typeof u.latest === "object" ? u.latest : {};
-        const fields = updateDownloadFields(u, {});
-        const tray = updateTrayItem(u);
+    host.appendChild(el("ul", { class: "mc-cards" }, list.map((w) => {
+      const title = text(w.label, 80) || text(baseName(w.folder), 80);
+      const tick = el("input", { type: "checkbox", name: "auto", "aria-label": "Automatic update for " + title });
+      tick.checked = w.auto === true;
+      if (w.exact) tick.addEventListener("change", () => ctx.auto(w, tick.checked));
+      else tick.disabled = true;
+      return el("li", { class: "mc-card" }, [
+        el("div", { class: "mc-card__head" }, [el("span", { class: "mc-card__title", text: title }), w.auto ? el("span", { class: "mc-chip", text: "automatic" }) : null]),
+        el("div", { class: "mc-mono", text: text(w.folder, 400) }),
+        el("div", { class: "mc-card__meta" }, watchedWords(w).map((t) => el("span", { text: t }))),
+        el("div", { class: "mc-card__foot" }, [
+          el("label", { class: "mc-check" }, [tick, el("span", { text: "Automatic" })]),
+          el("span", { class: "mc-spacer" }),
+          w.exact ? button("Edit", "btn--outline", () => ctx.edit(w), { "aria-label": "Edit " + title }) : el("span", { class: "mc-chip mc-chip--warn", text: "name has characters this panel will not send back" }),
+          w.exact ? button("Remove", "btn--outline", (e) => guarded(e.currentTarget, () => ctx.remove(w)), { "aria-label": "Remove " + title }) : null,
+        ]),
+      ]);
+    })));
+  }
+
+  // The result of Check now. `ctx`: { apply(finding, paint) } where paint(outcome) marks the row afterwards.
+  function renderFindings(res, host, ctx) {
+    const findings = findingsOf(res);
+    const lines = problemLines(res);
+    if (res.partial === true || res.complete === false) {
+      host.appendChild(notice("warn", "The check did not cover everything, so this list may be missing updates. Check again to carry on."));
+    }
+    if (needsAnswer(res)) {
+      host.appendChild(notice("warn", (text(res.ask, 300) || "Jarvis needs to know which Minecraft version and loader a folder is for.")
+        + "\nPress Edit on that folder above, fill in its Minecraft version and loader, then check again."));
+    }
+    if (findings.length) {
+      host.appendChild(el("div", { class: "mc-subhead", text: "Newer files (" + findings.length + ")" }));
+      host.appendChild(plainTable(["Project", "Old file \u2192 new file", "Size", "Source", ""], findings.map((u) => {
+        const state = el("span", { class: "mc-small mc-muted", role: "status" });
+        const go = button("Update", "btn--primary", (e) => guarded(e.currentTarget, () => ctx.apply(u, (o) => {
+          state.textContent = o.kind === "done" ? "Replaced. Press Check now again to confirm." : (o.kind === "started" ? "Started." : (o.kind === "unchanged" ? "Nothing to do." : (o.kind === "failed" ? "Not replaced." : "")));
+          if (o.kind === "done" || o.kind === "started") go.hidden = true;
+        })), u.id ? { "aria-label": "Update " + u.title } : { disabled: true });
         return [
-          el("span", { class: "mc-mono", text: text(u.file, 90) }),
-          projectCell(u.project),
-          cell([inst.version, inst.channel, day(inst.date)].filter(Boolean).join(" \u00b7 ")),
-          el("span", {}, [cell([late.version, late.channel, day(late.date), size(late.size)].filter(Boolean).join(" \u00b7 ")),
-            late.via ? el("span", { class: "mc-chip mc-chip--warn", text: "via " + text(late.via, 10) }) : null,
-            late.file_name ? el("div", { class: "mc-mono mc-muted", text: text(late.file_name, 90) }) : null]),
-          fields ? el("span", { class: "mc-rowactions" }, [
-            button("Queue download\u2026", "btn--outline", (e) => guarded(e.currentTarget, () => ctx.queue(u))),
-            tray ? trayButton(tray) : null])
-            : el("span", { class: "mc-chip mc-chip--warn", text: "no file given" }),
+          el("span", {}, [projectCell({ name: u.title, page_url: u.page_url }), u.folder ? el("div", { class: "mc-mono mc-muted", text: u.folder }) : null]),
+          el("span", {}, [el("div", { class: "mc-mono", text: u.installed || "?" }), el("div", { class: "mc-mono", text: "\u2192 " + (u.available || "?") }),
+            u.detail ? el("div", { class: "mc-muted mc-small", text: u.detail }) : null]),
+          cell(u.size),
+          u.source ? badge(u.source) : cell(""),
+          el("span", { class: "mc-rowactions" }, [u.id ? go : el("span", { class: "mc-chip mc-chip--warn", text: "no id to send" }), state]),
         ];
       }), true));
-    } else if (res.ok !== false && !res.needs_clarification) {
-      host.appendChild(el("div", { class: "mc-empty", text: "No newer files found for the files that could be checked." }));
+    } else if (res.ok !== false && !needsAnswer(res)) {
+      host.appendChild(el("div", { class: "mc-empty", text: Array.isArray(res.watched) && !res.watched.length
+        ? "No folder is watched yet, so there was nothing to check."
+        : "No newer file was found for the files that could be checked." + (lines.length ? " Some could not be checked: see below." : "") }));
     }
-    const current = Array.isArray(res.up_to_date) ? res.up_to_date.filter((u) => u && typeof u === "object") : [];
-    if (current.length) {
-      host.appendChild(el("details", { class: "mc-raw" }, [el("summary", { text: "Up to date (" + current.length + ")" }),
-        plainTable(["File", "Project", "Version"], current.map((u) => [el("span", { class: "mc-mono", text: text(u.file, 90) }), cell(u.project, 80), cell(u.version, 60)]), true)]));
-    }
-    const other = Array.isArray(res.other_version) ? res.other_version.filter((u) => u && typeof u === "object") : [];
-    if (other.length) {
-      host.appendChild(el("div", { class: "mc-subhead", text: "Built for another version or loader (" + other.length + ")" }));
-      host.appendChild(plainTable(["File", "Why"], other.map((u) => [el("span", { class: "mc-mono", text: text(u.file, 90) }),
-        el("span", {}, [cell(whyWords(u.why, u.detail)), u.detail ? el("div", { class: "mc-muted mc-small", text: text(u.detail, 240) }) : null])]), true));
-    }
-    const unchecked = Array.isArray(res.not_checked) ? res.not_checked.filter((u) => u && typeof u === "object") : [];
-    if (unchecked.length) {
-      host.appendChild(el("div", { class: "mc-subhead", text: "Not checked (" + unchecked.length + ")" }));
-      host.appendChild(plainTable(["File", "Why"], unchecked.map((u) => [el("span", { class: "mc-mono", text: text(u.file, 90) }),
-        el("span", {}, [cell(whyWords(u.why, u.detail)), u.detail && WHY_WORDS[trimmed(u.why)] ? el("div", { class: "mc-muted mc-small", text: text(u.detail, 240) }) : null])]), true));
+    if (lines.length) {
+      host.appendChild(el("div", { class: "mc-subhead", text: "Not checked (" + lines.length + ")" }));
+      host.appendChild(el("ul", { class: "mc-lines" }, lines.map((l) => el("li", { text: l }))));
     }
     if (res.curseforge_note) host.appendChild(el("div", { class: "mc-muted mc-small", text: text(res.curseforge_note, 400) }));
-    if (res.needs_clarification === true) {
-      const need = clarifyNeeds(res);
-      const mc = need.mc_version ? input("ask_mc_version", S.play.mc_version, { placeholder: "1.20.1" }) : null;
-      const ld = need.loader ? select("ask_loader", [["", "choose\u2026"]].concat(LOADERS.map((l) => [l, LOADER_NAME[l]])), S.play.loader) : null;
-      host.appendChild(el("div", { class: "mc-card" }, [
-        el("div", { class: "mc-subhead", text: "Jarvis needs to know" }),
-        el("p", { class: "mc-card__summary", text: text(res.ask, 300) || "Say which Minecraft version and loader you use." }),
-        el("div", { class: "mc-grid" }, [mc ? field("Minecraft version", mc) : null, ld ? field("Loader", ld) : null]),
-        el("div", { class: "mc-small mc-muted", text: "Your answer goes into the bar at the top, so every tab uses it." }),
-        el("div", { class: "mc-actions" }, [button("Check again", "btn--primary", (e) => {
-          const over = {};
-          if (mc) over.mc_version = trimmed(mc.value);
-          if (ld) over.loader = trimmed(ld.value);
-          if ((mc && !over.mc_version) || (ld && !over.loader)) { say("Fill in the answer first.", "warn"); return; }
-          guarded(e.currentTarget, () => ctx.again(over));
-        })]),
-      ]));
+  }
+
+  // The last replacements. `ctx`: { undo(item, paint) }.
+  function renderReplaced(res, host, ctx) {
+    const items = replacedOf(res);
+    if (!replacedListed(res)) {
+      host.appendChild(notice("warn", "Jarvis answered, but this panel could not find the list of replacements in the answer. It is in the Raw answer below."));
+      return;
     }
+    if (!items.length) { host.appendChild(el("div", { class: "mc-empty", text: "Nothing has been replaced yet, so there is nothing to undo." })); return; }
+    host.appendChild(plainTable(["Project", "Old file", "Replaced by", "When", "Backup", ""], items.map((x) => {
+      const state = el("span", { class: "mc-small mc-muted", role: "status" });
+      const go = button("Undo", "btn--outline", (e) => guarded(e.currentTarget, () => ctx.undo(x, (o) => {
+        state.textContent = o.kind === "done" ? "Put back." : (o.kind === "failed" ? "Not undone." : "");
+        if (o.kind === "done") go.hidden = true;
+      })), x.id ? { "aria-label": "Undo " + (x.title || x.id) } : { disabled: true });
+      return [cell(x.title || x.id), el("span", { class: "mc-mono", text: x.oldFile }), el("span", { class: "mc-mono", text: x.newFile }), cell(x.when),
+        el("span", { class: "mc-mono", text: x.backup || x.folder }), el("span", { class: "mc-rowactions" }, [x.id ? go : el("span", { class: "mc-chip mc-chip--warn", text: "no id to send" }), state])];
+    }), true));
+  }
+
+  // What a write flow ended with, in words. `out` is what watchSteps / applySteps / undoSteps returned.
+  function showStepOutcome(host, out, words) {
+    host.textContent = "";
+    host.removeAttribute("aria-busy");
+    if (out.stage === "invalid") { host.appendChild(notice("warn", out.message)); return; }
+    if (out.stage !== "done") {
+      showResult(host, out.result, { readOnly: false, noFacts: true, noTables: true });
+      if (out.message) host.appendChild(notice("warn", out.message));
+      return;
+    }
+    const o = out.outcome;
+    if (!o) { showResult(host, out.result, { readOnly: false, noFacts: true, noTables: true }); return; }     // a watched-folder change
+    if (o.kind === "cancelled") { host.appendChild(notice("info", "Cancelled. Nothing was changed.")); return; }
+    if (o.kind === "done") {
+      host.appendChild(notice("ok", o.message || (words && words.done) || "Done."));
+      if (o.restart) host.appendChild(notice("info", "Restart Minecraft for this to take effect."));
+      if (o.backup) host.appendChild(el("div", { class: "mc-small", text: "The old file is kept in: " + o.backup }));
+    } else if (o.kind === "started") {
+      host.appendChild(notice("info", (o.message || "Started.") + " Press Check now again later to see whether it went through."));
+    } else if (o.kind === "unchanged") {
+      host.appendChild(notice("info", o.message || "Nothing needed doing."));
+    } else {
+      if (classify(out.result).kind === "not_confirmed") {
+        host.appendChild(notice("warn", "Nothing was changed. Jarvis asked its own question and no yes reached it. This panel passes your yes on through the Jarvis web server, so if you have just updated, restart the server and try again."));
+      } else {
+        const w = reasonWords(out.result);
+        host.appendChild(w ? failNotice(w, {}) : notice("error", o.message));
+        if (w && o.uncertain) host.appendChild(notice("warn", "It may still have finished: look in the folder and the backup folder, then press Check now again."));
+      }
+    }
+    host.appendChild(rawDetails(out.result));
   }
 
   function countBox(label, n, tone) {
@@ -1693,46 +1949,171 @@
     return root;
   }
 
-  // ---- tab: updates
+  // ---- tab: updates (M3): watched folders, check and update, undo
 
   function buildUpdates() {
     const root = el("div", { class: "mc-tab" });
-    const results = el("div", { class: "mc-results", "aria-live": "polite" });
-    const queueHost = el("div", { class: "mc-results", "aria-live": "polite" });
-    const form = el("div", { class: "mc-form" }, [
-      folderRow(root, "folder", "Folder to check",
-        "Only this folder is read, not its sub-folders. Only file hashes are sent to Modrinth. Nothing in the folder is changed.",
-        "empty = the last folder checked, else your default download folder"),
-      el("div", { class: "mc-grid" }, [field("Include", select("channel", CHANNEL_CHOICES, "release")),
-        folderRow(root, "dest", "Save newer files to",
-          "Used only by Queue download. A newer file is queued as a new download: it never replaces or removes the old one.")]),
-    ]);
-    remember(form, "updates");
-    const formFields = () => Object.assign({}, readForm(form), playFields());
-    const run = async (overrides) => {
-      if (overrides) {
-        const own = {};
-        Object.keys(overrides).forEach((k) => { if (k === "mc_version" || k === "loader") own[k] = overrides[k]; else setField(form, k, overrides[k]); });
-        if (Object.keys(own).length) setPlay(own);
+    const tight = (extra) => el("div", { class: "mc-results mc-results--tight", "aria-live": "polite" }, extra || []);
+    const watchHost = tight();
+    const watchOut = tight();
+    const checkHost = tight();
+    const applyHost = tight();
+    const undoOut = tight();
+    const undoHost = tight();
+    let watched = null;                // null = the list was not read yet
+    let working = false;               // one update or undo at a time
+    let shown = false;
+    let formMode = "add";
+    let editing = null;
+
+    // ---- watched folders
+    const paintWatched = () => {
+      if (watched) renderWatched(watched, watchHost, { edit: (w) => openForm("set", w), remove: (w) => runWatch("remove", { folder: w.folder, exact: true }),
+        auto: (w, on) => runWatch("set", Object.assign({}, w, { auto: on, exact: true })) });
+    };
+    const readWatched = async () => {
+      busy(watchHost, "Reading the watched list\u2026", 0);
+      const r = await runTool("mc_watch", watchArgs("list", {}, false), {});
+      if (r && r.ok !== false && Array.isArray(r.watched)) { watched = watchedOf(r); paintWatched(); return; }
+      if (r && r.ok !== false) {
+        watchHost.textContent = "";
+        watchHost.removeAttribute("aria-busy");
+        watchHost.appendChild(notice("warn", "Jarvis answered, but this panel could not find the list of watched folders in the answer. It is in the Raw answer below."));
+        watchHost.appendChild(rawDetails(r));
+        return;
       }
-      const args = updatesArgs(formFields());
-      queueHost.textContent = "";
-      busy(results, "Reading the folder and asking Modrinth\u2026", 0);
-      const r = await runTool("check_mc_updates", args, {});
-      // Every key of the answer the panel does not draw stays visible in the Raw answer fold.
-      showResult(results, r, { root, readOnly: true, noFacts: true, noTables: true, retry: () => run(), body: (res, host) => {
-        if (res && res.ok !== false) renderUpdates(res, host, { form, again: run, queue: (u) => {
-          const f = updateDownloadFields(u, formFields());
-          if (!f) { say("Jarvis gave no file to queue for this one.", "warn"); return Promise.resolve(); }
-          return runDownloadFlow(queueHost, f, root);
-        } });
+      showResult(watchHost, r, { readOnly: true, noFacts: true, noTables: true, retry: readWatched });
+    };
+
+    const folderBox = input("folder", "", { placeholder: "D:/Minecraft/mods" });
+    const browse = el("button", { type: "button", class: "btn btn--sm btn--ghost", text: "Browse\u2026", onclick: () => pickFolder(form, "folder") });
+    const formTitle = el("div", { class: "mc-subhead" });
+    const saveBtn = el("button", { type: "button", class: "btn btn--primary", text: "Add folder" });
+    const tickBox = el("input", { type: "checkbox", name: "auto" });
+    const form = el("div", { class: "mc-card mc-watchform", hidden: true }, [
+      formTitle,
+      field("Folder", el("div", { class: "mc-row" }, [folderBox, browse]), "Only this folder is read, not its sub-folders."),
+      el("div", { class: "mc-grid" }, [
+        field("Name (optional)", input("label", "", { placeholder: "for example: my survival mods" })),
+        field("Minecraft version (optional)", input("mc_version", "", { placeholder: "1.20.1" })),
+        field("Loader (optional)", select("loader", loaderOptions("the check will ask"), "")),
+        field("Include", select("channel", CHANNEL_CHOICES, "release")),
+      ]),
+      el("div", { class: "mc-small mc-muted", text: "Version and loader are optional. Left empty, the check will ask you which one a file is for and will not guess. To go back to \u201casking\u201d for a folder that has them, remove it and add it again." }),
+      el("label", { class: "mc-check" }, [tickBox, el("span", { text: "Automatic" })]),
+      el("div", { class: "mc-small mc-muted", text: AUTO_WORDS }),
+      el("div", { class: "mc-actions" }, [
+        el("button", { type: "button", class: "btn btn--sm btn--ghost", text: "Use what I play (bar at the top)", onclick: () => {
+          if (S.play.mc_version) setField(form, "mc_version", S.play.mc_version);
+          if (S.play.loader) setField(form, "loader", S.play.loader);
+        } }),
+        el("button", { type: "button", class: "btn btn--outline", text: "Cancel", onclick: () => { form.hidden = true; } }),
+        saveBtn,
+      ]),
+    ]);
+    const openForm = (mode, w) => {
+      formMode = mode;
+      editing = w || null;
+      formTitle.textContent = mode === "add" ? "Add a folder to watch" : "Change this watched folder";
+      setField(form, "folder", w ? w.folder : "");
+      setField(form, "label", w ? w.label : "");
+      setField(form, "mc_version", w ? w.mc_version : "");
+      setField(form, "loader", w ? w.loader : "");
+      setField(form, "channel", w ? w.channel : "release");
+      setField(form, "auto", w ? w.auto : false);
+      folderBox.readOnly = mode === "set";
+      browse.hidden = mode === "set";
+      saveBtn.textContent = mode === "add" ? "Add folder" : "Save changes";
+      form.hidden = false;
+      (mode === "set" ? form.querySelector('[name="label"]') : folderBox).focus();
+    };
+
+    const runWatch = async (action, f) => {
+      busy(watchOut, "Checking, then asking you once\u2026", 0);
+      const out = await watchSteps(action, f, runTool);
+      showStepOutcome(watchOut, out, null);
+      const ok = out.stage === "done" && !!out.result && out.result.ok !== false && classify(out.result).kind === "ok";
+      if (ok) { form.hidden = true; announce("Watched folders changed."); await readWatched(); }
+      else paintWatched();                 // a tick the owner then cancelled goes back to what the list says
+      return ok;
+    };
+    saveBtn.addEventListener("click", (e) => guarded(e.currentTarget, () => {
+      const f = readForm(form);
+      if (formMode === "set" && editing) { f.folder = editing.folder; f.exact = true; }
+      return runWatch(formMode, f);
+    }));
+
+    // ---- check and update
+    const apply = async (u, paint) => {
+      if (working) { say("Another update or undo is still running. Wait for it to finish.", "warn"); return; }
+      working = true;
+      try {
+        busy(applyHost, "Checking, then asking you once\u2026", 0);
+        const out = await applySteps(u.id, runTool);
+        showStepOutcome(applyHost, out, { done: "Replaced." });
+        if (out.outcome) paint(out.outcome);
+        if (out.outcome && out.outcome.kind === "done") { announce("Replaced."); readReplaced(); }
+      } finally { working = false; }
+    };
+    const runCheck = async () => {
+      applyHost.textContent = "";
+      busy(checkHost, "Reading the watched folders and asking the sites\u2026", 0);
+      const r = await runTool("check_mc_watched", {}, {});
+      showResult(checkHost, r, { readOnly: true, noFacts: true, noTables: true, retry: runCheck, body: (res, host) => {
+        if (!res || res.ok === false) return;
+        if (Array.isArray(res.watched)) { watched = watchedOf(res); paintWatched(); }
+        renderFindings(res, host, { apply });
       } });
     };
-    form.appendChild(el("div", { class: "mc-actions" }, [
-      el("button", { type: "button", class: "btn btn--primary", text: "Check for newer files", onclick: (e) => guarded(e.currentTarget, () => run()) })]));
-    root.appendChild(form); root.appendChild(results); root.appendChild(queueHost);
-    results.appendChild(el("div", { class: "mc-empty", text: "Pick the folder your mods are in. Jarvis compares the files there with Modrinth and lists the ones that have a newer file for your version and loader." }));
-    root._focusFirst = () => form.querySelector("input");
+
+    // ---- undo
+    const undo = async (x, paint) => {
+      if (working) { say("Another update or undo is still running. Wait for it to finish.", "warn"); return; }
+      working = true;
+      try {
+        busy(undoOut, "Checking, then asking you once\u2026", 0);
+        const out = await undoSteps(x.id, runTool);
+        showStepOutcome(undoOut, out, { done: "Put back." });
+        if (out.outcome) paint(out.outcome);
+        if (out.outcome && out.outcome.kind === "done") { announce("Put back."); readReplaced(); }
+      } finally { working = false; }
+    };
+    const readReplaced = async () => {
+      busy(undoHost, "Reading the list of replacements\u2026", 0);
+      const r = await runTool("list_mc_replaced", {}, {});
+      showResult(undoHost, r, { readOnly: true, noFacts: true, noTables: true, retry: readReplaced, body: (res, host) => {
+        if (res && res.ok !== false) renderReplaced(res, host, { undo });
+      } });
+    };
+
+    // ---- the tab
+    const head = (id, title, hint) => [
+      el("div", { class: "mc-subhead mc-section__title", id, role: "heading", "aria-level": "3", text: title }),
+      hint ? el("p", { class: "mc-note-inline", text: hint }) : null,
+    ];
+    const addBtn = button("Add a folder", "btn--primary", () => openForm("add", null));
+    root.appendChild(el("div", { class: "mc-explain" }, [el("div", { text: RUNS_HERE })]));
+    root.appendChild(el("section", { class: "mc-section", "aria-labelledby": "mc-upd-watch" }, head("mc-upd-watch", "Watched folders",
+      "Jarvis checks and updates only the folders on this list, and only a file it can match exactly: it never swaps in a similar one. " + AUTO_WORDS)
+      .concat([el("div", { class: "mc-actions mc-actions--start" }, [addBtn, button("Refresh the list", "btn--outline", (e) => guarded(e.currentTarget, readWatched))]),
+        form, watchOut, watchHost])));
+    root.appendChild(el("section", { class: "mc-section", "aria-labelledby": "mc-upd-check" }, head("mc-upd-check", "Check and update",
+      "Check now reads each watched folder and asks the sites about the files in it; only file hashes are sent. Update shows you exactly what it will do before it does anything.")
+      .concat([el("div", { class: "mc-actions mc-actions--start" }, [button("Check now", "btn--primary", (e) => guarded(e.currentTarget, runCheck))]),
+        checkHost, applyHost])));
+    root.appendChild(el("section", { class: "mc-section", "aria-labelledby": "mc-upd-undo" }, head("mc-upd-undo", "Undo",
+      "The last files Jarvis replaced. Undo puts the old file back, after showing you what it will do.")
+      .concat([el("div", { class: "mc-actions mc-actions--start" }, [button("Refresh the list", "btn--outline", (e) => guarded(e.currentTarget, readReplaced))]),
+        undoOut, undoHost])));
+    checkHost.appendChild(el("div", { class: "mc-empty", text: "Press Check now to see which files in the watched folders have a newer file for the version and loader chosen for them." }));
+    root._focusFirst = () => addBtn;
+    // Read the two lists the first time the tab is shown (not while the panel opens on another tab).
+    root._onShow = () => {
+      if (shown) return;
+      shown = true;
+      readWatched();
+      readReplaced();
+    };
     return root;
   }
 
@@ -1972,6 +2353,8 @@
       b.classList.toggle("is-active", on);
     });
     TAB_LIST.forEach((t) => { if (S.tabs[t[0]]) S.tabs[t[0]].hidden = t[0] !== id; });
+    const shownTab = S.tabs[id];
+    if (shownTab && typeof shownTab._onShow === "function") shownTab._onShow();      // the Updates tab reads its two lists once
   }
 
   // Left / Right / Home / End move between tabs, as on any tab list.
@@ -2008,7 +2391,7 @@
       el("div", { class: "panel__corner panel__corner--tl" }), el("div", { class: "panel__corner panel__corner--br" }),
       el("div", { class: "menu-panel__head" }, [
         el("div", { class: "menu-panel__titles" }, [el("div", { class: "menu-panel__title", text: "MINECRAFT" }),
-          el("div", { class: "menu-panel__subtitle", text: "Looks things up, checks folders, queues downloads and writes pack files. It never opens, runs or changes a file you already have." })]),
+          el("div", { class: "menu-panel__subtitle", text: "Looks things up, queues downloads and writes pack files. In a folder you chose to watch it can swap in a newer file after you say yes: the old file goes to a backup folder, never deleted. It never opens or runs a file." })]),
         el("button", { class: "modal__close", type: "button", "aria-label": "Close", text: "\u00d7", onclick: close }),
       ]),
       buildPlayBar(),
@@ -2055,11 +2438,15 @@
     open, close,
     _pure: { text, count, size, day, plural, safeUrl, searchArgs, projectArgs, downloadArgs, optifineListArgs, optifineArgs, parseEntries,
       packArgs, problem, classify, wantsNoKeyHint, isOutsideLibrary, TOOLS, WRITERS, LIBRARY_FOLDER,
-      updatesArgs, updateDownloadFields, updateTrayItem, whyWords, folderFromWords, clarifyNeeds, needsFolder, crossDirection, skipWords, crossSummary,
+      whyWords, crossDirection, skipWords, crossSummary,
       downloadNeeds, argsText, mayPassYes, confirmPlan, dryRunNeedsNoDialog,
+      watchArgs, applyArgs, watchedOf, findingsOf, problemLines, needsAnswer, applyOutcome, replacedOf, replacedListed, watchedWords, safeId, pick, isWatchRead,
+      RUNS_HERE, AUTO_WORDS, APPLY_STATES,
       playOf, versionHint, playWords, homeSource, fitOf, reasonWords, sourceProblems, recommendWords,
       trayKey, trayItemFrom, trayAdd, trayRemove, trayHas, trayDownloadFields, trayProblems, trayForPack, entriesText, refOf, batchBody },
     // The write flows and the one function that talks to the server, for tests/verify_minecraft_panel.js (a stub fetch and a stub JarvisUI).
-    _flow: { runTool, downloadSteps, batchDownloadSteps, optifineSteps, packCheck, packWrite },
+    _flow: { runTool, downloadSteps, batchDownloadSteps, optifineSteps, packCheck, packWrite, watchSteps, applySteps, undoSteps },
+    // The drawing functions for the Updates tab, for tests/verify_minecraft_panel.js (it passes a tiny stand-in for `document`).
+    _dom: { renderWatched, renderFindings, renderReplaced, showStepOutcome },
   };
 })(typeof window !== "undefined" ? window : globalThis);

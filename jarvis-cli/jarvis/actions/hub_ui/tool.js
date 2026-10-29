@@ -1266,6 +1266,12 @@ function engineSettingsNote(e) {
   if (!e || engineConfigure(e)) return "";
   return e.config_file ? "Set up in " + e.config_file + "." : "No settings.";
 }
+// The providers the Sources tab lists: every one except those that only report and apply updates (`updates_only`, either on the
+// provider itself or in the set of ids the hub's updates answer gave).  They supply no downloads, so they are not download sources.
+function visibleSourceProviders(list, onlyIds) {
+  const ids = onlyIds && typeof onlyIds.has === "function" ? onlyIds : new Set();
+  return (Array.isArray(list) ? list : []).filter((p) => p && p.updates_only !== true && !ids.has(p.id));
+}
 function sourcesSummary(d) {
   if (!d) return "reading the sources\u2026";
   const engines = d.engines || [];
@@ -1475,122 +1481,6 @@ function torrentGroupMeta(rows, info) {
   return done + "/" + rows.length + " done" + of;
 }
 
-// ---- Updates (N23 part f): the words and the order of the Updates tab.  Pure.  Every name, version, source and message in a
-// finding comes from another program's output, so these functions only CHOOSE words and order; the panel draws them with
-// textContent.  The hub never compares versions (N23 part a): "installed -> available" is the two texts the source gave.
-const UPDATES_NOTE = "This list only tells you. Nothing here installs or upgrades anything: ask Jarvis, or update it in the program itself. "
-  + "A program whose update checks are switched off in Settings > Downloads is not listed.";
-
-function updText(v) { return typeof v === "string" ? v.trim() : ""; }
-
-function updateVersionText(f) {
-  return (updText(f && f.installed) || "version not stated") + " \u2192 " + (updText(f && f.available) || "a newer version");
-}
-
-function updateSizeText(f) {
-  const n = num(f && f.size_bytes);
-  return n !== null && n > 0 ? fmtBytes(n) : "";
-}
-
-// The small line under a finding: the size when the source gave one, the source's name, and when it was last confirmed.
-function updateMetaParts(f) {
-  const out = [];
-  const size = updateSizeText(f);
-  if (size) out.push(size);
-  const via = updText(f && f.source);
-  if (via) out.push("via " + via);
-  if (num(f && f.age_s) !== null) out.push("checked " + fmtAgo(f.age_s));
-  return out;
-}
-
-// The health line of one provider: when it was last checked, what failed, and which part (the `problems` the hub keeps).
-function updateHealthText(p) {
-  if (!p || typeof p !== "object") return { text: "", tone: "" };
-  const age = num(p.age_s) !== null ? fmtAgo(p.age_s) : "";
-  const problems = (Array.isArray(p.problems) ? p.problems : []).map((x) => {
-    const src = updText(x && x.source);
-    return (src ? src + ": " : "") + (updText(x && x.error) || "it failed");
-  });
-  if (p.status === "checking") return { text: "Checking now\u2026", tone: "" };
-  if (p.status === "failed") {
-    const why = updText(p.error) || "it failed";
-    return { text: "The last check failed: " + why + (p.count && age ? ". The list below is from " + age + "." : "."), tone: "bad" };
-  }
-  if (p.status === "partial") return { text: "Checked " + age + ", but not everything: " + problems.join("; ") + ".", tone: "warn" };
-  if (p.status === "never") return { text: "Not checked yet. The first check runs a few minutes after the hub daemon starts, or press Check now.", tone: "" };
-  if (p.status === "pushed") return { text: "This program reports its own updates; the hub does not check it.", tone: "" };
-  const h = num(p.update_interval_h);
-  return { text: "Checked " + (age || "a while ago") + (h !== null ? ". Looks again every " + (Math.round(h * 10) / 10) + " h." : "."), tone: "" };
-}
-
-// One entry per program that has findings or a health line, programs A to Z, findings A to Z inside.
-function updateGroups(data) {
-  const d = data && typeof data === "object" ? data : {};
-  const rows = Array.isArray(d.updates) ? d.updates.filter((f) => f && typeof f === "object" && updText(f.provider) && updText(f.id)) : [];
-  const byId = new Map();
-  (Array.isArray(d.providers) ? d.providers : []).forEach((p) => {
-    if (p && updText(p.provider)) byId.set(p.provider, { id: p.provider, label: updText(p.label) || p.provider, rows: [], health: p });
-  });
-  rows.forEach((f) => {
-    if (!byId.has(f.provider)) byId.set(f.provider, { id: f.provider, label: updText(f.provider_label) || f.provider, rows: [], health: null });
-    byId.get(f.provider).rows.push(f);
-  });
-  const key = (v) => String(v || "").toLowerCase();
-  const groups = Array.from(byId.values());
-  groups.forEach((g) => g.rows.sort((a, b) => key(a.title || a.id).localeCompare(key(b.title || b.id)) || key(a.id).localeCompare(key(b.id))));
-  groups.sort((a, b) => key(a.label).localeCompare(key(b.label)) || key(a.id).localeCompare(key(b.id)));
-  return groups;
-}
-
-// The line above the list.
-function updateSummaryText(data) {
-  if (!data || typeof data !== "object") return "";
-  const n = num(data.count) || 0;
-  const provs = Array.isArray(data.providers) ? data.providers : [];
-  if (!provs.length && !n) return "No program has an update check yet.";
-  let t = n === 0 ? "No updates found" : n + (n === 1 ? " update" : " updates") + " available";
-  const ages = provs.map((p) => num(p && p.age_s)).filter((v) => v !== null);
-  if (ages.length) t += DOT + "last checked " + fmtAgo(Math.min.apply(null, ages));
-  if (data.daemon_alive === false) t += DOT + "the hub daemon isn't running, so nothing is checked";
-  return t;
-}
-
-// The number on the tab (nothing when there are no findings; the badge is the signal, N23c).
-function updateBadge(data) {
-  const n = data ? num(data.count) : null;
-  return n !== null && n > 0 ? (n > 99 ? "99+" : String(n)) : "";
-}
-
-// What to say after Check now.  `started` is how many checks the daemon will begin.
-function updateCheckNotice(r) {
-  const res = r && Array.isArray(r.results) ? r.results.filter((x) => x && typeof x === "object") : [];
-  if (!res.length) return { text: String((r && r.message) || "No program has an update check that is switched on."), level: "info", started: 0 };
-  const started = res.filter((x) => x.status === "requested").length;
-  if (started) return { text: started === 1 ? "Checking now. The answer appears here in a few seconds."
-    : "Checking " + started + " programs now. The answers appear here in a few seconds.", level: "info", started: started };
-  if (res.some((x) => x.status === "already_checking")) return { text: "Already checking. The answer appears here when it finishes.", level: "info", started: 0 };
-  const first = res.find((x) => updText(x.message));
-  return { text: first ? updText(first.message).slice(0, 200) : "Nothing was started.", level: "warn", started: 0 };
-}
-
-// How long to wait before the next read: quick while a check runs or was just asked for, otherwise slow; the badge still follows.
-function updatesPollDelay(o) {
-  const x = o || {};
-  if (x.visible) return x.checking || x.recent ? 4000 : 20000;
-  return 60000;
-}
-
-// What the list shows, with ages in whole minutes, so an unchanged list is not redrawn on every read.
-function updatesSignature(data) {
-  const d = data && typeof data === "object" ? data : {};
-  const mins = (v) => (num(v) === null ? null : Math.round(v / 60));
-  return JSON.stringify({
-    u: (Array.isArray(d.updates) ? d.updates : []).map((f) => [f.provider, f.id, f.title, f.installed, f.available, f.size_bytes, f.source, mins(f.age_s)]),
-    p: (Array.isArray(d.providers) ? d.providers : []).map((p) => [p.provider, p.label, p.status, p.error, p.problems, p.count, p.can_check, mins(p.age_s), p.update_interval_h]),
-    a: d.daemon_alive === true,
-  });
-}
-
 const pure = {
   ACTIVE, FINAL, VIEWS, KIND_ICON, fmtBytes, fmtSpeed, fmtEta, fmtAgo, percentText, speedText, etaText,
   sizeText, statusText, barLook, rowActions, sourceKey, sourceLabel, viewMatches, viewCounts,
@@ -1607,8 +1497,7 @@ const pure = {
   queueOrder, moveInOrder, stepInOrder, canReorder, reorderNote, applyOrder,
   groupIdOf, groupWaiting, groupOrderKeys, moveGroupInOrder, stepGroupInOrder, canReorderGroup, groupReorderNote,
   PICK_MAX, PICK_QUICK, torrentSource, selectableFile, torrentTree, pickerQuick, pickerFilter, pickerTotals, pickerTotalText, pickerBlock, torrentGroupMeta,
-  UPDATES_NOTE, updateVersionText, updateSizeText, updateMetaParts, updateHealthText, updateGroups, updateSummaryText, updateBadge, updateCheckNotice,
-  updatesPollDelay, updatesSignature,
+  visibleSourceProviders,
   DRY_RUN_CHUNK, ADD_LIST_SHOWN, reasonWords, linkEngineWord, linkKindOf, torrentLinkCount, describeLinks, chunked, mergeDecisions, ignoredNote, looksAbsolute,
   addButtonLabel, groupStates, VIDEO_QUALITIES, VIDEO_CONTAINERS, VIDEO_CODECS, AUDIO_FORMATS, VIDEO_FLAGS, videoOptionsFromForm,
   followUpFor, startWords, describeAdd, remainingLinks,
@@ -1631,7 +1520,7 @@ const S = {
   saving: false,
   tab: "downloads", live: false, liveAt: 0, es: null, liveTimer: 0, dragId: "", dragGroup: "", picker: null,
   sources: null, srcTimer: 0, srcLoaded: false, srcBusy: false,
-  upd: null, updLoaded: false, updBusy: false, updAsking: false, updTimer: 0, updFastUntil: 0,     // Updates tab (N23 part f)
+  updOnly: null, updOnlyAt: 0,      // ids of the providers that only report and apply updates (they are not download sources)
   // History (brief 25): the rows loaded so far (a page at a time), the cursor of the next page, the hub's summary of the whole
   // filtered set, the filters, the selected ids and how much of the list is already drawn.
   hist: { rows: [], next: null, more: false, loaded: false, busy: false, seq: 0, state: "all", search: "", sort: "newest", from: "", to: "",
@@ -3068,10 +2957,10 @@ async function askFirst(title, body, label) {
 // ---- tabs
 
 function setTab(name, focus) {
-  if (["downloads", "sources", "updates", "history"].indexOf(name) === -1) return;
+  if (["downloads", "sources", "history"].indexOf(name) === -1) return;
   S.tab = name;
   $("#hub").dataset.tab = name;
-  ["downloads", "sources", "updates", "history"].forEach((t) => {
+  ["downloads", "sources", "history"].forEach((t) => {
     const btn = $("#tab" + t.charAt(0).toUpperCase() + t.slice(1));
     const on = t === name;
     btn.setAttribute("aria-selected", on ? "true" : "false");
@@ -3080,14 +2969,11 @@ function setTab(name, focus) {
   });
   $("#body").hidden = name !== "downloads";
   $("#sourcesPane").hidden = name !== "sources";
-  $("#updatesPane").hidden = name !== "updates";
   $("#historyPane").hidden = name !== "history";
   clearInterval(S.srcTimer);
   if (name === "sources") {
     loadSources(false);
     S.srcTimer = setInterval(() => { if (!doc.hidden) loadSources(false); }, 10000);
-  } else if (name === "updates") {
-    loadUpdates(false);
   } else if (name === "history") {
     loadHistory();
   }
@@ -3097,7 +2983,8 @@ $("#tabs").addEventListener("click", (e) => {
   if (b) setTab(b.getAttribute("data-tab"), false);
 });
 $("#tabs").addEventListener("keydown", (e) => {
-  const order = ["downloads", "sources", "updates", "history"];
+  if (!(e.target && e.target.closest && e.target.closest('[role="tab"]'))) return;   // the "Updates are now in Menu > Updates" link is not a tab
+  const order = ["downloads", "sources", "history"];
   const at = order.indexOf(S.tab);
   let to = -1;
   if (e.key === "ArrowRight") to = (at + 1) % order.length;
@@ -3180,8 +3067,9 @@ async function loadSources(manual) {
   if (manual) setChecking(true);
   try {
     const r = await hubFetch("/api/hub/sources");
+    const only = await updatesOnlyIds();
     if (S.closed) return;
-    S.sources = { engines: Array.isArray(r.engines) ? r.engines : [], providers: Array.isArray(r.providers) ? r.providers : [] };
+    S.sources = { engines: Array.isArray(r.engines) ? r.engines : [], providers: visibleSourceProviders(r.providers, only) };
     S.srcLoaded = true;
     renderSources();
   } catch (err) {
@@ -3289,125 +3177,27 @@ function renderSources() {
 }
 $("#srcRefresh").addEventListener("click", () => loadSources(true));
 
-// ---- Updates (N23 part f): what the hub found out of date.  It only tells; there is no Update button (N23d), no source filter
-// (N22 part d) and no notification (N23c: the number on the tab is the signal).  Every word that came from another program is
-// drawn with textContent (el() never builds markup).  Reads are GET /api/hub/updates; Check now and Ignore this version are
-// writes (POST, with the X-Jarvis-Hub header, refused by the hub for anything but this page).
+// ---- Updates moved out of this panel: Menu > Updates (web/public/updates-panel.js) is the one screen for them now.  This panel
+// keeps a small link to it, and one fact from the hub's updates answer: which providers only report and apply updates
+// (`updates_only`).  They supply no downloads, so they are not listed as download sources.
 
-function setUpdChecking(on) {
-  $("#updatesPane").querySelectorAll(".upd-check").forEach((b) => { b.disabled = !!on; b.textContent = on ? "Asking\u2026" : "Check now"; });
-}
+$("#updatesLink").addEventListener("click", () => {
+  const panel = window.JarvisUpdates;
+  if (panel && typeof panel.open === "function") panel.open();
+  else toast("The Updates panel is in the main menu: Menu > Updates.", "info");
+});
 
-async function loadUpdates(manual) {
-  if (S.updBusy) return;
-  S.updBusy = true;
+// The ids of the providers the hub marks `updates_only`, from its updates answer (the sources answer need not carry the flag).
+// Read at most once a minute; a read that fails leaves the list as it was and the providers listed.
+async function updatesOnlyIds() {
+  if (S.updOnly && Date.now() - S.updOnlyAt < 60000) return S.updOnly;
   try {
     const r = await hubFetch("/api/hub/updates");
-    if (S.closed) return;
-    S.upd = r;
-    S.updLoaded = true;
-    renderUpdates();
-  } catch (err) {
-    if (S.closed) return;
-    if (!S.updLoaded) $("#updSummary").textContent = message(err) || "The updates couldn't be read.";
-    else if (manual) toast(message(err) || "The updates couldn't be read.", "warn");
-  } finally {
-    S.updBusy = false;
-    scheduleUpdates();
-  }
+    S.updOnly = new Set((Array.isArray(r.providers) ? r.providers : []).filter((p) => p && p.updates_only === true && typeof p.provider === "string").map((p) => p.provider));
+    S.updOnlyAt = Date.now();
+  } catch (e) { /* keep what we had */ }
+  return S.updOnly || new Set();
 }
-
-function scheduleUpdates() {
-  clearTimeout(S.updTimer);
-  if (S.closed) return;
-  const checking = !!(S.upd && Array.isArray(S.upd.providers) && S.upd.providers.some((p) => p && p.status === "checking"));
-  const delay = updatesPollDelay({ visible: S.tab === "updates", checking: checking, recent: Date.now() < S.updFastUntil });
-  S.updTimer = setTimeout(() => { if (doc.hidden) scheduleUpdates(); else loadUpdates(false); }, delay);
-}
-
-function renderUpdateRow(f) {
-  const meta = updateMetaParts(f);
-  return el("div", { cls: "upd__row", attrs: { role: "listitem", "data-provider": f.provider, "data-id": f.id } }, [
-    el("div", { cls: "upd__main" }, [
-      el("div", { cls: "upd__title", text: f.title || f.id, title: f.title || f.id }),
-      el("div", { cls: "upd__ver", text: updateVersionText(f) }),
-      meta.length ? el("div", { cls: "upd__meta" }, meta.map((t) => el("span", { text: t }))) : null,
-    ]),
-    el("button", {
-      cls: "btn btn--sm", text: "Ignore this version",
-      attrs: { type: "button", "aria-label": "Ignore this version of " + (f.title || f.id), title: "Hide this one until the program reports a different version." },
-      on: { click: (e) => ignoreUpdate(f, e.currentTarget) },
-    }),
-  ]);
-}
-
-function renderUpdateGroup(g) {
-  const health = updateHealthText(g.health);
-  const can = !!(g.health && g.health.can_check);
-  return el("div", { cls: "upd__group", attrs: { role: "group", "data-provider": g.id, "aria-label": g.label } }, [
-    el("div", { cls: "upd__head" }, [
-      el("span", { cls: "upd__name", text: g.label }),
-      el("span", { cls: "upd__n", text: g.rows.length + (g.rows.length === 1 ? " update" : " updates") }),
-      el("span", { cls: "upd__spacer" }),
-      can ? el("button", {
-        cls: "btn btn--sm upd-check", text: "Check now",
-        attrs: { type: "button", "aria-label": "Check " + g.label + " again", title: "Ask again. This only looks; it never installs or changes anything." },
-        on: { click: () => checkUpdates(g.id) },
-      }) : null,
-      health.text ? el("div", { cls: "upd__health" + (health.tone ? " is-" + health.tone : ""), text: health.text }) : null,
-    ]),
-  ].concat(g.rows.map(renderUpdateRow)));
-}
-
-function renderUpdates() {
-  const d = S.upd;
-  $("#updCount").textContent = updateBadge(d);
-  $("#updSummary").textContent = updateSummaryText(d);
-  if (!changed("updates", updatesSignature(d))) return;
-  const box = $("#updList");
-  box.textContent = "";
-  const groups = updateGroups(d);
-  if (!groups.length) box.appendChild(el("div", { cls: "hist__empty", text: "Programs that can report an available update appear here once they have been checked." }));
-  groups.forEach((g) => box.appendChild(renderUpdateGroup(g)));
-  box.appendChild(el("div", { cls: "upd__note", text: UPDATES_NOTE }));
-  setUpdChecking(S.updAsking);
-}
-
-// Check now: every program (provider "") or one.  The hub only sets a flag; the daemon's runner starts the check within a few
-// seconds, so the list is read again, quickly for a while, and the answer shows up by itself.
-async function checkUpdates(provider) {
-  if (S.updAsking) return;
-  S.updAsking = true;
-  setUpdChecking(true);
-  try {
-    const r = await hubFetch("/api/hub/updates/check", { provider: provider || "" });
-    const n = updateCheckNotice(r);
-    if (n.started) S.updFastUntil = Date.now() + 90000;
-    toast(n.text, n.level);
-  } catch (err) {
-    toast(message(err), "warn");
-  } finally {
-    S.updAsking = false;
-    setUpdChecking(false);
-  }
-  loadUpdates(false);
-}
-
-// Ignore this version: hides one finding until the source reports a different version.  Nothing is installed, changed or deleted,
-// but the tab has no way to bring an ignored one back, so it asks first.
-async function ignoreUpdate(f, btn) {
-  if (!(await askFirst("Ignore this version?", "It stays hidden until the program reports a different version. Nothing is installed, changed or deleted.", "Ignore"))) return;
-  btn.disabled = true;
-  try {
-    await hubFetch("/api/hub/updates/dismiss", { provider: f.provider, id: f.id });
-  } catch (err) {
-    toast(message(err), "warn");
-    btn.disabled = false;
-    return;
-  }
-  loadUpdates(false);
-}
-$("#updCheck").addEventListener("click", () => checkUpdates(""));
 
 // ---- History (brief 25, N21)
 
@@ -4028,7 +3818,7 @@ $("#addChoose").addEventListener("click", () => {
 
 host.onClose(() => {
   S.closed = true; clearTimeout(S.timer); clearTimeout(S.holdTimer); clearTimeout(hintTimer);
-  clearInterval(S.liveTimer); clearInterval(S.srcTimer); clearTimeout(histTimer); clearTimeout(S.updTimer);
+  clearInterval(S.liveTimer); clearInterval(S.srcTimer); clearTimeout(histTimer);
   if (S.es) { S.es.close(); S.es = null; }
 });
 
@@ -4038,5 +3828,4 @@ host.onClose(() => {
   render();
   poll();
   startLive();
-  loadUpdates(false);                              // the number on the Updates tab
 })();

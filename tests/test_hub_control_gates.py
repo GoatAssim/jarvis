@@ -4,18 +4,18 @@ Until build 168 a Discord / Instagram chat guest was OFFERED dl_pause, dl_resume
 dl_prefs (and dl_retry, dl_open, dl_providers, dl_provider_prefs, dl_import_legacy, hub_doctor, hub_demo_provider), and their
 handlers did not refuse it.  What this file holds:
 
-  * every one of the 15 handlers (the 13 of actions/download_hub.py plus dl_updates and dl_updates_check of
+  * every one of the 16 handlers (the 13 of actions/download_hub.py plus dl_updates, dl_updates_check and dl_updates_apply of
     actions/download_updates.py) refuses a chat guest, a sender with no is_owner flag and every unreadable sender
     (bad JSON, JSON that is not an object, JSON nested too deep to read) BEFORE it touches the service, the store,
     a provider, the doctor, the demo or the updates code.  A recording stand-in for each of those proves nothing ran
     (the call list stays empty), for every argument shape that could do something (a read, a write, a test notification);
   * the refusal is one plain sentence that starts with the tool name and says it is the owner's;
   * the owner (on a chat platform) and no chat context at all (the PC, a scheduled job) get past the gate;
-  * the 15 names are in tools.OWNER_ONLY_TOOLS, are real tools, are hidden from a guest by tools.hidden_from_sender() and
+  * the 16 names are in tools.OWNER_ONLY_TOOLS, are real tools, are hidden from a guest by tools.hidden_from_sender() and
     not offered by tools.schemas_for_tools(), get no schema from get_tool_schema for a guest, and are all offered to the owner;
   * a guest keeps dl_list, dl_status and present_download_status (nothing else of the group), and those three are not in the set;
   * the guest rule of download_hub and of download_updates agree on every input, JSON nested too deep included;
-  * the Test Checklist entries no longer say "Known gap" and each of the 15 says "Owner only".
+  * the Test Checklist entries no longer say "Known gap" and each of the 16 says "Owner only".
 
 No network, no daemon, no Steam, no Stremio.  Run: python tests/test_hub_control_gates.py
 """
@@ -68,7 +68,7 @@ OWNERS = [("the owner on a chat platform", OWNER), ("no chat context (the PC, a 
 
 HUB_NAMES = ("dl_pause", "dl_resume", "dl_cancel", "dl_retry", "dl_schedule", "dl_open", "dl_settings", "dl_prefs",
              "dl_providers", "dl_provider_prefs", "dl_import_legacy", "hub_doctor", "hub_demo_provider")
-UPDATE_NAMES = ("dl_updates", "dl_updates_check")
+UPDATE_NAMES = ("dl_updates", "dl_updates_check", "dl_updates_apply")
 ALL_NAMES = HUB_NAMES + UPDATE_NAMES
 GUEST_KEEPS = ("dl_list", "dl_status", "present_download_status")
 
@@ -118,6 +118,7 @@ _orig = {
     "svc": dh._svc, "Store": store_mod.Store, "doctor": doctor.run, "legacy": legacy.import_legacy,
     "demo": (demo.start, demo.stop, demo.clear, demo.status),
     "present": updates.present, "request_check": updates.request_check, "du_store": du._store,
+    "request_apply": updates.request_apply, "dry_run": updates.dry_run,
 }
 dh._svc = lambda: (reached.append("_svc()"), REC)[1]
 store_mod.Store = SpyStore
@@ -127,6 +128,8 @@ demo.start, demo.stop, demo.clear, demo.status = (Spy("demo.start"), Spy("demo.s
 updates.present = Spy("updates.present", {"updates": [], "count": 0, "checked_at": None, "providers": [], "problems": [],
                                           "daemon_alive": True})
 updates.request_check = Spy("updates.request_check", {"ok": True, "results": []})
+updates.request_apply = Spy("updates.request_apply", {"ok": True, "queued": 0, "results": []})
+updates.dry_run = Spy("updates.dry_run", {"ok": True, "plan": "a plan"})
 du._store = Spy("du._store", REC)
 
 # Every argument shape that could DO something, per tool (a guest must be refused for each of them).
@@ -146,10 +149,12 @@ SHAPES = {
     "hub_demo_provider": [{"action": "start"}, {"action": "stop"}, {"action": "clear"}, {"action": "status"}],
     "dl_updates": [{}, {"provider": "steam"}],
     "dl_updates_check": [{}, {"provider": "steam"}],
+    "dl_updates_apply": [{"provider": "steam", "id": "x"}, {"all": True}, {"all": True, "group": "mods"},
+                         {"provider": "steam", "id": "x", "dry_run": True}, {}],
 }
 HANDLERS = {name: dh.TOOLS[name] for name in HUB_NAMES}
 HANDLERS.update({name: du.TOOLS[name] for name in UPDATE_NAMES})
-check("the 13 hub tools and the two update tools all have a handler to test", len(HANDLERS) == 15 and set(SHAPES) == set(ALL_NAMES))
+check("the 13 hub tools and the three update tools all have a handler to test", len(HANDLERS) == 16 and set(SHAPES) == set(ALL_NAMES))
 
 # ------------------------------------------------------------------ a guest is refused by EVERY handler, before anything runs
 try:
@@ -188,6 +193,7 @@ try:
         "dl_prefs": {"set": {"rate_limit_kbps": 2048}}, "dl_providers": {},
         "dl_provider_prefs": {"id": "steam", "enabled": True}, "dl_import_legacy": {}, "hub_doctor": {},
         "hub_demo_provider": {"action": "status"}, "dl_updates": {}, "dl_updates_check": {},
+        "dl_updates_apply": {"provider": "steam", "id": "x"},
     }
     for name in ALL_NAMES:
         for label, raw in OWNERS:
@@ -205,6 +211,7 @@ finally:
     legacy.import_legacy = _orig["legacy"]
     demo.start, demo.stop, demo.clear, demo.status = _orig["demo"]
     updates.present, updates.request_check, du._store = _orig["present"], _orig["request_check"], _orig["du_store"]
+    updates.request_apply, updates.dry_run = _orig["request_apply"], _orig["dry_run"]
 
 # ------------------------------------------------------------------ the two copies of the guest rule agree, deep JSON included
 matrix = [None, "", "   ", GUEST, GUEST_IG, GUEST_NO_FLAG, OWNER, json.dumps({"platform": "discord", "user_id": "9", "is_owner": None}),
@@ -229,10 +236,10 @@ for name in GUEST_KEEPS:
 for label, raw in (("a Discord guest", GUEST), ("an Instagram guest", GUEST_IG), ("a sender with no is_owner flag", GUEST_NO_FLAG)):
     set_sender(raw)
     hidden = tools.hidden_from_sender()
-    check(f"{label}: all 15 are hidden by hidden_from_sender()", set(ALL_NAMES) <= hidden)
+    check(f"{label}: all 16 are hidden by hidden_from_sender()", set(ALL_NAMES) <= hidden)
     check(f"{label}: dl_list, dl_status and present_download_status are not", not (set(GUEST_KEEPS) & hidden))
     offered = [s["name"] for s in tools.schemas_for_tools(list(ALL_NAMES) + list(GUEST_KEEPS))]
-    check(f"{label}: schemas_for_tools offers the three read-only tools and none of the 15", sorted(offered) == sorted(GUEST_KEEPS))
+    check(f"{label}: schemas_for_tools offers the three read-only tools and none of the 16", sorted(offered) == sorted(GUEST_KEEPS))
     schema = tools.tool_get_tool_schema({"name": "dl_pause"})
     check(f"{label}: get_tool_schema('dl_pause') says owner-only and hands back no schema",
           "owner-only" in (schema.get("error") or "") and "schema" not in schema)
@@ -242,7 +249,7 @@ for label, raw in OWNERS:
     set_sender(raw)
     check(f"{label}: nothing of the hub is hidden", not (set(ALL_NAMES + GUEST_KEEPS) & tools.hidden_from_sender()))
     offered = [s["name"] for s in tools.schemas_for_tools(list(ALL_NAMES) + list(GUEST_KEEPS))]
-    check(f"{label}: all 18 are offered", sorted(offered) == sorted(ALL_NAMES + GUEST_KEEPS))
+    check(f"{label}: all 19 are offered", sorted(offered) == sorted(ALL_NAMES + GUEST_KEEPS))
     found = [m["name"] for m in tools.tool_search_tools({"query": "pause the download"}).get("matches", [])]
     check(f"{label}: search_tools finds dl_pause", "dl_pause" in found)
 set_sender("{not json")

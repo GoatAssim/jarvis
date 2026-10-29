@@ -2998,6 +2998,32 @@ app.post("/api/hub/updates/check", requireHubWrite, requireJarvis, (req, res) =>
 app.post("/api/hub/updates/dismiss", requireHubWrite, requireJarvis, (req, res) => hubAdmin(res, "updates_dismiss", {
   provider: hubText(req.body?.provider, 40), id: hubText(req.body?.id, 120),
 }));
+// Applying updates (the Updates rework): Apply one ({provider, id}) or Apply all ({all: true, group?, provider?}) queues the
+// findings for the daemon's apply runner; Preview ({provider, id}) asks the provider's own apply tool for a plan (it changes
+// nothing, but it starts that tool, so it can take a minute); Set changes one of the auto-update switches or a group /
+// provider setting ({scope, id, key, value}, the value checked again by hub/settings.py). All three are the owner's own
+// button (the same guards as Check now). The server never builds an install command: only a provider's apply tool changes
+// the machine, and the daemon runs it.
+app.post("/api/hub/updates/apply", requireHubWrite, requireJarvis, (req, res) => hubAdmin(res, "updates_apply", {
+  provider: hubText(req.body?.provider, 40), id: hubText(req.body?.id, 120),
+  all: req.body?.all === true, group: hubText(req.body?.group, 20),
+}));
+app.post("/api/hub/updates/dry-run", requireHubWrite, requireJarvis, (req, res) => hubAdmin(res, "updates_dry_run", {
+  provider: hubText(req.body?.provider, 40), id: hubText(req.body?.id, 120),
+}, 90000));
+// A setting value is a boolean, a number, a short string or a short list of short strings; anything else becomes null and
+// hub/settings.py refuses it. (Typed here only so the JSON that reaches Python is small and plain.)
+function hubSettingValue(value) {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") return value.slice(0, 80);
+  if (Array.isArray(value)) return value.slice(0, 20).map((v) => (typeof v === "string" ? v.slice(0, 20) : null));
+  return null;
+}
+app.post("/api/hub/updates/set", requireHubWrite, requireJarvis, (req, res) => hubAdmin(res, "updates_set", {
+  scope: hubText(req.body?.scope, 12), id: hubText(req.body?.id, 40), key: hubText(req.body?.key, 40),
+  value: hubSettingValue(req.body?.value),
+}));
 // Stremio (N9, brief 12): the status block (read) and the Locate... button's save (write: the owner's own
 // button only -- loopback Host, same-origin, X-Jarvis-Hub header, and hub_admin refuses an unattended process).
 // The browser sends paths the owner picked; hub_admin / hub/stremio/config.py check both files exist before saving.
@@ -3701,7 +3727,8 @@ app.post("/api/tools/run", requireJarvis, async (req, res) => {
   // of file and takes its default, which is no. Any other tool (the Debug panel, the Test Checklist)
   // ignores confirm_ui and runs exactly as before: no stdin, 30 s.
   const MINECRAFT_TOOLS = ["search_mc_mods", "get_mc_project", "list_optifine_versions", "download_mc_file",
-    "download_optifine", "make_modpack_file", "check_mc_updates"];
+    "download_optifine", "make_modpack_file", "check_mc_updates", "check_mc_watched", "apply_mc_update", "mc_watch",
+    "list_mc_replaced", "undo_mc_update"];
   const confirmUi = req.body?.confirm_ui === true && MINECRAFT_TOOLS.includes(name);
   const result = confirmUi
     ? await runJarvisOnce(["tool-run", name, argsJson, mode], 120000, { JARVIS_UI: "web" }, "y\n".repeat(64))

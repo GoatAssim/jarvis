@@ -721,6 +721,19 @@ OWNER_ONLY_TOOLS = frozenset({
     # name here must be a loaded tool (tests/test_l28b_followups.py checks it).
     "search_mc_mods", "get_mc_project", "list_optifine_versions", "download_optifine",
     "download_mc_file", "make_modpack_file", "check_mc_updates",
+    # The Updates rework: update sources and the tools that APPLY an update.  The names are pre-allocated across the
+    # eight Updates patches (the owner's agent brief, "Tool names"), so this block is the only place they are listed:
+    # dl_updates_apply is the chat tool that queues an apply (confirm-gated); check_* read what is installed (update
+    # tools), apply_* / undo_* / update_* change it (confirm-gated); mc_watch manages the watched mod folders;
+    # list_mc_replaced and inspect_modpack read the owner's mod files.  A guest is offered none of them.  Names whose
+    # tool arrives with another patch are skipped by the "names real tools" check in tests/test_l28b_followups.py
+    # (tests/test_l28b_followups.py `test_needs_updates_agents_names_are_real_tools` checks them once every patch is in).
+    # A provider file's own apply_tool (a custom tool in ~/.jarvis/tools/ declares one too) is hidden by
+    # hidden_from_sender() through _declared_apply_tools(), not by name here.
+    "dl_updates_apply",
+    "check_pkg_updates", "apply_pkg_update", "check_steam_updates", "apply_steam_update",
+    "check_mc_watched", "apply_mc_update", "mc_watch", "list_mc_replaced", "undo_mc_update",
+    "inspect_modpack", "update_modpack_file",
 })
 
 
@@ -756,16 +769,29 @@ def _generated_add_tools():
     return frozenset(n for n in names if isinstance(n, str) and n.startswith(GENERATED_ADD_PREFIX))
 
 
+def _declared_apply_tools():
+    """The apply_tool of every loaded TOOL_DOWNLOADS entry (the Updates rework).  A provider file, a custom one in
+    ~/.jarvis/tools/ included, names its own apply tool, and that name is not in OWNER_ONLY_TOOLS, so a guest would be
+    offered it; this adds them.  Empty when the registry is not built yet (callers only test `name in hidden`)."""
+    try:
+        return frozenset(e["apply_tool"] for e in (AUTO_DOWNLOADS or ())
+                         if isinstance(e, dict) and isinstance(e.get("apply_tool"), str))
+    except Exception:  # noqa: BLE001  (never let a guest check break the offer)
+        return frozenset()
+
+
 def hidden_from_sender():
     """Tool names that must not be offered to / listed for the current sender.
 
     Two independent reasons a name can be hidden: the sender is a guest in a
-    chat (OWNER_ONLY_TOOLS, and the generated dl_add_<id> tools), or this is a
+    chat (OWNER_ONLY_TOOLS, the generated dl_add_<id> tools and every declared
+    apply_tool of a download provider), or this is a
     Tool Maker panel turn (L.53), in which the conversation may only EDIT the
     editor's text, so the tools that write files or run programs are withheld
     (tool_maker.WITHHELD_TOOLS). The second is enforced at execution too -- see
     run_tool and withheld_refusal. Always a plain frozenset."""
-    base = (OWNER_ONLY_TOOLS | _generated_add_tools()) if _chat_sender_is_guest() else frozenset()
+    base = (OWNER_ONLY_TOOLS | _generated_add_tools() | _declared_apply_tools()) if _chat_sender_is_guest() \
+        else frozenset()
     return base | tool_maker.withheld_tools()
 
 

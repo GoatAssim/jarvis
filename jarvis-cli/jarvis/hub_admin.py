@@ -13,8 +13,11 @@ One verb serves three front-end pieces, the way `calendar-admin` serves the Cale
   * hiding a finished or lost provider row (`dismiss`; brief 19).  It hides, it deletes no row and no file;
   * the Updates tab (N23 part f): `updates` (read: the stored findings and how each provider's checks are going),
     `updates_check` (Check now: sets a flag the daemon's runner picks up; nothing is started here) and
-    `updates_dismiss` (Ignore this version: hides one finding).  The logic is `hub/updates_admin.py`; nothing
-    here installs, upgrades or removes anything.
+    `updates_dismiss` (Ignore this version: hides one finding), and the Updates rework's three: `updates_apply`
+    (queue one finding, or all of a group, for the daemon's apply runner), `updates_dry_run` (the plan the provider's own
+    apply tool gives; it changes nothing) and `updates_set` (the auto-update switches and the group / provider
+    settings).  The logic is `hub/updates_admin.py`; nothing here installs, upgrades or removes anything: only a
+    provider's own apply tool changes the machine.
 
 It is NOT a command to type.  The request is one JSON object on stdin, the answer is one JSON
 object on stdout (`watch` prints one JSON object per line until it is stopped).  `{"ok": false,
@@ -51,7 +54,7 @@ _UNATTENDED_MESSAGE = "The Download Hub's History and queue controls can only be
 READ_OPS = ("card", "list", "settings", "history", "file", "thumb", "stremio_status", "sources", "qbittorrent_status", "updates")
 # `dismiss` (brief 19) hides a provider row that is unknown or finished; `stremio_start` (brief 19) is the Start button.
 WRITE_OPS = ("history_remove", "history_clear", "redownload", "reorder", "stremio_save", "dismiss", "stremio_start", "stremio_account",
-             "qbittorrent_save", "updates_check", "updates_dismiss")
+             "qbittorrent_save", "updates_check", "updates_dismiss", "updates_apply", "updates_dry_run", "updates_set")
 OPS = READ_OPS + WRITE_OPS
 # N14 (the path picker, jarvis/hub_browse.py): list one folder, and make one new folder.  Neither reads a file's
 # contents.  Both are for the Jarvis page's own picker, so both refuse an unattended process (below).
@@ -1242,10 +1245,17 @@ def sources(request=None, store=None):
             return _err(provided.get("error") or "couldn't read the providers")
         out_providers = []
         seen = set()
+        try:
+            update_rows = st.update_check_state()
+        except Exception:  # noqa: BLE001 - the Sources tab opens without it
+            update_rows = {}
         for p in provided.get("providers") or []:
             seen.add(p.get("id"))
             row = dict(p)
             row["registered"] = True
+            # The Updates rework: a provider that only reports / applies updates is not a download source; the panel
+            # can hide it here (the same flag `updates` carries per provider).
+            row["updates_only"] = bool((update_rows.get(p.get("id")) or {}).get("updates_only"))
             row["last_error"] = _plain(row.get("last_error")) or None
             out_providers.append(row)
         for pid, (label, hint) in sorted(KNOWN_PROVIDER_HINTS.items()):
@@ -1313,7 +1323,7 @@ def admin(op, request=None, store=None):
             return torrent_files(request, store)
         if op == "torrent_add":
             return torrent_add(request, store)
-        if op in ("updates", "updates_check", "updates_dismiss"):
+        if op in ("updates", "updates_check", "updates_dismiss", "updates_apply", "updates_dry_run", "updates_set"):
             from .hub import updates_admin
             return getattr(updates_admin, op)(request, store=store)
         if op == "browse":

@@ -473,19 +473,7 @@ input[type=time], input[type=number] { width: auto; }
 .picker__total { flex: 1; min-width: 0; font-size: 12px; }
 .picker__why { flex-basis: 100%; font-size: 11.5px; }
 
-
-/* ---- Updates tab (N23 part f): findings grouped by program; it only tells, nothing here installs anything ------------------- */
-.upd__group { display: flex; flex-direction: column; gap: 4px; margin: 0 0 10px; }
-.upd__head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 4px 2px; }
-.upd__name { font-size: 10.5px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; color: var(--h-dim); }
-.upd__n { font-family: var(--h-mono); font-size: 10.5px; color: var(--h-dimmer); }
-.upd__health { flex-basis: 100%; font-size: 11.5px; color: var(--h-dimmer); word-break: break-word; }
-.upd__health.is-bad { color: var(--h-red); }
-.upd__health.is-warn { color: var(--h-orange); }
-.upd__row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 8px 10px; border: 1px solid var(--h-line); border-left: 3px solid var(--h-orange); border-radius: 2px; background: var(--h-panel2); }
-.upd__main { min-width: 0; }
-.upd__title { color: var(--h-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.upd__ver { font-family: var(--h-mono); font-size: 11.5px; color: var(--h-acc2); word-break: break-word; }
-.upd__meta { font-size: 11.5px; color: var(--h-dimmer); display: flex; flex-wrap: wrap; gap: 2px 8px; }
-.upd__note { padding: 12px 4px 4px; text-align: center; color: var(--h-dimmer); font-size: 11.5px; }
-.upd__spacer { margin-left: auto; }
+/* ---- the link where the Updates tab used to be: Updates are in Menu > Updates now ------------------------------------------- */
+.tab-link { align-self: center; margin-left: 10px; padding: 4px 6px; background: transparent; border: 0; color: var(--h-dimmer); font: inherit; font-size: 11.5px; text-decoration: underline; cursor: pointer; }
+.tab-link:hover { color: var(--h-text); }
+.tab-link:focus-visible { outline: 2px solid var(--h-acc); outline-offset: 1px; }
