@@ -68,6 +68,26 @@
 .up-health__line{ padding-left: 10px; }
 .up-block__rows{ display: flex; flex-direction: column; gap: 5px; }
 
+/* ---- layout (DH-D): fold a source, drag it, move it with the buttons */
+.up-tools{ flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 8px 12px 0; }
+.up-tools[hidden]{ display: none; }
+.up-tools .up-hint{ flex: 1 1 200px; }
+.up-live{ position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+.up-grip{
+  flex: none; padding: 2px 3px; cursor: grab; user-select: none;
+  font-size: 13px; line-height: 1; letter-spacing: -3px; color: var(--text-dimmer);
+}
+.up-grip:hover{ color: var(--text-dim); }
+.up-grip:active{ cursor: grabbing; }
+.up-fold, .up-move{ min-width: 28px; padding-left: 6px; padding-right: 6px; }
+.up-summary{ font-size: 11px; color: var(--text-dim); overflow-wrap: anywhere; }
+.up-summary.is-bad{ color: var(--red); }
+.up-block.is-collapsed{ margin-bottom: 8px; }
+.up-block.is-collapsed .up-block__head{ padding-bottom: 6px; border-bottom: 1px solid var(--border); }
+.up-block.is-dragging{ opacity: .45; }
+.up-block.is-drop-before{ box-shadow: 0 -2px 0 0 var(--accent); }
+.up-block.is-drop-after{ box-shadow: 0 2px 0 0 var(--accent); }
+
 .up-row{
   display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center;
   padding: 8px 10px; background: var(--bg-panel-2); border: 1px solid var(--border); border-left: 3px solid var(--accent-secondary); border-radius: 3px;

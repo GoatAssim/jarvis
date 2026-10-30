@@ -1154,6 +1154,289 @@ def test_nothing_ever_raises():
     check("odd keyword values do not raise either", isinstance(out, dict), out)
 
 
+# =====================================================================================================================
+# the download is streamed to disk, never held whole in memory (MC-B)
+# =====================================================================================================================
+# net.fetch(to_file=..., discard=_drop_part) writes the answer into the `.part` this module made, as it arrives.  Verification
+# (size, published hash, re-hash after placing) and the swap are exactly what they were; these tests pin the new part: the
+# cap while streaming, a short read, a hash mismatch, a dropped connection, the `.part` gone in each case, the old file never
+# touched, and the same result whatever the chunk size.
+class Feed:
+    """A download body that arrives in chunks: counts the chunks taken, calls `hook(index)` before each one, and can break like
+    a cut connection after the last."""
+
+    def __init__(self, parts, then=None, hook=None):
+        self.parts, self.then, self.hook, self.taken = list(parts), then, hook, 0
+
+    def __iter__(self):
+        for index, part in enumerate(self.parts):
+            if self.hook:
+                self.hook(index)
+            self.taken += 1
+            yield part
+        if self.then is not None:
+            raise self.then
+
+
+class StreamFake(Fake):
+    """A Fake whose file server sends a `Feed` (chunks that can end early or break) instead of the stored bytes."""
+
+    def __init__(self):
+        super().__init__()
+        self.streams = {}                                    # download url -> (headers, Feed)
+
+    def transport(self, method, url, headers, json_body, timeout):
+        if url not in self.streams:
+            return super().transport(method, url, headers, json_body, timeout)
+        parts = urlsplit(url)
+        self.calls.append({"method": method, "host": parts.hostname, "path": parts.path, "url": url, "has_key": False})
+        sent, feed = self.streams[url]
+        return net.Reply(200, sent, chunks=feed)
+
+
+class FetchSpy:
+    """Wraps net.fetch: records every call with its keyword arguments and what it answered, and forwards it unchanged."""
+
+    def __enter__(self):
+        self.real, self.calls, self.results = net.fetch, [], []
+        spy = self
+
+        def wrapper(*args, **kw):
+            out = spy.real(*args, **kw)
+            spy.calls.append((args, dict(kw)))
+            spy.results.append(out)
+            return out
+
+        net.fetch = wrapper
+        return self
+
+    def __exit__(self, *exc):
+        net.fetch = self.real
+
+    def streamed(self):
+        return [(kw, out) for (_args, kw), out in zip(self.calls, self.results) if kw.get("to_file")]
+
+
+BASE = {"sodium-0.5.3.jar": OLD, "other-mod.jar": OTHER}
+STAGING = BACKUPS / "_staging"
+
+
+def pieces(data, size):
+    return [data[i:i + size] for i in range(0, len(data), size)]
+
+
+def stream_scenario(parts, headers=None, then=None, data=NEW, hashes="both", hook=None):
+    """Like scenario(), but the file server sends `parts` as a stream -> (folder, fake, entry, feed).  `data` is what the vendor
+    publishes (size and hash); what is actually sent is `parts`."""
+    _n[0] += 1
+    vid = "STR%05d" % _n[0]
+    folder = fresh_folder()
+    (folder / "sodium-0.5.3.jar").write_bytes(OLD)
+    (folder / "other-mod.jar").write_bytes(OTHER)
+    fake = StreamFake()
+    url = add_mr(fake, vid, "sodium-0.5.8.jar", data, hashes=hashes)
+    feed = Feed(parts, then, hook)
+    fake.streams[url] = (dict(headers) if headers is not None else {"content-type": "application/octet-stream"}, feed)
+    return folder, fake, mr_entry(vid, "sodium-0.5.8.jar", len(data)), feed
+
+
+def nothing_left(folder):
+    """The mods folder as it was, no `.part` anywhere, no backup batch."""
+    return untouched(folder, BASE) and parts_left() == [] and ap.batch_ids() == []
+
+
+def test_stream_the_download_goes_to_a_part_in_staging_and_nothing_moves_meanwhile():
+    reset()
+    seen = []
+
+    def hook(index):
+        seen.append({"index": index, "parts": sorted(p.name for p in STAGING.iterdir() if p.name.endswith(".part")) if STAGING.is_dir() else None,
+                     "folder": listing(folder), "batches": ap.batch_ids()})
+
+    folder, fake, entry, feed = stream_scenario(pieces(NEW, 250), hook=hook)            # 1 200 bytes: five chunks
+    with FetchSpy() as spy:
+        res = apply_ok(folder, fake, entry)
+    check("done, with the new file named", res.get("ok") is True and res.get("state") == "done" and res.get("installed") == "sodium-0.5.8.jar", res)
+    check("the file arrived as five chunks", feed.taken == 5 and len(seen) == 5, (feed.taken, len(seen)))
+    check("while the bytes arrived there was exactly one .part, and it was in the staging folder",
+          all(s["parts"] is not None and len(s["parts"]) == 1 for s in seen), seen)
+    check("...and the mods folder and the backup area were untouched until the file was whole",
+          all(s["folder"] == ["other-mod.jar", "sodium-0.5.3.jar"] and s["batches"] == [] for s in seen), seen)
+    streamed = spy.streamed()
+    check("exactly one streamed download: GET bytes into staging, with apply's own clean-up as its discard",
+          len(streamed) == 1 and Path(streamed[0][0]["to_file"]).parent == STAGING and streamed[0][0]["discard"] is ap._drop_part
+          and streamed[0][0]["want"] == "bytes" and streamed[0][0]["max_bytes"] == len(NEW), streamed)
+    answer = streamed[0][1] if streamed else {}
+    check("net handed back no body (the file was never held in memory), only its size and both hashes",
+          answer.get("ok") is True and answer.get("body") is None and answer.get("size") == len(NEW)
+          and answer.get("sha1") == sha1(NEW) and answer.get("sha512") == sha512(NEW), answer)
+    check("the folder holds the new file byte for byte, the old one is in the backup, and no .part is left",
+          untouched(folder, {"sodium-0.5.8.jar": NEW, "other-mod.jar": OTHER}) and read(res["backup"]) == OLD and parts_left() == [], listing(folder))
+
+
+def test_stream_a_download_over_the_published_size_stops_at_the_cap():
+    reset()
+    folder, fake, entry, feed = stream_scenario([b"z" * 400 for _ in range(50)])         # 20 000 bytes sent, 1 200 published
+    res = apply_ok(folder, fake, entry)
+    check("verify_failed, as for any over-long download", res.get("reason") == "verify_failed" and res.get("state") == "failed"
+          and "bigger than the published size" in res["message"], res)
+    check("reading stopped at the chunk that crossed the cap (the 4th), not at the end", feed.taken == 4, feed.taken)
+    check("the old file is untouched, no .part, no backup batch", nothing_left(folder), (listing(folder), parts_left()))
+
+    folder2, fake2, entry2, feed2 = stream_scenario([b"z" * 400 for _ in range(50)], headers={"content-length": "20000"})
+    res2 = apply_ok(folder2, fake2, entry2)
+    check("an announced size over the published size is refused before one byte is read", res2.get("reason") == "verify_failed"
+          and feed2.taken == 0 and nothing_left(folder2), (res2, feed2.taken))
+
+
+def test_stream_a_cut_off_download_is_a_failure_and_changes_nothing():
+    reset()
+    folder, fake, entry, feed = stream_scenario(pieces(NEW[:-7], 300), headers={"content-length": str(len(NEW))})
+    res = apply_ok(folder, fake, entry)
+    check("a body that ends before its own Content-Length is a failure that says so (offline)", res.get("ok") is False and res.get("state") == "failed"
+          and res.get("reason") == "offline" and "ended before" in res["message"] and "Nothing was changed" in res["message"], res)
+    check("the old file is untouched, no .part, no backup batch", nothing_left(folder), (listing(folder), parts_left()))
+    folder2, fake2, entry2, _ = stream_scenario(pieces(NEW[:-7], 300))
+    res2 = apply_ok(folder2, fake2, entry2)
+    check("a short body with no Content-Length is still caught, by the size check (verify_failed)",
+          res2.get("reason") == "verify_failed" and nothing_left(folder2), res2)
+
+
+def test_stream_a_wrong_hash_is_thrown_away():
+    reset()
+    wrong = bytes(reversed(NEW))                                                          # the right length, the wrong bytes
+    for label, hashes, algo in (("SHA-512", "both", "SHA512"), ("SHA-1 only", "sha1", "SHA1")):
+        folder, fake, entry, feed = stream_scenario(pieces(wrong, 200), headers={"content-length": str(len(wrong))}, hashes=hashes)
+        res = apply_ok(folder, fake, entry)
+        check("%s: verify_failed, naming the checksum" % label, res.get("reason") == "verify_failed" and res.get("state") == "failed"
+              and ("%s checksum does not match" % algo) in res["message"], res)
+        check("%s: the whole file was read and checked on disk, then the .part was deleted; the old file was never touched" % label,
+              feed.taken == len(pieces(wrong, 200)) and nothing_left(folder), (feed.taken, listing(folder), parts_left()))
+
+
+def test_stream_a_dropped_connection_leaves_nothing():
+    reset()
+    folder, fake, entry, feed = stream_scenario([NEW[:400], NEW[400:800]], headers={"content-length": str(len(NEW))},
+                                                then=ConnectionError("reset by peer"))
+    res = apply_ok(folder, fake, entry)
+    check("a connection that breaks mid-file is a failure (offline) that changes nothing",
+          res.get("ok") is False and res.get("state") == "failed" and res.get("reason") == "offline" and "dropped" in res["message"]
+          and "Nothing was changed" in res["message"], res)
+    check("the answer names no address", "https://" not in all_text(res) and "cdn.modrinth.com" not in all_text(res), res)
+    check("the half-written .part is deleted, the old file is untouched, no backup batch", feed.taken == 2 and nothing_left(folder),
+          (feed.taken, listing(folder), parts_left()))
+
+
+def test_stream_a_disk_error_while_writing_leaves_nothing():
+    reset()
+    real = os.fsync
+
+    def boom(fd):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    def hook(index):
+        if index == 0:
+            os.fsync = boom                                   # only the download's own write is made to fail
+
+    folder, fake, entry, _feed = stream_scenario(pieces(NEW, 400), hook=hook)
+    try:
+        res = apply_ok(folder, fake, entry)
+    finally:
+        os.fsync = real
+    check("a download that cannot be written to disk is bad_dest and changes nothing", res.get("ok") is False and res.get("reason") == "bad_dest"
+          and "Nothing was changed" in res["message"], res)
+    check("the old file is untouched, no .part, no backup batch", nothing_left(folder), (listing(folder), parts_left()))
+
+
+def test_stream_chunk_boundaries_do_not_change_the_result():
+    reset()
+    runs = []
+    builders = (("7 bytes at a time", lambda: stream_scenario(pieces(NEW, 7))[:3]),
+                ("one chunk", lambda: stream_scenario([NEW])[:3]),
+                ("a plain whole body", lambda: scenario()))
+    for label, build in builders:
+        folder, fake, entry = build()
+        res = apply_ok(folder, fake, entry)
+        record = (ap.read_record(res.get("batch"))[0] or {}).get("new")
+        same = {k: v for k, v in res.items() if k not in ("backup", "batch")}               # the two that hold a time stamp
+        runs.append((label, same, record, untouched(folder, {"sodium-0.5.8.jar": NEW, "other-mod.jar": OTHER})))
+    check("all three are done and the folder holds exactly the published bytes", all(r[1].get("state") == "done" and r[3] for r in runs), runs)
+    check("the result and the record are the very same whatever the chunk size",
+          all(r[1] == runs[0][1] and r[2] == runs[0][2] for r in runs), runs)
+    check("a successful apply has the same keys it always had",
+          set(runs[0][1]) == {"ok", "state", "message", "installed", "needs_restart", "notes", "pruned"}, sorted(runs[0][1]))
+
+
+def test_stream_apply_drops_the_part_itself_whatever_net_answers():
+    """If net.fetch ever failed to clean up, or answered in a shape this code does not know, nothing may be swapped and no
+    `.part` may stay."""
+    real = net.fetch
+
+    def faulty(mode):
+        def fake_fetch(*args, **kw):
+            path = kw.get("to_file")
+            if not path:
+                return real(*args, **kw)                      # the vendor lookups go through unchanged
+            if mode == "fail":
+                with open(path, "wb") as handle:
+                    handle.write(b"half a file")
+                return {"ok": False, "reason": "offline", "error": "The connection broke."}
+            if mode == "old_style":
+                return {"ok": True, "status": 200, "headers": {}, "body": bytes(NEW), "final_url": args[1]}
+            if mode == "wrong_path":
+                return {"ok": True, "status": 200, "headers": {}, "body": None, "final_url": args[1], "path": str(HOMEP / "elsewhere.part"),
+                        "size": len(NEW), "sha1": sha1(NEW), "sha512": sha512(NEW)}
+            out = real(*args, **kw)                           # "lying": the real stream, but a hash that is not the file's
+            out["sha1"] = "0" * 40
+            return out
+        return fake_fetch
+
+    expect = {"fail": ("offline", "Nothing was changed"), "old_style": ("verify_failed", "could not be checked"),
+              "wrong_path": ("verify_failed", "could not be checked"), "lying": ("verify_failed", "not what was received")}
+    for mode, (reason, words) in expect.items():
+        reset()
+        folder, fake, entry = scenario()
+        net.fetch = faulty(mode)
+        try:
+            res = apply_ok(folder, fake, entry)
+        finally:
+            net.fetch = real
+        check("%s: failed with %s and says so" % (mode, reason), res.get("ok") is False and res.get("reason") == reason and words in res["message"], res)
+        check("%s: the old file is untouched, the .part is gone (apply dropped it), nothing was swapped" % mode, nothing_left(folder),
+              (listing(folder), parts_left()))
+
+
+def test_stream_a_part_name_that_already_exists_is_never_reused_or_dropped():
+    reset()
+    folder, fake, entry = scenario()
+    ap.NOW = lambda: 1_790_000_000.0
+    STAGING.mkdir(parents=True)
+    taken = STAGING / ("%s-01020304.part" % ap._stamp(1_790_000_000.0))
+    taken.write_bytes(b"not ours")
+    real = os.urandom
+    os.urandom = lambda n: (b"\x01\x02\x03\x04" * 8)[:n]  # every attempt picks the name that exists
+    try:
+        res = apply_ok(folder, fake, entry)
+    finally:
+        os.urandom = real
+        ap.NOW = None
+    check("no free name: bad_dest, and nothing was changed", res.get("ok") is False and res.get("reason") == "bad_dest"
+          and "Nothing was changed" in res["message"], res)
+    check("the file that was already there is left exactly as it was, and nothing was downloaded",
+          read(taken) == b"not ours" and [str(p) for p in HOMEP.rglob("*.part")] == [str(taken)] and fake.downloads() == [], parts_left())
+    check("the old file is untouched and there is no backup batch", untouched(folder, BASE) and ap.batch_ids() == [])
+
+
+def test_stream_the_download_step_is_one_streamed_net_call():
+    path = PKG / "modhosts" / "apply.py"
+    calls = [n for n in ast.walk(_tree(path)) if isinstance(n, ast.Call) and _dotted(n.func) == "net.fetch"]
+    check("apply.py makes exactly one net.fetch call, and it streams to a file with its own clean-up",
+          len(calls) == 1 and {k.arg for k in calls[0].keywords} >= {"to_file", "discard", "want", "max_bytes", "timeout"}, [ast.dump(c)[:80] for c in calls])
+    download = next(n for n in _tree(path).body if isinstance(n, ast.FunctionDef) and n.name == "_download")
+    names = {n.value for n in ast.walk(download) if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+    check("the download step no longer reads a body out of the answer", "body" not in names, sorted(names)[:5])
+
+
 def main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for test in tests:

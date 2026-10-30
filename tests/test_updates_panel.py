@@ -85,7 +85,7 @@ check("the palette test reads its verb counts from the registry (no typed 41 / 4
 check("nothing another program said can become markup: no innerHTML, outerHTML, insertAdjacentHTML, document.write, eval or new Function",
       not re.search(r"innerHTML|outerHTML|insertAdjacentHTML|document\.write|\beval\(|new Function", js))
 check("text goes in with textContent / createTextNode / setAttribute", "textContent" in js and "createTextNode" in js and "setAttribute" in js)
-check("nothing is kept in the browser", not re.search(r"localStorage|sessionStorage|indexedDB|document\.cookie", js))
+check("nothing is kept in the browser except the layout in localStorage (round 10; checked in section 7)", not re.search(r"sessionStorage|indexedDB|document\.cookie", js))
 check("no native dialogs (the page's own dialog is used)", not re.search(r"\b(window\.)?(confirm|alert|prompt)\(", js) and "JarvisUI" in js)
 check("one fetch call, and every write carries the header the server requires",
       js.count("fetch(") == 1 and '"X-Jarvis-Hub": "1"' in js and 'method: "POST"' in js)
@@ -138,6 +138,27 @@ check("the narrow-window layout stacks the three parts", "@media (max-width: 900
 settings = read(PUBLIC / "settings.js")
 check("settings.js is untouched by this panel (no reference to it)", "JarvisUpdates" not in settings and "updates-panel" not in settings)
 check("the browser files carry no `updates` panel verb twice", sum(1 for x in reg["verbs"] if x["verb"] == "updates") == 1)
+
+# --- 7. layout: fold, move and drag the source blocks (round 10, DH-D) --------------------------------------
+check("localStorage is named once, inside try/catch, and every read and write of it is inside try",
+      js.count("localStorage") == 1 and re.search(r"try \{ return global\.localStorage \|\| null; \} catch", js) is not None
+      and all("try {" in ln for ln in js.splitlines() if "getItem(" in ln or "setItem(" in ln))
+check("one storage key, and what is written holds only ids and flags (version, order, choice, seen, auto)",
+      js.count("jarvis.updates.layout") == 1 and "JSON.stringify({ v: LAYOUT_VERSION, order: l.order, choice: l.choice, seen: l.seen, auto: l.auto })" in js)
+check("the layout is never sent to the hub: no hub route carries it and the set keys are unchanged", "LAYOUT_KEY" not in js[js.index("async function request("):js.index("function UI()")])
+check("the threshold for starting folded is one named number", re.search(r"const COLLAPSE_AT = \d+;", js) is not None)
+check("each block has a fold toggle (aria-expanded), a Move up and a Move down button, a grip, and the toolbar has Collapse all, Expand all and Reset order",
+      all(w in js for w in ('"aria-expanded"', '"Move " + b.label + " up"', '"Move " + b.label + " down"', 'title: "Move up"', 'title: "Move down"', "up-grip", '"Collapse all"', '"Expand all"', '"Reset order"')))
+check("only the grip starts a drag, and a drag the panel did not start is not accepted",
+      '"draggable", "true"' in js and 'node.getAttribute("draggable") !== "true"' in js and "if (!dragging() || S.drag === b.id) return;" in js)
+render_src = js[js.index("function render(force)"):js.index("async function doCheck(")]
+check("a redraw is skipped while a drag runs, and the layout is part of the redraw signature",
+      "if (dragging())" in render_src and "layoutSignature(S.layout)" in render_src and render_src.index("if (dragging())") < render_src.index("const sig ="))
+check("the saved order is by source id and Reset order empties only the order", "ensureLayout().order = [];" in js and "moveRelative(base, id, targetId, side)" in js)
+check("a fold his own hand made is kept over the automatic one, and the toolbar acts on what is shown", "setCollapsed(ensureLayout(), S.shown, value)" in js and "typeof l.choice[id] === \"boolean\"" in js)
+check("the stylesheet has rules for the fold, the grip, the toolbar, the drag marks and the folded block",
+      all(w in css for w in (".up-fold", ".up-grip", ".up-tools", ".up-move", ".up-summary", ".up-live", ".up-block.is-collapsed", ".up-block.is-dragging", ".up-block.is-drop-before", ".up-block.is-drop-after")))
+check("the new test file exists and is the one that runs the fake page", (ROOT / "tests" / "verify_updates_panel_layout.js").exists())
 
 print("\n%d passed, %d failed" % (len(PASS), len(FAIL)))
 sys.exit(1 if FAIL else 0)

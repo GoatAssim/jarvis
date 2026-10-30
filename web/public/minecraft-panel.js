@@ -231,6 +231,8 @@
   }
 
   // One project per line. "Sodium" or "Sodium | <file id>" (pin one file) or "Sodium | | beta".
+  // A fourth part ("Sodium | | | curseforge") says which platform THAT entry is named on. Only the panel writes it, for a
+  // mixed pack (entriesText with sources); a line the owner types has its fourth part dropped before it gets here.
   function parseEntries(raw) {
     const out = [];
     const lines = text(raw).split(/\r?\n/);
@@ -240,10 +242,23 @@
       const entry = { project: parts[0] };
       if (parts[1]) entry.file = parts[1];
       if (parts[2] && CHANNELS.indexOf(parts[2].toLowerCase()) >= 0) entry.channel = parts[2].toLowerCase();
+      if (parts[3] && PLATFORMS.indexOf(parts[3].toLowerCase()) >= 0) entry.source = parts[3].toLowerCase();
       out.push(entry);
       if (out.length >= MAX_ENTRIES) break;
     }
     return out;
+  }
+
+  // The platform that is not `p` (only ever asked about a known platform).
+  function otherPlatform(p) { return p === "curseforge" ? "modrinth" : "curseforge"; }
+
+  // A pack is MIXED when some entry says it is named on the platform the pack is NOT for. The tool then needs
+  // `entries_from` (the other platform) AND a `source` on every entry: an entry with no source would be taken to be
+  // named on `entries_from`, which for a project of the pack's own platform would be wrong. So every entry that has
+  // no source gets the pack's own platform, here and nowhere else.
+  function isMixed(entries, format) {
+    const target = oneOf(format, PLATFORMS, "modrinth");
+    return (Array.isArray(entries) ? entries : []).some((e) => e && e.source && e.source !== target);
   }
 
   function packArgs(f, dry) {
@@ -251,6 +266,8 @@
     const args = { format: oneOf(f.format, PLATFORMS, "modrinth"), name: trimmed(f.name),
       mc_version: trimmed(f.mc_version), loader: oneOf(f.loader, LOADERS.concat(["vanilla"]), ""),
       entries: parseEntries(f.entries), channel: oneOf(f.channel, CHANNELS, "release") };
+    const mixed = isMixed(args.entries, args.format);
+    if (mixed) args.entries.forEach((e) => { if (!e.source) e.source = args.format; });
     put(args, "version", f.version);
     put(args, "author", f.author);
     put(args, "summary", f.summary);
@@ -262,8 +279,10 @@
     if (f.overwrite) args.overwrite = true;
     // Cross-platform (S1): the entries are NAMED on the other platform. Sent only when it really differs
     // from the pack's own, so an ordinary pack is byte-for-byte what it was.
-    const direction = crossDirection(args.format, f.entries_from);
-    if (direction) args.entries_from = oneOf(f.entries_from, PLATFORMS, "");
+    // A mixed pack names the other platform itself, whatever the form says.
+    const from = mixed ? otherPlatform(args.format) : oneOf(f.entries_from, PLATFORMS, "");
+    const direction = crossDirection(args.format, from);
+    if (direction) args.entries_from = from;
     // download_to_match lets the tool read every Modrinth file once to fingerprint it. Never on a dry run
     // (a dry run must not download), and only for the one direction that needs it.
     if (!dry && direction === "modrinth_to_curseforge" && f.download_to_match === true) args.download_to_match = true;
@@ -459,14 +478,84 @@
     return { origin: from, used: by[from], left: by[other], mixed: by.modrinth.length > 0 && by.curseforge.length > 0 };
   }
 
+  // What the pack tab builds from the tray. `choice` is the owner's "where the tray's projects are named":
+  //   ""      automatic: a tray on one platform behaves exactly as trayForPack says; a tray with BOTH platforms
+  //           builds a mixed pack (every project on its own platform).
+  //   "both"  the same, asked for by name (with a one-platform tray there is nothing to mix, so it is trayForPack's).
+  //   a platform  only the projects named there; the others are left out and listed (trayForPack, as before).
+  // `both` true = a mixed pack: `native` go in as they are, `foreign` are matched on the pack's platform, `origin` is the
+  // platform they are named on (the one the pack is NOT for), nothing is left out.
+  function trayPlan(items, format, choice) {
+    const list = Array.isArray(items) ? items : [];
+    const target = oneOf(format, PLATFORMS, "modrinth");
+    const pick = trimmed(choice).toLowerCase();
+    const onMr = list.filter((i) => i.source !== "curseforge");
+    const onCf = list.filter((i) => i.source === "curseforge");
+    if ((pick === "" || pick === "both") && onMr.length && onCf.length) {
+      return { both: true, mixed: true, origin: otherPlatform(target), used: list.slice(), left: [],
+        native: target === "modrinth" ? onMr : onCf, foreign: target === "modrinth" ? onCf : onMr };
+    }
+    const plain = trayForPack(list, target, pick === "both" ? "" : pick);
+    return Object.assign({}, plain, { both: false, native: plain.origin === target ? plain.used : [], foreign: plain.origin === target ? [] : plain.used });
+  }
+
   // The pack form's `entries` text: the used tray items first (with a pinned file when there is one), then what was typed.
-  function entriesText(items, extra) {
+  // opts.sources (a mixed pack): every line also says which platform it is named on, as a fourth part. A tray item
+  // carries its own; a line the owner typed is named on opts.own (the pack's platform), whatever it said after the third
+  // bar. Without opts.sources the text is exactly what it always was.
+  function entriesText(items, extra, opts) {
+    const o = opts && typeof opts === "object" ? opts : {};
+    const withSource = o.sources === true;
+    const own = oneOf(o.own, PLATFORMS, "modrinth");
     const lines = (Array.isArray(items) ? items : []).map((i) => {
       const ref = refOf(i);
-      return ref && i.file && safeRef(i.file) ? ref + " | " + i.file : ref;
+      if (!ref) return "";
+      const file = i.file && safeRef(i.file) ? i.file : "";
+      if (withSource) return ref + " | " + file + " | | " + oneOf(i.source, PLATFORMS, "modrinth");
+      return file ? ref + " | " + file : ref;
     }).filter(Boolean);
-    const typed = text(extra).split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    let typed = text(extra).split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    // A fourth part is the panel's own (parseEntries reads it as a platform), never the owner's: it is cut from a typed
+    // line so a typed "| curseforge" can neither turn an ordinary pack into a mixed one nor change a mixed pack's sources.
+    typed = typed.map((l) => {
+      const parts = l.split("|");
+      if (parts.length <= 3 && !withSource) return l;
+      const kept = [0, 1, 2].map((n) => (parts[n] || "").trim());
+      if (!kept[0]) return "";
+      return withSource ? kept[0] + " | " + kept[1] + " | " + kept[2] + " | " + own : kept.join("|").replace(/\|+$/, "");
+    }).filter(Boolean);
     return lines.concat(typed).join("\n");
+  }
+
+  // The mixed pack in numbers, read from the arguments that will be sent (so the dialog says what the call does):
+  // how many entries go in as they are, how many are named on the other platform and matched, and how.
+  function mixedSplit(args) {
+    const a = args && typeof args === "object" ? args : {};
+    const entries = Array.isArray(a.entries) ? a.entries.filter((e) => e && typeof e === "object") : [];
+    const to = oneOf(a.format, PLATFORMS, "modrinth");
+    if (!isMixed(entries, to)) return { mixed: false, native: 0, foreign: 0, from: "", to, method: "" };
+    const from = otherPlatform(to);
+    const foreign = entries.filter((e) => e.source === from).length;
+    return { mixed: true, native: entries.length - foreign, foreign, from, to, method: from === "curseforge" ? "sha1" : "fingerprint" };
+  }
+
+  // One or two plain sentences for the dialog and the pack tab.
+  function mixedWords(split) {
+    const m = split && typeof split === "object" ? split : {};
+    if (!m.mixed) return "";
+    const one = (n, a, b) => (n === 1 ? a : b);
+    const how = m.method === "sha1"
+      ? "by SHA-1 hash; nothing is downloaded"
+      : "by fingerprint; each of those mod files may have to be read once, in memory, and is not saved";
+    return "Mixed pack for " + SITE[m.to] + ": " + m.native + " " + one(m.native, "project is", "projects are") + " named on " + SITE[m.to] + " and "
+      + one(m.native, "goes", "go") + " in as " + one(m.native, "it is", "they are") + "; " + m.foreign + " " + one(m.foreign, "project is", "projects are")
+      + " named on " + SITE[m.from] + " and matched to the identical file on " + SITE[m.to] + " " + how + ". One with no identical file is skipped and listed, never swapped for a lookalike.";
+  }
+
+  // Which way a pack's entries are matched, as the tool will be asked (the form's own entries_from can be overruled by a mixed list).
+  function directionOf(f) {
+    const a = packArgs(f && typeof f === "object" ? f : {}, true);
+    return crossDirection(a.format, a.entries_from);
   }
 
   // ------------------------------------------------------------------ Updates tab (M3): the pure helpers
@@ -833,6 +922,8 @@
     if (kind === "pack" || kind === "pack-download") {
       if (d.path) lines.push("File: " + text(d.path, 260));
       if (a.src) lines.push("Extra files folder: " + text(a.src, 260));
+      const mix = mixedSplit(a);
+      if (mix.mixed) lines.push(mixedWords(mix));
       const s = crossSummary(d);
       if (s.present) {
         lines.push("Matched on " + text(s.to, 20) + " by " + text(s.method, 20) + ": " + s.matched + " of " + s.entries + " entries; "
@@ -1098,7 +1189,7 @@
     if (!check || check.ok === false || check.partial === true) return { stage: "check", result: check, need };
     if (check.needs_clarification === true && !need.needed) return { stage: "check", result: check, need };
     if (need.needed) {
-      if (!(crossDirection(f.format, f.entries_from) === "modrinth_to_curseforge" && f.download_to_match === true)) {
+      if (!(directionOf(f) === "modrinth_to_curseforge" && f.download_to_match === true)) {
         return { stage: "needs_tick", result: check, need, message: "Tick \u201cDownload each file once\u2026\u201d to allow it, then press Make pack again. Nothing was downloaded or written." };
       }
       const args = packArgs(Object.assign({}, f, { download_to_match: true }), false);
@@ -1185,6 +1276,12 @@
   };
 
   function announce(message) { if (S.live) S.live.textContent = text(message, 200); }
+
+  // A result that arrives below the fold is brought into view, as the tray's already is (block "nearest": nothing moves
+  // when it is already visible). The Pack and OptiFine tabs call it once their answer or their one-line problem is drawn.
+  function reveal(host) {
+    if (host && typeof host.scrollIntoView === "function") { try { host.scrollIntoView({ block: "nearest" }); } catch (_) { /* old browser */ } }
+  }
 
   function setPlay(partial) {
     S.play = playOf(Object.assign({}, S.play, partial || {}));
@@ -2139,17 +2236,19 @@
       busy(listHost, "Asking optifine.net\u2026", 0);
       const r = await runTool("list_optifine_versions", optifineListArgs(f), {});
       showResult(listHost, r, { root, retry: () => list(overview) });
+      reveal(listHost);
     };
     const get = async (dry) => {
       const f = formFields();
       const args = optifineArgs(f, true);
       const bad = problem("optifine-download", args);
-      if (bad) { dlHost.textContent = ""; dlHost.appendChild(notice("warn", bad)); return; }
+      if (bad) { dlHost.textContent = ""; dlHost.appendChild(notice("warn", bad)); reveal(dlHost); return; }
       busy(dlHost, dry ? "Checking\u2026" : "Checking, then asking you once\u2026", 0);
-      if (dry) { showResult(dlHost, await runTool("download_optifine", args, {}), { root, retry: () => get(true) }); return; }
+      if (dry) { showResult(dlHost, await runTool("download_optifine", args, {}), { root, retry: () => get(true) }); reveal(dlHost); return; }
       const out = await optifineSteps(f, runTool);
       showResult(dlHost, out.result, { root, retry: () => get(false) });                    // no library fallback: OptiFine is always written to a full path
       if (out.message) dlHost.appendChild(notice("warn", out.message));
+      reveal(dlHost);
     };
     form.appendChild(el("div", { class: "mc-actions" }, [
       el("button", { type: "button", class: "btn btn--ghost", text: "List every version", onclick: (e) => guarded(e.currentTarget, () => list(true)) }),
@@ -2176,7 +2275,10 @@
         + "Ticking this lets it download each mod file once, in memory; nothing is saved, and fingerprints it already knows are not downloaded again. "
         + "Jarvis shows how many files and how much before anything is downloaded, and you confirm once. Needs your CurseForge key." }),
       matchBox]);
+    // A mixed pack (the tray holds both platforms): what is added as it is and what is matched, in words.
+    const crossMix = el("div", { class: "mc-explain", hidden: true });
     const fromTray = el("div", { class: "mc-explain mc-explain--tray", "aria-live": "polite" });
+    const entryList = el("ul", { class: "mc-pack-entries", "aria-label": "What goes in the pack", hidden: true });
     const form = el("div", { class: "mc-form" }, [
       el("div", { class: "mc-grid" }, [
         field("Build the pack for", select("format", [["modrinth", "Modrinth (.mrpack)"], ["curseforge", "CurseForge (.zip)"]], homeSource(S.play))),
@@ -2185,12 +2287,12 @@
         field("Loader", select("loader_choice", [["", "the loader above"], ["vanilla", "no loader (shaders, resource packs, data packs)"]], "")),
         field("Include", select("channel", CHANNEL_CHOICES, "release")),
       ]),
-      fromTray,
-      field("Where the tray's projects are named", select("entries_from", [["", "automatic"], ["modrinth", "Modrinth"], ["curseforge", "CurseForge"]], ""),
-        "Automatic uses the platform most of your tray is on. Pick the other one to build the pack from a list named there."),
-      crossCf, crossMr,
+      fromTray, entryList,
+      field("Where the tray's projects are named", select("entries_from", [["", "automatic"], ["both", "Both: each project on its own platform"], ["modrinth", "Modrinth only"], ["curseforge", "CurseForge only"]], ""),
+        "Automatic: a tray on one platform builds a pack from it; a tray with both builds a mixed pack. Pick one platform to use only its projects (the others are left out and listed), or the other one to build the pack from a list named there."),
+      crossMix, crossCf, crossMr,
       field("More projects", el("textarea", { name: "entries_extra", class: "mc-input mc-textarea", rows: "4", spellcheck: "false",
-        placeholder: "One per line, after the tray's:\nsodium\niris | <file id to pin>" }), "Slug, id or exact name on the same platform as the tray's. Add | file id to pin one file."),
+        placeholder: "One per line, after the tray's:\nsodium\niris | <file id to pin>" }), "Slug, id or exact name on the same platform as the tray's (in a mixed pack: on the platform the pack is for). Add | file id to pin one file."),
       el("details", { class: "mc-more" }, [el("summary", { text: "More options" }), el("div", { class: "mc-grid" }, [
         field("Loader version", input("loader_version", "", { placeholder: "empty = the latest" })),
         field("Author (CurseForge)", input("author", "")),
@@ -2205,19 +2307,38 @@
     // The pack form as the argument builders read it: version and loader from the bar, the entries from the tray.
     const packFields = () => {
       const f = readForm(form);
-      const cfg = trayForPack(S.tray, f.format, f.entries_from);
+      const cfg = trayPlan(S.tray, f.format, f.entries_from);
       return Object.assign({}, f, { mc_version: S.play.mc_version, loader: f.loader_choice === "vanilla" ? "vanilla" : S.play.loader,
-        entries_from: cfg.origin, entries: entriesText(cfg.used, f.entries_extra) });
+        entries_from: cfg.origin, entries: entriesText(cfg.used, f.entries_extra, { sources: cfg.both, own: oneOf(f.format, PLATFORMS, "modrinth") }) });
     };
     const syncCross = () => {
       const f = packFields();
-      const dir = crossDirection(f.format, f.entries_from);
-      crossCf.hidden = dir !== "curseforge_to_modrinth";
+      const dir = directionOf(f);
+      const cfg = trayPlan(S.tray, f.format, f.entries_from);
+      // In a mixed pack the CurseForge-to-Modrinth block would say "each project"; the mixed block says which ones.
+      crossCf.hidden = dir !== "curseforge_to_modrinth" || cfg.both;
       crossMr.hidden = dir !== "modrinth_to_curseforge";
-      const cfg = trayForPack(S.tray, f.format, f.entries_from);
+      const split = mixedSplit(packArgs(f, true));
+      crossMix.hidden = !split.mixed;
+      crossMix.textContent = "";
+      if (split.mixed) crossMix.appendChild(el("span", { text: mixedWords(split) + (split.method === "sha1" ? " Needs your CurseForge key." : "") }));
       fromTray.textContent = "";
+      entryList.textContent = "";
+      entryList.hidden = !cfg.both;
+      if (cfg.both) {
+        // Each entry shows its own platform and what the pack will do with it.
+        cfg.used.slice(0, 40).forEach((item) => {
+          const own = item.source === oneOf(f.format, PLATFORMS, "modrinth");
+          entryList.appendChild(el("li", { class: "mc-pack-entry" }, [el("span", { class: "mc-pack-entry__name", text: text(item.name, 60) }), badge(item.source),
+            el("span", { class: "mc-small mc-muted", text: own ? "goes in as it is" : "matched on " + SITE[f.format] + (dir === "curseforge_to_modrinth" ? " by SHA-1" : " by fingerprint") })]));
+        });
+        if (cfg.used.length > 40) entryList.appendChild(el("li", { class: "mc-small mc-muted", text: "and " + (cfg.used.length - 40) + " more" }));
+      }
       if (!S.tray.length) {
         fromTray.appendChild(el("span", { text: "The tray is empty. Add projects from Find, or type them below." }));
+      } else if (cfg.both) {
+        fromTray.appendChild(el("span", { text: plural(cfg.native.length, "project", "projects") + " named on " + SITE[f.format] + " and " + cfg.foreign.length + " named on "
+          + SITE[cfg.origin] + " are in this pack. Each keeps its own platform; nothing is left out." }));
       } else {
         fromTray.appendChild(el("span", { text: plural(cfg.used.length, "project from the tray goes", "projects from the tray go") + " in this pack, named on " + SITE[cfg.origin] + "."
           + (cfg.left.length ? " " + plural(cfg.left.length, "other is", "others are") + " named on the other platform and left out: " + cfg.left.slice(0, 5).map((i) => text(i.name, 30)).join(", ") + (cfg.left.length > 5 ? " and more" : "") + "." : "") }));
@@ -2230,10 +2351,11 @@
       const f = packFields();
       busy(host, dry ? "Checking every project\u2026" : "Checking, then asking you once\u2026", 0);
       const out = dry ? await packCheck(f, runTool) : await packWrite(f, runTool);
-      if (out.stage === "invalid") { host.textContent = ""; host.removeAttribute("aria-busy"); host.appendChild(notice("warn", out.message)); return; }
-      const ticked = crossDirection(f.format, f.entries_from) === "modrinth_to_curseforge" && f.download_to_match === true;
+      if (out.stage === "invalid") { host.textContent = ""; host.removeAttribute("aria-busy"); host.appendChild(notice("warn", out.message)); reveal(host); return; }
+      const ticked = directionOf(f) === "modrinth_to_curseforge" && f.download_to_match === true;
       showResult(host, out.result, { root, retry: () => make(dry), skipTables: ["skipped"], body: (res, h) => renderPackBody(res, h, { ticked }) });
       if (out.message) host.appendChild(notice("warn", out.message));
+      reveal(host);
     };
     form.appendChild(el("div", { class: "mc-actions" }, [
       el("button", { type: "button", class: "btn btn--ghost", text: "Check only (dry run)", onclick: (e) => guarded(e.currentTarget, () => make(true)) }),
@@ -2373,6 +2495,17 @@
     if (btn) btn.focus();
   }
 
+  // The shared folder picker (web/public/path-picker.js) adds ONE element to the page: `<div class="jpp-backdrop">`
+  // holding its card `<div class="jpp" role="dialog">`. While either is there, the picker owns the keys, so the Tab
+  // trap and Escape below stand aside. This list is read against path-picker.js by tests/test_minecraft_panel.py, so a
+  // renamed class there fails a test here instead of silently turning the guard off (it once named classes the
+  // picker never had).
+  const PICKER_SELECTOR = ".jpp-backdrop, .jpp";
+  function pickerOpen(doc) {
+    const d = doc || (typeof document !== "undefined" ? document : null);
+    return !!(d && typeof d.querySelector === "function" && d.querySelector(PICKER_SELECTOR));
+  }
+
   const FOCUSABLE = "a[href], button:not([disabled]), input:not([disabled]):not([type=hidden]), select:not([disabled]), textarea:not([disabled]), summary, [tabindex]:not([tabindex=\"-1\"])";
 
   function open() {
@@ -2404,7 +2537,7 @@
     S.onKey = (e) => {
       if (!S.overlay) return;
       if (document.querySelector("#jui-layer .jui-modal")) return;               // a confirmation owns the keys
-      if (document.querySelector(".pp-overlay, .path-picker")) return;           // so does the folder picker
+      if (pickerOpen(document)) return;                                          // so does the folder picker
       if (e.key === "Escape" && !e.defaultPrevented) { e.preventDefault(); close(); return; }
       if (e.key !== "Tab" || !S.panel) return;                                   // keep Tab inside the panel
       const items = Array.prototype.filter.call(S.panel.querySelectorAll(FOCUSABLE), (n) => n.offsetParent !== null || n === document.activeElement);
@@ -2443,7 +2576,8 @@
       watchArgs, applyArgs, watchedOf, findingsOf, problemLines, needsAnswer, applyOutcome, replacedOf, replacedListed, watchedWords, safeId, pick, isWatchRead,
       RUNS_HERE, AUTO_WORDS, APPLY_STATES,
       playOf, versionHint, playWords, homeSource, fitOf, reasonWords, sourceProblems, recommendWords,
-      trayKey, trayItemFrom, trayAdd, trayRemove, trayHas, trayDownloadFields, trayProblems, trayForPack, entriesText, refOf, batchBody },
+      trayKey, trayItemFrom, trayAdd, trayRemove, trayHas, trayDownloadFields, trayProblems, trayForPack, entriesText, refOf, batchBody,
+      trayPlan, isMixed, mixedSplit, mixedWords, directionOf, otherPlatform, PICKER_SELECTOR, pickerOpen, reveal },
     // The write flows and the one function that talks to the server, for tests/verify_minecraft_panel.js (a stub fetch and a stub JarvisUI).
     _flow: { runTool, downloadSteps, batchDownloadSteps, optifineSteps, packCheck, packWrite, watchSteps, applySteps, undoSteps },
     // The drawing functions for the Updates tab, for tests/verify_minecraft_panel.js (it passes a tiny stand-in for `document`).

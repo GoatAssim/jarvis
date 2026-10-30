@@ -35,10 +35,12 @@ VERIFY_FAILED = "verify_failed"
 VENDOR_CHANGED = "vendor_changed"          # an answer no longer parses / an unexpected HTTP status
 OFFLINE = "offline"                        # the network (or the vendor) did not answer
 UNSUPPORTED = "unsupported"                # not built / not installed / not a value this tool takes
+CDN_REFUSED = "cdn_refused"                # a CurseForge download host (not the API host) answered 403 (the key is never sent there)
 
 REASONS = (
     NO_KEY, BAD_KEY, RATE_LIMITED, NOT_FOUND, AMBIGUOUS, NOT_DISTRIBUTABLE, NO_COMPATIBLE_FILE,
     NO_LOADER_VERSION, BAD_DEST, EXISTS, TOO_BIG, VERIFY_FAILED, VENDOR_CHANGED, OFFLINE, UNSUPPORTED,
+    CDN_REFUSED,
 )
 
 

@@ -9,13 +9,14 @@ WHAT IT DOES
                    adapters (modhosts/sources.py), the same ones make_modpack_file uses.
   describe(P, dry_run, written)   the owner-facing report: unchanged / updated (old -> new) / skipped with the reason /
                    dependencies added / overrides.
-  write(P)         writes ONE new file in the destination folder through the pack writer's public pieces
-                   (packs.build_manifest, packs.check_pack, outdir.write_atomic): a temp file, re-opened and re-parsed,
-                   then moved into place without ever replacing anything.
+  write(P)         writes ONE new file in the destination folder with the pack writer itself (packs.write_pack, which goes
+                   through outdir.write_atomic with overwrite=False): a temp file, re-opened and re-parsed, then moved into
+                   place without ever replacing anything.  The old pack's overrides are a zip source of that writer
+                   (packs.overrides_from_zip): there is no copy code in this file.
 
 THE RULES
-  * The original pack is never modified, moved or deleted: it is opened for reading, twice (once to read, once to copy its
-    overrides), and nothing else touches it.  There is no `overwrite` argument anywhere: the new file is
+  * The original pack is never modified, moved or deleted: it is opened for reading, twice (once by packread to read it, once
+    by the pack writer to copy its overrides), and nothing else touches it.  There is no `overwrite` argument anywhere: the new file is
     `<name>-updated.mrpack` / `.zip`, and when that name is taken `-updated-2`, `-updated-3` ... (never a replacement; the
     write itself refuses an existing name).
   * "Newer" means a later PUBLICATION DATE of a file for the SAME Minecraft version and loader, never a bigger version
@@ -28,11 +29,16 @@ THE RULES
     third-party downloads, a project with no compatible file: that entry is SKIPPED with its reason and STAYS AS IT WAS in
     the new pack, so the new pack is never smaller than the old one by accident.  An entry that cannot be carried over into
     a pack the writer accepts (a Modrinth link that is not on cdn.modrinth.com, a missing hash, an unsafe path) is a
-    BLOCKER: the new pack is not written at all and the report says which entries and why.
+    BLOCKER: the new pack is not written at all and the report says which entries and why.  With `allow_drop` (default
+    false, an argument of update_modpack_file) the entries that cannot be carried are LEFT OUT instead: the pack is written
+    without them and every one is listed under `dropped` (a dry run lists them too).  It never drops what merely clashes
+    (two files with one path), and it never writes a pack that would have nothing left in it.
   * Dependencies the newer files require are added the way make_modpack_file adds them (packs.plan_pack, which calls
     resolve.add_dependencies) and listed under `dependencies_added`.  A dependency the pack already holds is not added twice.
   * Overrides are copied from the old pack UNCHANGED, member by member, zip to zip, never to disk and never interpreted:
     the bytes are streamed through, the CRC is re-checked, and a member that changed since it was listed stops the write.
+    That is the pack writer's zip source (packs.overrides_from_zip + packs.write_pack), with the writer's own name rules and
+    the three overrides caps (tool settings, 0 = none).
     (A CurseForge pack's overrides folder is written as `overrides/`, the name the manifest then says.)  Members that are
     neither the index nor an override (a README, an icon, CurseForge's modlist.html, which would be out of date) are not
     copied and are counted in `not_copied`.
@@ -41,11 +47,8 @@ THE RULES
 Every public function returns a plain dict and never raises.  Names and file names are stranger text: clipped, and the
 result carries `untrusted_note`.
 """
-import json
 import os
 import re
-import stat
-import zipfile
 from datetime import datetime
 from urllib.parse import urlsplit
 
@@ -55,7 +58,6 @@ from . import (BAD_DEST, NO_COMPATIBLE_FILE, TOO_BIG, UNSUPPORTED, VERIFY_FAILED
 SKIP_REASONS = ("not_found", "ambiguous", "blocked", "no_compatible_file", "lookup_failed")
 REPORT_LIST_MAX = 200
 NUMBERED_NAMES = 99
-CHUNK = 1 << 20
 
 CLOCK = packs.CLOCK                      # tests replace packs.CLOCK or this one to hit the time limit without waiting
 
@@ -112,10 +114,6 @@ def _when(text):
 
 def _name(value, limit=untrusted.NAME_LEN):
     return untrusted.clean_name("" if value is None else str(value), limit)
-
-
-def _json_bytes(doc):
-    return (json.dumps(doc, indent=2, sort_keys=True, ensure_ascii=False) + "\n").encode("utf-8")
 
 
 def _flag(value, default=False):
@@ -536,7 +534,7 @@ def _prepare(args):
         return _nothing(info, fmt, path, mc, loader, None, entries=entries, inner=inner)
 
     # What goes in the new pack: every entry, in the old order (updated ones with their new file), then the dependencies.
-    files, blockers, relinked = [], [], 0
+    files, blockers, relinked, uncarried = [], [], 0, []
     for e in entries:
         if e["state"] == "updated":
             files.append(e["new_pf"])
@@ -546,7 +544,9 @@ def _prepare(args):
             if e["pf"] is not None:
                 relinked += 1
         if e["pf"] is None:
-            blockers.append({"project": _label(e), "reason": "cannot_carry", "error": untrusted.clip(e["carry_error"], 200)})
+            blocker = {"project": _label(e), "reason": "cannot_carry", "error": untrusted.clip(e["carry_error"], 200)}
+            blockers.append(blocker)
+            uncarried.append((e, blocker))
             continue
         pf = dict(e["pf"])
         if e["installed"]:
@@ -577,7 +577,22 @@ def _prepare(args):
         return fail(TOO_BIG, "The new pack would hold %d files, more than the pack file limit (%d, a tool setting)." %
                     (len(files), cap))
 
-    overrides, bad = _override_plan(fmt, info)
+    # allow_drop: what cannot be carried is left out instead of stopping the write.  Only that: a clash of two paths stays a
+    # blocker (which of the two to keep is not for Jarvis to guess), and a pack with nothing left in it is never written.
+    allow_drop = _flag(args.get("allow_drop"), False)
+    drop_refused = None
+    if allow_drop and uncarried:
+        if any(b["reason"] != "cannot_carry" for b in blockers):
+            drop_refused = "clash"
+        elif not files:
+            drop_refused = "empty"
+        else:
+            for e, blocker in uncarried:
+                e["was"] = e["reason"] if e["state"] == "skipped" else None
+                e["state"], e["reason"], e["error"] = "dropped", "cannot_carry", blocker["error"]
+            blockers = []
+
+    overrides, bad = _override_plan(fmt, info, path)
     if bad:
         return bad
     prepared = {
@@ -586,6 +601,7 @@ def _prepare(args):
         "mc_version": mc, "loader": loader, "loader_version": loader_version, "same_target": same_target,
         "channel": channel, "files": files, "entries": entries, "added": added, "dependency_skipped": plan_skipped,
         "warnings": list(dict.fromkeys(plan_warnings)), "blockers": blockers, "overrides": overrides,
+        "allow_drop": allow_drop, "drop_refused": drop_refused,
         "original": {"name": info.get("name"), "version": info.get("version"), "mc_version": info.get("mc_version"),
                      "loader": info.get("loader"), "loader_version": info.get("loader_version")},
         "not_copied": list(inner["others"]), "extra_index_keys": list(inner["extra_index_keys"]),
@@ -612,20 +628,19 @@ def _pinned(fmt, e):
     return entry
 
 
-def _override_plan(fmt, info):
-    """The members to copy -> ({"members": [(old_name, new_name, size, crc)], "files", "bytes", "renamed"}, None) | failure."""
+def _override_plan(fmt, info, source):
+    """The override members to copy, as the pack writer's zip source -> ({"files", "bytes", "renamed", "plan"}, None) |
+    (None, failure).  The names and the caps are the writer's to check (packs.overrides_from_zip); nothing is opened here."""
     inner = info["_internal"]
-    members, names = [], set()
-    renamed = False
+    members, renamed = [], False
     for old, group, rel, size, crc in inner["override_entries"]:
         new = old if fmt == "modrinth" else packs.OVERRIDES + "/" + rel
         renamed = renamed or new != old
-        if new.lower() in names:
-            return None, fail(VERIFY_FAILED, "Two override files would end up with the same name in the new pack; nothing "
-                                            "was written.")
-        names.add(new.lower())
         members.append((old, new, size, crc))
-    return {"members": members, "files": len(members), "bytes": sum(m[2] for m in members), "renamed": renamed}, None
+    plan, bad = packs.overrides_from_zip(source, members, fmt)
+    if bad:
+        return None, bad
+    return {"files": len(members), "bytes": plan["bytes"], "renamed": renamed, "plan": plan if members else None}, None
 
 
 def _nothing(info, fmt, path, mc, loader, message, entries=None, inner=None):
@@ -672,6 +687,16 @@ def _line_skipped(e):
     return out
 
 
+def _line_dropped(e):
+    out = {"project": _label(e), "file_name": _old_name(e), "reason": e["reason"], "error": e["error"],
+           "kept": "no: left out of the new pack"}
+    if e.get("was"):
+        out["was"] = e["was"]                                   # why it had been skipped before (not_found ...)
+    if e.get("page_url"):
+        out["page_url"] = e["page_url"]
+    return out
+
+
 def _line_updated(e):
     new = e["new"]
     out = {"project": _label(e), "from": _old_name(e), "to": new.get("file_name") or "",
@@ -690,6 +715,7 @@ def describe(prepared, dry_run, written=None):
     unchanged = [e for e in entries if e["state"] == "unchanged"]
     updated = [e for e in entries if e["state"] == "updated"]
     skipped = [e for e in entries if e["state"] == "skipped"]
+    dropped = [e for e in entries if e["state"] == "dropped"]
     ov = P["overrides"]
     lv = P.get("loader_version")
     result = {
@@ -702,7 +728,7 @@ def describe(prepared, dry_run, written=None):
         "version": P["version"], "mc_version": P["mc_version"], "loader": P["loader"],
         "counts": {"entries": len(entries), "unchanged": len(unchanged), "updated": len(updated),
                    "skipped": len(skipped), "dependencies_added": len(P["added"]), "override_files": ov["files"]},
-        "complete": not skipped,
+        "complete": not skipped and not dropped,
         "updated": [_line_updated(e) for e in updated][:REPORT_LIST_MAX],
         "unchanged": [_line_unchanged(e) for e in unchanged][:REPORT_LIST_MAX],
         "skipped": [_line_skipped(e) for e in skipped][:REPORT_LIST_MAX],
@@ -715,6 +741,12 @@ def describe(prepared, dry_run, written=None):
     if lv:
         result["loader_version"] = lv["value"]
         result["loader_version_source"] = "the pack's own" if lv["source"] == "pack" else lv["source"]
+    if P.get("allow_drop"):
+        # Only when it was asked for, so a run without it reports exactly what it always did.  An empty list says that
+        # nothing had to be left out.
+        result["allow_drop"] = True
+        result["dropped"] = [_line_dropped(e) for e in dropped][:REPORT_LIST_MAX]
+        result["counts"]["dropped"] = len(dropped)
     if len(updated) > REPORT_LIST_MAX or len(unchanged) > REPORT_LIST_MAX or len(skipped) > REPORT_LIST_MAX:
         result["lists_cut_at"] = REPORT_LIST_MAX
     if P["dependency_skipped"]:
@@ -724,7 +756,13 @@ def describe(prepared, dry_run, written=None):
         result["not_copied"] = {"count": len(P["not_copied"]), "sample": [untrusted.clip(n, 100) for n in P["not_copied"][:5]],
                                 "note": "Entries that are neither the index nor an override (a README, an icon, a mod list) "
                                         "are not copied."}
-    warnings = list(P["warnings"])
+    warnings = []
+    if dropped:
+        warnings.append("%d entr%s can't be carried into a pack Jarvis writes and %s LEFT OUT of the new pack because "
+                        "allow_drop was set (see dropped), so it has %d fewer file%s than the old one." %
+                        (len(dropped), "y" if len(dropped) == 1 else "ies", "was" if len(dropped) == 1 else "were",
+                         len(dropped), "" if len(dropped) == 1 else "s"))
+    warnings += list(P["warnings"])
     if P["extra_index_keys"] or P["extra_deps"]:
         warnings.append("Some fields of the old index that Jarvis doesn't read were not carried into the new pack: %s." %
                         ", ".join(untrusted.clip(k, 30) for k in (P["extra_index_keys"] + P["extra_deps"])[:6]))
@@ -743,7 +781,17 @@ def describe(prepared, dry_run, written=None):
         result["error"] = ("The new pack was NOT written: %d entr%s can't be carried into a pack Jarvis writes, and dropping "
                            "them would make the new pack smaller than the old one." % (
                                len(P["blockers"]), "y" if len(P["blockers"]) == 1 else "ies"))
+        if P.get("drop_refused") == "clash":
+            result["error"] += (" allow_drop only leaves out entries that can't be carried: the entries that would share a "
+                                "path still stop the write.")
+        elif P.get("drop_refused") == "empty":
+            result["error"] += " allow_drop would leave nothing in the new pack, so nothing was dropped."
+        elif not P.get("allow_drop") and all(b.get("reason") == "cannot_carry" for b in P["blockers"]):
+            result["error"] += (" If the owner agrees to a smaller pack, run it again with allow_drop=true: the pack is then "
+                                "written without them and every one is listed under dropped.")
     what = "%d updated, %d unchanged, %d skipped" % (len(updated), len(unchanged), len(skipped))
+    if dropped:
+        what += ", %d left out" % len(dropped)
     if P["added"]:
         what += ", %d dependenc%s added" % (len(P["added"]), "y" if len(P["added"]) == 1 else "ies")
     if not result["ok"]:
@@ -769,18 +817,12 @@ def describe(prepared, dry_run, written=None):
 # --------------------------------------------------------------------------- the write
 
 def _plan_for_writer(P):
-    """The plan dict packs.build_manifest wants."""
-    return {"format": P["format"], "name": P["name"] or "pack", "version": P["version"], "author": P["author"],
-            "summary": P["summary"], "mc_version": P["mc_version"], "loader": P["loader"],
-            "loader_version": P["loader_version"], "files": P["files"]}
-
-
-def _info(name):
-    info = zipfile.ZipInfo(name, date_time=packs.FIXED_TIME)
-    info.compress_type = zipfile.ZIP_DEFLATED
-    info.create_system = 3
-    info.external_attr = (stat.S_IFREG | 0o644) << 16
-    return info
+    """The plan dict packs.write_pack wants: the new pack's files, and the old pack as the zip source of the overrides.
+    Never an overwrite: the name is one that does not exist (_new_filename) and the writer refuses an existing one."""
+    return dict(format=P["format"], name=P["name"] or "pack", version=P["version"], author=P["author"],
+                summary=P["summary"], mc_version=P["mc_version"], loader=P["loader"],
+                loader_version=P["loader_version"], files=P["files"], folder=P["folder"], filename=P["filename"],
+                target=P["target"], overwrite=False, overrides=P["overrides"]["plan"], skipped=[], warnings=[])
 
 
 def write(P):
@@ -788,63 +830,7 @@ def write(P):
     try:
         if P["blockers"]:
             return describe(P, False, written=False)
-        manifest_name, doc = packs.build_manifest(_plan_for_writer(P))
-        members = P["overrides"]["members"]
-        names = {manifest_name} | {m[1] for m in members}
-
-        def build(fh):
-            with zipfile.ZipFile(fh, "w", zipfile.ZIP_DEFLATED) as out:
-                out.writestr(_info(manifest_name), _json_bytes(doc))
-                _copy_overrides(P["source"], members, out)
-
-        def validate(path):
-            return packs.check_pack(path, P["format"], names, doc)
-
-        got = outdir.write_atomic(P["folder"], P["filename"], build, validate, overwrite=False)
-        if not got.get("ok"):
-            got.setdefault("written", False)
-            return got
-        result = describe(P, False, written=True)
-        result["size"] = got["size"]
-        if got.get("created_folder"):
-            result["created_folder"] = True
-        return result
-    except outdir.Refused as exc:
-        return fail(exc.reason, exc.message, written=False)
+        return packs.write_pack(_plan_for_writer(P), describe_with=lambda _plan, dry_run, written=None:
+                                describe(P, dry_run, written=written))
     except Exception as exc:  # noqa: BLE001 - this never raises
         return fail(UNSUPPORTED, "The new pack could not be written (%s). Nothing was kept." % type(exc).__name__, written=False)
-
-
-def _copy_overrides(source, members, out):
-    """Stream each override member from the old pack into the new one.  Never to disk, never interpreted.  A member that
-    differs from what was listed (size or CRC), or that turns out larger than it said, stops the write."""
-    if not members:
-        return
-    try:
-        zf = zipfile.ZipFile(str(source))
-    except (zipfile.BadZipFile, OSError, ValueError):
-        raise outdir.Refused(VERIFY_FAILED, "The original pack couldn't be opened again; nothing was kept.") from None
-    with zf:
-        for old, new, size, crc in members:
-            try:
-                info = zf.getinfo(old)
-            except KeyError:
-                raise outdir.Refused(VERIFY_FAILED, "The original pack changed while the new one was written; nothing was "
-                                                    "kept.") from None
-            if info.file_size != size or info.CRC != crc or info.flag_bits & 0x1:
-                raise outdir.Refused(VERIFY_FAILED, "The original pack changed while the new one was written; nothing was "
-                                                    "kept.")
-            left = size
-            with zf.open(info) as src, out.open(_info(new), "w", force_zip64=size >= (1 << 31)) as dst:
-                while True:
-                    chunk = src.read(min(CHUNK, left + 1))
-                    if not chunk:
-                        break
-                    left -= len(chunk)
-                    if left < 0:
-                        raise outdir.Refused(VERIFY_FAILED, "A file in the original pack is larger than it said; nothing "
-                                                            "was kept.")
-                    dst.write(chunk)
-                if left != 0:
-                    raise outdir.Refused(VERIFY_FAILED, "A file in the original pack is shorter than it said; nothing "
-                                                        "was kept.")

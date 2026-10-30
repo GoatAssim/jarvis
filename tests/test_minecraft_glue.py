@@ -214,6 +214,30 @@ def test_g5_pack_instruction_points_at_check_mc_updates_before_the_optifine_sent
     check("still plain text for the per-turn tail", "\n" not in text and "{" not in text)
 
 
+# ---- G4 (merge audit) -------------------------------------------------------------------------------------------
+def test_g4_pack_instruction_matches_the_tools_as_built():
+    from jarvis.actions import (minecraft_download, minecraft_packread, minecraft_packs, minecraft_undo,
+                                minecraft_update_source, minecraft_updates)
+    text = lk.TOOL_PACK_INSTRUCTION
+    check("download_optifine is not said to queue a file in Downloads (it saves a jar in a folder, no hub row)",
+          "download_optifine queue" not in text and "download_optifine saves the OptiFine jar in a folder" in text)
+    check("...and neither download tool is said to install", "neither installs anything" in text and "never 'installed'" in text)
+    check("a needs_folder answer is to be put to the owner, then the check is called again with the folder",
+          "needs_folder" in text and "call it again with the folder" in text)
+    check("inspect_modpack and update_modpack_file are named, the update as a NEW copy with dry_run first",
+          "inspect_modpack" in text and "update_modpack_file writes a NEW copy" in text and "never changed" in text)
+    check("the OptiFine sentence is still the last one", text.endswith(SENTENCE))
+    registered = tools.AUTO_TOOL_PACK_INSTRUCTIONS.get("minecraft", "")
+    check("the registry carries the instruction exactly once", registered.count(text.strip()) == 1)
+    real = set()
+    for module in (lk, mo, minecraft_download, minecraft_packs, minecraft_packread, minecraft_updates,
+                   minecraft_update_source, minecraft_undo):
+        real |= set(getattr(module, "TOOLS", {}))
+    named = {w for w in re.findall(r"[a-z]+(?:_[a-z]+)+", text) if re.search(r"(?:^|_)(?:mc|modpack|optifine)(?:_|$)", w)}
+    named.discard("mc_version")
+    check("every tool the instruction names is a real tool of the group", bool(named) and named <= real, sorted(named - real))
+
+
 # --- runner (keep BELOW every test: it reads globals() when it executes) ----------------------------------------
 
 if __name__ == "__main__":

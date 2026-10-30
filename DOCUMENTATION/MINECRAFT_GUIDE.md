@@ -2,7 +2,7 @@
 
 For two readers. **You, the owner:** what can I ask Jarvis for, how do I set up CurseForge, what will it never do, how sure are we that it works. **A developer:** section 9 says where the code is.
 
-**Checked against:** the code of `jarvis-main_182_` (read, not run) and the reports of the agents who built it, written 2026-10-27. Every sentence about behaviour was checked in a file named in section 9, or says "not checked". Things other agents are changing right now (the update check, the panel, the key layer) are described **as they are in 182**; if you apply their patches, those parts may change.
+**Checked against:** the code of `jarvis-main_186_` (read, not run) and the reports of the agents who built it; first written 2026-10-27 against 182 and brought up to 186 on 2026-10-30 (the merge audit). Every sentence about behaviour was checked in a file named in section 9, or says "not checked". Work that other agents are building at the same time as this audit is **not described here**; a later pass adds it.
 
 **Paths.** A path such as `modhosts/net.py` or `actions/minecraft_lookup.py` is inside `jarvis-cli/jarvis/`. Paths that start with `tests/`, `web/` or `DOCUMENTATION/` are at the repo root. `~/.jarvis/` is Jarvis's folder in your home folder.
 
@@ -18,9 +18,9 @@ For two readers. **You, the owner:** what can I ask Jarvis for, how do I set up 
 
 ## 1. What it is
 
-Seven tools, all **yours alone** (a chat guest is not offered them and each one refuses a guest itself), that look things up on Modrinth, CurseForge and OptiFine's official site, download single files, write modpack files, and tell you which of your mods have newer files.
+Fourteen tools, all **yours alone** (a chat guest is not offered them and each one refuses a guest itself), that look things up on Modrinth, CurseForge and OptiFine's official site, download single files, write modpack files, tell you which of your mods have newer files, replace one mod file at a time (keeping the old one), and read or update a pack file you already have.
 
-**Nothing is ever installed.** No tool unzips a pack, edits a launcher, runs an installer or starts the game. Every answer says "queued", "written", "downloaded, not installed" or "a newer file is available", never "installed" or "updated".
+**Nothing is ever installed.** No tool unzips a pack, edits a launcher, runs an installer or starts the game. Every answer says "queued", "written", "downloaded, not installed" or "a newer file is available", never "installed". The one thing that changes a file of yours is `apply_mc_update` (below): one file, in a folder you put on the watched list, after your confirmation, with the old file moved to a backup folder (never deleted) and the game needing a restart.
 
 | Tool | What it does | You can say | Asks first? |
 |---|---|---|---|
@@ -30,7 +30,14 @@ Seven tools, all **yours alone** (a chat guest is not offered them and each one 
 | `make_modpack_file` | Writes **one** `.mrpack` (Modrinth) or CurseForge `.zip` from a list of projects, one platform per pack. Required dependencies are added. Entries that cannot be placed are reported and skipped, never swapped for something similar. `loader_version` is optional (the latest is used and the report says which). `src` packs a folder of yours into `overrides/`. `dry_run` writes nothing. Optional cross-platform matching: section 5. | `Make a Modrinth pack of sodium, lithium and iris for 1.20.1 Fabric into D:/Packs` | Yes: the tool (dry runs too), then "Save outside the downloads library?" |
 | `list_optifine_versions` | Lists OptiFine builds from optifine.net, newest first, the recommended build marked. Previews (test builds) only with `include_preview`. Default 30 rows (0 = all). | `Which OptiFine versions exist for 1.20.1?` | No |
 | `download_optifine` | Downloads **one** OptiFine jar from the official site into a folder, under its official name. The jar is OptiFine's installer: it is **never run**. It does not use the Download Hub, so no row appears in Downloads. Never overwrites a file. | `Get OptiFine 1.20.1 HD U I6 into D:/Minecraft/mods` | Yes: the tool, then "Save outside the downloads library?" |
-| `check_mc_updates` | Looks at **one folder** of yours and says which `.jar`, `.zip` and `.mrpack` files have a newer compatible file on Modrinth. Read-only. Section 6. | `Are my mods in D:/Minecraft/mods up to date? I play 1.20.1 on Fabric` | No |
+| `check_mc_updates` | Looks at **one folder** of yours and says which `.jar`, `.zip` and `.mrpack` files have a newer compatible file on Modrinth (and on CurseForge by fingerprint, with a key). Read-only. Section 6. | `Are my mods in D:/Minecraft/mods up to date? I play 1.20.1 on Fabric` | No |
+| `check_mc_watched` | Runs the same check over every folder on your **watched** list and lists the updates, each with an `id`. Read-only. Section 6. | `Check my watched mod folders` | No |
+| `mc_watch` | Adds a mod folder to the watched list, takes one off, or changes its settings (Minecraft version, loader, channel, `auto`). Writes only `~/.jarvis/modhosts/watched.json`. | `Watch D:/Minecraft/mods for 1.20.1 on Fabric` | Yes |
+| `apply_mc_update` | Replaces **one** mod file in a watched folder with its newer file, by the `id` from `check_mc_watched`. The old file is moved to a backup, never deleted. `dry_run` says what it would do. Section 6. | `Update that mod` | Yes |
+| `list_mc_replaced` | Lists the files Jarvis has replaced, newest first, with whether the backup is still there. Read-only. | `What have you replaced in my mods?` | No |
+| `undo_mc_update` | Puts a replaced file back: the newer file is moved aside, the old one returns. Refuses if you changed either file since. | `Undo that update` | Yes |
+| `inspect_modpack` | Reads a `.mrpack` or CurseForge `.zip` you name and says what is in it (name, Minecraft version, loader, every file, the number of override files, anything odd). Extracts nothing, runs nothing, fetches no link in the pack. | `What is in D:/Packs/mypack.mrpack?` | No |
+| `update_modpack_file` | Writes a **new** pack file (`<name>-updated.mrpack` or `.zip`) with newer files from an existing one; the original is never changed. `dry_run` first. | `Make an updated copy of D:/Packs/mypack.mrpack` | Yes |
 
 For a pack, the tool's own instructions tell Jarvis to do the dry run first and show you the report before the real write.
 
@@ -55,7 +62,7 @@ All nine are tool settings of `actions/minecraft_lookup.py`. **Contact** and **D
 | Setting | Default | What it does |
 |---|---|---|
 | `contact` | `github.com/GoatAssim` | Sent to Modrinth and CurseForge in the User-Agent (`Jarvis/<build> (<contact>)`) so they can tell who is asking. Letters, digits and `. _ : / @ + -` only. |
-| `default_dest` | `~/Downloads` | The folder used whenever a download or pack tool is given no `dest`, and the folder `check_mc_updates` looks at when you name none and it has no last folder. `~` is expanded when the tool runs. A folder outside the Download Hub library still asks "Save outside the downloads library?". |
+| `default_dest` | `~/Downloads` | The folder used whenever a download or pack tool is given no `dest`, and the folder `check_mc_updates` suggests when you name none and it has no last folder (it asks you first). `~` is expanded when the tool runs. A folder outside the Download Hub library still asks "Save outside the downloads library?". |
 | `max_pack_files` | `0` | Most files in one pack. |
 | `overrides_max_files` | `0` | Most files copied into a pack's `overrides/`. |
 | `overrides_max_total_mb` | `0` | Largest total size of a pack's `overrides/`, in MB. |
@@ -100,29 +107,42 @@ A pack lists files from **one** platform: a `.mrpack` can only point at `cdn.mod
 `check_mc_updates` answers: "which files in this folder have a newer compatible file on Modrinth?"
 
 - **It reads, it never changes.** Nothing is downloaded, replaced, renamed or installed, and the folder is not written to. To get a newer file you ask for it with `download_mc_file`; each update in the answer carries `get_with` (the tool, project and file id to use). It says "a newer file is available", never "updated".
-- **Which folder:** the one you name, else the last one it checked, else the `default_dest` setting. The answer says which (`folder_from`). It looks one level deep only: sub-folders, links, hidden files and other extensions are counted under `ignored` and never opened.
-- **Only hashes leave your PC**, to `api.modrinth.com`. No file name, no path. A renamed jar still matches; a look-alike name never does.
+- **Which folder:** the one you name, else the last one it checked. With neither it does **not** read anything: it answers `needs_folder` with a question that suggests your `default_dest` folder, and Jarvis should put it to you. The answer says which folder was used (`folder_from`). It looks one level deep only: sub-folders, links, hidden files and other extensions are counted under `ignored` and never opened.
+- **Only numbers leave your PC**: SHA-1 hashes to `api.modrinth.com` and, for a file Modrinth doesn't know and only with your CurseForge key, CurseForge's own fingerprint (computed on this PC, nothing downloaded) to `api.curseforge.com`. No file name, no path. A renamed jar still matches; a look-alike name never does.
 - **"Newer"** means Modrinth published a file after the one you have, for the same Minecraft version and loader. Dates are compared, never version numbers. A release file is not offered a beta unless you ask for `channel: beta` or `alpha`.
 - **Never a guess:** a file that works on several Minecraft versions or loaders, with no answer from you, is listed "not checked" (`needs_mc_version` / `needs_loader`) and Jarvis should ask you. A file built for another version or loader is `other_version`, not "up to date". Quilt falls back to Fabric files as elsewhere.
-- **CurseForge files are not checked.** A file Modrinth doesn't know is "not checked" (`not_on_modrinth`) with a note that CurseForge identifies files by a fingerprint this check does not compute. No other site is contacted.
-- **State file:** `~/.jarvis/modhosts/update_state.json` holds the last folder and a hash cache (path, size, modified time, sha1), so an unchanged jar isn't read twice. No key, no vendor answer. Safe to delete (one re-hash). It is not shown in Settings.
-- **Heads-up:** with no folder named and no last folder, it reads `~/Downloads` and sends the sha1 of every `.jar`, `.zip` and `.mrpack` in it. Hashes only, but name a folder if you'd rather it did not.
+- **CurseForge files are looked up by fingerprint, and that route is unverified.** A file Modrinth doesn't know is looked up on CurseForge only with your key, and counts as a match only when the fingerprint **and** the SHA-1 both agree. Nobody has run this against the real CurseForge service (section 8); the answer says so when a result came from it. With no key, or no exact match, the file is "not checked" (`not_on_modrinth` / `not_on_curseforge`), never guessed. No other site is contacted.
+- **State file:** `~/.jarvis/modhosts/update_state.json` holds the last folder and a hash cache (path, size, modified time, sha1, and the CurseForge fingerprint beside it), so an unchanged jar isn't read twice. No key, no vendor answer. Safe to delete (one re-hash). It is not shown in Settings.
 - A file you downloaded with `download_mc_file` is not recorded anywhere; the folder is the record, so if you moved it, name the folder it is in.
 
+### Watched folders, replacing a file, and the way back
+
+- **Watched list.** `mc_watch` puts a mods folder on `~/.jarvis/modhosts/watched.json` (at most 20; the same folder rules as the update check: never `~/.jarvis`, your home folder, an OS folder or a link). Each entry can carry a label, the Minecraft version and loader you play, the least stable `channel` you accept (default release) and `auto`. `auto` is your wish that the folder may update by itself; the Download Hub's update runner honours it, `apply_mc_update` never updates on its own.
+- **Finding updates.** `check_mc_watched` checks every watched folder, one at a time, and returns the updates, each with an `id` (`<folder id>:<sha1 of the file you have>`). A file the check could not decide (several versions, another version, not on Modrinth, blocked) is never offered as an update: it is counted in one sentence per folder.
+- **Replacing one file.** `apply_mc_update` takes an `id`, re-checks that folder, and refuses a stale `id` (the file changed, moved or was already updated). It then asks the same site that found the update for the file's link, size and checksum; a file with **no published checksum is refused** (stricter than `download_mc_file`, because here a bad file would replace a good one). The file is downloaded to Jarvis's own staging folder, never into your mods folder, checked on disk, and only then swapped in: a record is written first, the **old file is moved** to `~/.jarvis/modhosts/replaced/<date-time>/`, the new file is moved in without overwriting anything, and the placed file is checked again; if anything fails the old file is put back. Required dependencies are only listed. The answer says the game needs a restart.
+- **Backups are pruned.** After a successful replacement, the oldest backups beyond 50 batches or 2 GB are deleted. This is the **one place Jarvis deletes anything**, and the answer says so.
+- **Undo.** `list_mc_replaced` shows the backups; `undo_mc_update` moves the newer file to `~/.jarvis/modhosts/replaced/undone/<id>/` and the old file back, but only if both files still have the checksum the record says and the old name is free. It never overwrites or deletes.
+
+### Reading and updating a pack file
+
+- `inspect_modpack` opens a `.mrpack` or CurseForge `.zip` you name, reads its index in memory and extracts nothing; the files under `overrides/` are listed, never read. A zip that looks like a zip bomb, has an unsafe name or two index files is refused with the rule that stopped it; an unknown format version is reported, not guessed. A link in a Modrinth pack that is not on Modrinth's own host is a warning. Pack names and file names are text from strangers.
+- `update_modpack_file` writes a **new** file next to the destination you give (`<name>-updated.mrpack`, then `-updated-2` ...; there is no overwrite option). "Newer" is a later publication date for the same Minecraft version and loader, on the pack's own platform. An entry that cannot be updated is **skipped and stays as it was**; an entry the writer cannot carry over (an unsafe path, a missing hash) stops the whole write and the report says which. Overrides are copied unchanged, zip to zip. The old pack is never touched, and nothing is installed.
 ---
 
 ## 7. The panel and the three commands
 
 **Menu > Minecraft** (or `/minecraft` in the Ask box) opens the panel. Four tabs:
 
-- **Search:** query, source, kind, Minecraft version, loader, sort. A hit's **Files** button fills the next tab.
-- **Project files:** compatible files with the recommended one marked; pick one, choose a folder, **Check only (dry run)** or **Queue download**.
+A bar at the top, "What I play" (Minecraft version, loader, preferred source), is set once and used by every tab.
+
+- **Find:** search results as cards; **Show files** opens the project with its compatible files (the recommended one marked, and why) and its dependencies. Picks go into a tray in the page's memory; from the tray you **Check only (dry run)** or **Queue downloads** (one dialog for the whole batch) or make a pack. Nothing happens until you press a button.
+- **Updates:** your watched folders, a check with an Update button for each newer file, and an undo list (this replaced the old one-off `check_mc_updates` run in the panel) (`check_mc_watched`, `apply_mc_update`, `mc_watch`, `list_mc_replaced`, `undo_mc_update`).
 - **OptiFine:** list versions, check only, download.
 - **Make a pack:** dry run first, then make the pack.
 
-The panel is a thin face on **six** of the tools (not `check_mc_updates`, in 182). It never talks to a vendor and never sees your key: every action goes through the same tool checks as the Debug panel. Before anything is written it does a dry run and shows one dialog with the exact folder. Vendor text is shown as plain text, and a link is made only for `https` addresses on `modrinth.com`, `curseforge.com` or `optifine.net`. With no CurseForge key it shows a note with an "Open Minecraft settings" button.
+The panel is a thin face on **eleven** of the tools (not `check_mc_updates`, `inspect_modpack` or `update_modpack_file`). It never talks to a vendor and never sees your key: every action goes through the same tool checks as the Debug panel. Before anything is written it does a dry run and shows one dialog with the exact folder. Vendor text is shown as plain text, and a link is made only for `https` addresses on `modrinth.com`, `curseforge.com` or `optifine.net`. With no CurseForge key it shows a note with an "Open Minecraft settings" button.
 
-**Known limit in 182:** the panel sends the "I just showed you the folder" flag, but `web/server.js` does not act on it. A folder outside the Download Hub library (the default `~/Downloads` counts as outside) therefore ends in "Not confirmed", and the panel offers a button to use the "Minecraft" folder inside the library instead. Asking Jarvis in chat goes through the tool's own question (not checked in a browser).
+**Confirmation.** `web/server.js` passes the panel's "I just showed you the folder" yes on to the questions a Minecraft tool asks ("Save outside the downloads library?" and so on), only when the panel says so and only for the Minecraft tools; every other tool runs as before. So a folder outside the Download Hub library works after the panel's own dialog. This is read from the code and its test; nobody has seen it in a browser (section 8).
 
 **Palette commands** (type `/` in the Ask box). All three are read-only lookups and run without a confirmation:
 
@@ -132,7 +152,7 @@ The panel is a thin face on **six** of the tools (not `check_mc_updates`, in 182
 | `/mcfind <mc_version> <loader> <query>` | `/mcfind 1.20.1 fabric sodium` | the same, for one Minecraft version and loader |
 | `/mcproject <project> [mc_version] [loader]` | `/mcproject sodium 1.20.1 fabric` | `get_mc_project` |
 
-Downloads and packs are deliberately **not** commands: they need the folder question and the confirmation.
+Downloads, packs, updates and undo are deliberately **not** commands: they need the folder question and the confirmation.
 
 ---
 
@@ -161,15 +181,19 @@ Read this before you trust anything.
 | Loader-version lookup | A fake of the five loader sites |
 | OptiFine tools | A fake `optifine.net` and the probe's saved page |
 | Cross-platform matching and the fingerprint | An independent textbook implementation of the hash, hand-written catalogs |
-| `check_mc_updates` | An in-process fake Modrinth |
-| Panel | Pure helpers only, in Node without a browser |
+| `check_mc_updates` | An in-process fake Modrinth; its CurseForge half and the `needs_folder` default against a fake CurseForge |
+| Watched folders, `apply_mc_update`, `undo_mc_update` | A fake check, a fake engine, and an in-process fake Modrinth / CurseForge with temp folders |
+| `inspect_modpack`, `update_modpack_file` | Packs built by the real pack writer and by hand (hostile zips), a fake adapter, no network |
+| Hardening: the key in the cache, the two CurseForge hosts, key-file reads | A fake transport (`tests/test_minecraft_hardening.py`) |
+| Panel | Pure helpers in Node without a browser, and static checks of the files and wiring |
 | Guards (owner-only, confirm-gated, no "install", one network door, key stays in its file) | `tests/test_minecraft_guards.py`, `test_minecraft_integration.py` |
 
 **Never tried:**
 
 - A real **CurseForge CDN download.** The probe's two first-byte requests to `edge.forgecdn.net` got HTTP 404 (the cause is unknown: the request style, or the files). Whether the hub's plain download works is unknown; when you try one, watch its Downloads row. A 404 there is the honest result, and nothing else is tried.
-- CurseForge's **fingerprint route** (the probe never called it) and the **murmur2 variant** against a real CurseForge file (section 5).
-- The **panel in a browser.** No one has seen it rendered; how OptiFine lists and pack results look is unknown. The hand-written hostile-text fixture is only used on the helper functions.
+- CurseForge's **fingerprint route** (the probe never called it) and the **murmur2 variant** against a real CurseForge file (sections 5 and 6). `tests/modhosts_cdn_check.py` is the probe you can run for it and for the download host.
+- **Replacing and undoing a real mod file** (`apply_mc_update`, `undo_mc_update`) in a real mods folder, and a pack made by `update_modpack_file` opened in a launcher.
+- The **panel in a browser**, including the Updates tab and the confirmation that `web/server.js` passes on. No one has seen it rendered; how OptiFine lists and pack results look is unknown. The hand-written hostile-text fixture is only used on the helper functions.
 - A real **download and pack end to end**: a pack opened in the Modrinth app, Prism or the CurseForge app; a real OptiFine jar through `download_optifine`; a real `check_mc_updates` run on your mods.
 - A CurseForge **manifest that lists a blocked file** (such files are skipped and reported).
 - Windows-specific behaviour (OneDrive placeholders are skipped as links; hidden-file attribute): written, not run.
@@ -179,7 +203,7 @@ Read this before you trust anything.
 
 - A file with no published hash is queued **without a checksum**; the result says so. The hub's duplicate check ignores `verify`, so a link already queued without one keeps no check; the tool says "can't promise its checksum".
 - Several "Save outside the downloads library?" questions come with `with_dependencies` (one per file); declining one stops the rest.
-- A 403 from the CDN host can be reported as "API key may be wrong" (`bad_key`); the download tool reports the null-link and 403 cases as `not_distributable`.
+- A 403 from CurseForge's download host is now its own reason, `cdn_refused` (a 403 from the API host stays `bad_key`); the download tool still reports the null-link and both 403 cases as `not_distributable`.
 - CurseForge answers are never cached, so big CurseForge packs make many requests.
 
 ---
@@ -188,12 +212,12 @@ Read this before you trust anything.
 
 | What | Where |
 |---|---|
-| The seven tools | `actions/minecraft_lookup.py` (`search_mc_mods`, `get_mc_project`, the group's one `TOOL_PACK_INSTRUCTION`, all nine `TOOL_SETTINGS`, the three `TOOL_COMMANDS`), `minecraft_download.py`, `minecraft_packs.py`, `minecraft_optifine.py`, `minecraft_updates.py` |
-| The engine | `modhosts/`: `net.py` (the one door), `hosts.py`, `config.py` (the key), `cache.py`, `untrusted.py`, `sources.py`, `modrinth.py`, `curseforge.py`, `resolve.py`, `loaders.py`, `packs.py`, `outdir.py`, `optifine.py`, `crossmatch.py`, `updates.py` |
+| The fourteen tools | `actions/minecraft_lookup.py` (`search_mc_mods`, `get_mc_project`, the group's one `TOOL_PACK_INSTRUCTION`, all nine `TOOL_SETTINGS`, the three `TOOL_COMMANDS`), `minecraft_download.py`, `minecraft_packs.py`, `minecraft_optifine.py`, `minecraft_updates.py`, `minecraft_update_source.py` (`check_mc_watched`, `apply_mc_update`, `mc_watch`), `minecraft_undo.py` (`list_mc_replaced`, `undo_mc_update`), `minecraft_packread.py` (`inspect_modpack`, `update_modpack_file`) |
+| The engine | `modhosts/`: `net.py` (the one door), `hosts.py`, `config.py` (the key), `cache.py`, `untrusted.py`, `sources.py`, `modrinth.py`, `curseforge.py`, `resolve.py`, `loaders.py`, `packs.py`, `outdir.py`, `optifine.py`, `crossmatch.py`, `updates.py`, `watched.py`, `apply.py`, `packread.py`, `packupdate.py` |
 | The panel | `web/public/minecraft-panel.js` and `.css`; the `minecraft` verb in `slash-commands-data.js` |
-| State files | `~/.jarvis/curseforge.json`, `~/.jarvis/modhosts/cache.json`, `~/.jarvis/modhosts/update_state.json` |
+| State files | `~/.jarvis/curseforge.json`, `~/.jarvis/modhosts/cache.json`, `~/.jarvis/modhosts/update_state.json`, `~/.jarvis/modhosts/watched.json`, `~/.jarvis/modhosts/replaced/` (backups, staging, undone) |
 | The rules and why | `AGENTS.md`, "Minecraft mod sources"; `REPO_MAP.md` |
-| Reason codes | `modhosts/__init__.py`: `no_key`, `bad_key`, `rate_limited`, `not_found`, `ambiguous`, `not_distributable`, `no_compatible_file`, `no_loader_version`, `bad_dest`, `exists`, `too_big`, `verify_failed`, `vendor_changed`, `offline`, `unsupported` |
+| Reason codes | `modhosts/__init__.py`: `no_key`, `bad_key`, `rate_limited`, `not_found`, `ambiguous`, `not_distributable`, `no_compatible_file`, `no_loader_version`, `bad_dest`, `exists`, `too_big`, `verify_failed`, `vendor_changed`, `offline`, `unsupported`, and `cdn_refused` (a 403 from CurseForge's download host) |
 
 **When something goes wrong**
 
@@ -207,7 +231,8 @@ Read this before you trust anything.
 | `exists` | The file is already there | Another `filename`, or `overwrite` for packs |
 | `vendor_changed` (OptiFine) with a page link | optifine.net changed | Use the official page; report it |
 | `no_loader_version` | No loader build for that Minecraft version, or the loader site is down | Give `loader_version` yourself |
-| "Not confirmed: nothing was written" | You answered no, or nobody could answer (the panel, 182) | Section 7 |
+| `cdn_refused` | CurseForge's download server refused the file (the key is never sent there) | Download it from the project page yourself; `tests/modhosts_cdn_check.py` probes the host |
+| "Not confirmed: nothing was written" | You answered no, or nobody could answer | Section 7 |
 | "`<tool>` is the owner's: someone in a chat can't use it" | A guest, or an unreadable sender | Use it yourself |
 
 ---
@@ -231,6 +256,12 @@ python3 tests/test_minecraft_download.py
 python3 tests/test_minecraft_packs_tool.py
 python3 tests/test_optifine.py
 python3 tests/test_minecraft_updates.py
+python3 tests/test_minecraft_updates_cf.py
+python3 tests/test_minecraft_update_source.py
+python3 tests/test_minecraft_apply.py
+python3 tests/test_minecraft_packread.py
+python3 tests/test_minecraft_hardening.py
+python3 tests/test_minecraft_glue.py
 python3 tests/test_minecraft_panel.py
 node tests/verify_minecraft_panel.js
 ```

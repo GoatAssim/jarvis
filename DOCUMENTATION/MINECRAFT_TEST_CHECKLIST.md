@@ -1,6 +1,6 @@
 # Minecraft hand-test checklist
 
-One numbered list for you to click through. Built from the manual checks of every report (the lookup, hub-verify, CurseForge, OptiFine, wave-1 glue, download, pack, loader-version, update-check and panel reports) and the pack-matching steps in `actions/minecraft_packs.py`. Written 2026-10-27 against `jarvis-main_182_`. **Nothing on this list has been run by anyone**: the authors were told not to run tests, so every "expect" below is what the code and its tests say should happen, not something seen.
+One numbered list for you to click through. Built from the manual checks of every report (the lookup, hub-verify, CurseForge, OptiFine, wave-1 glue, download, pack, loader-version, update-check and panel reports) and the pack-matching steps in `actions/minecraft_packs.py`. Written 2026-10-27 against `jarvis-main_182_`; brought up to `jarvis-main_186_` on 2026-10-30 (sections 9.9, 9.10, 11 and 12 are new, the old section 11 is now 13). **Nothing on this list has been run by anyone**: the authors were told not to run tests, so every "expect" below is what the code and its tests say should happen, not something seen.
 
 Format of every step: **Do** what to type or click. **Expect** what you should see. **If not** what it usually means (only causes the reports or the code support; otherwise "not known: write down what you saw").
 
@@ -52,7 +52,7 @@ Tick the box, and write the date and what you saw next to any step that does not
 ## 3. Who may use the tools
 
 - [ ] **3.1 Do:** from a non-owner Discord account, ask for a mod, for OptiFine, for a pack and for an update check. **Expect:** each is refused ("... is the owner's: someone in a chat can't use it"), nothing queued, nothing written; the tools are not offered to that account. **If not:** report which tool answered.
-- [ ] **3.2 Do:** the same as yourself on the Jarvis page. **Expect:** all seven are offered and work.
+- [ ] **3.2 Do:** the same as yourself on the Jarvis page. **Expect:** all 14 are offered and work.
 
 ---
 
@@ -126,7 +126,7 @@ In a Python shell with `jarvis-cli` on the path: `from jarvis.modhosts import lo
 
 ## 9. `check_mc_updates`
 
-- [ ] **9.1 Do:** Ask: `Are my mods in D:/McMods up to date? I play 1.20.1 on Fabric.` **Expect:** `ok: true`; the older Modrinth jar under `updates` with `get_with` (download_mc_file, project, file id); the CurseForge jar under `not_checked` with `why: not_on_modrinth`; one `curseforge_note`; the message says nothing was downloaded, replaced, updated or installed; **the folder is unchanged** (compare file names and dates).
+- [ ] **9.1 Do:** Ask: `Are my mods in D:/McMods up to date? I play 1.20.1 on Fabric.` **Expect:** `ok: true`; the older Modrinth jar under `updates` with `get_with` (download_mc_file, project, file id); without a CurseForge key, the CurseForge jar under `not_checked` with `why: not_on_modrinth` and one `curseforge_note`; the message says nothing was downloaded, replaced, updated or installed; **the folder is unchanged** (compare file names and dates).
 - [ ] **9.2 Do:** ask again without the version and loader. **Expect:** a jar that lists several versions or loaders is under `not_checked` (`needs_mc_version` / `needs_loader`) with `needs_clarification: true` and an `ask` line.
 - [ ] **9.3 Do:** Run with `loader: quilt` on a Fabric-only jar. **Expect:** `latest.via: fabric`; with `quilt_fabric_fallback` off, `other_version` instead.
 - [ ] **9.4 Do:** try `~/.jarvis`, your home folder, `C:/Windows` and a folder that does not exist. **Expect:** `bad_dest` each time, no network traffic.
@@ -134,23 +134,49 @@ In a Python shell with `jarvis-cli` on the path: `from jarvis.modhosts import lo
 - [ ] **9.6 Do:** open `~/.jarvis/modhosts/update_state.json`. **Expect:** only the last folder and hash entries; no key, no vendor answer.
 - [ ] **9.7 Do:** run the same check twice. **Expect:** the second is quicker (hash cache) with identical results.
 - [ ] **9.8 Do:** rename one jar in `D:/McMods`, check again. **Expect:** it still matches (matched by content).
+- [ ] **9.9 Do:** Run `check_mc_updates` with no arguments, after clearing the last folder (delete `~/.jarvis/modhosts/update_state.json`). **Expect:** `ok: true`, `needs_folder: true` and an `ask` line that suggests your default download folder; nothing was read, hashed or sent.
+- [ ] **9.10 Do:** with a CurseForge key set, check a folder that holds a jar Modrinth does not know. **Expect:** the jar is either matched on CurseForge (fingerprint and SHA-1 agree) or stays `not_checked` with `why: not_on_curseforge`; a note says the CurseForge route is unverified. **If not:** nobody has run this against the real service: write down exactly what you saw.
 
 ---
 
 ## 10. The panel (Menu > Minecraft)
 
-- [ ] **10.1 Do:** Menu > Minecraft; then type `/minecraft`. **Expect:** the same panel opens both ways, with tabs Search, Project files, OptiFine, Make a pack; Escape and the × close it and focus returns.
+- [ ] **10.1 Do:** Menu > Minecraft; then type `/minecraft`. **Expect:** the same panel opens both ways, with tabs Find, Updates, OptiFine, Make a pack; Escape and the × close it and focus returns.
 - [ ] **10.2 Do:** Search `sodium` with **no** key. **Expect:** Modrinth hits, and a note with an "Open Minecraft settings" button that opens Settings > Integrations.
-- [ ] **10.3 Do:** press **Files** on a hit; choose 1.20.1 and fabric. **Expect:** the Project files tab fills and one file is marked recommended. **If not:** this is the first time the layout is seen in a browser; write down what looks wrong.
-- [ ] **10.4 Do:** pick a file, choose a folder, press **Queue download**. **Expect:** one dialog with the dry-run text and the folder. In 182, a folder outside the downloads library ends in an amber "Not confirmed" notice with a button "Use the Minecraft folder in the library"; with the library folder the row appears in Downloads. **If not:** if a row appears for an outside folder, `web/server.js` was changed since 182.
+- [ ] **10.3 Do:** press **Files** on a hit; choose 1.20.1 and fabric. **Expect:** the compatible files appear (Find tab) and one is marked recommended. **If not:** this is the first time the layout is seen in a browser; write down what looks wrong.
+- [ ] **10.4 Do:** pick a file (it goes into the tray), choose a folder, press **Queue downloads**. **Expect:** one dialog with the dry-run text and the folder. With a folder outside the downloads library the panel's own dialog is the confirmation (`web/server.js` passes it on), and the row appears in Downloads; with the library folder it appears too. **If not:** an amber "Not confirmed" notice means the confirmation did not reach the tool; write down which folder and what you saw (nobody has seen this in a browser).
 - [ ] **10.5 Do:** OptiFine tab: **List versions**, then **Check only**. Make a pack tab: dry run first, then **Make pack** and confirm; the file appears. **Expect:** results render (a generic table plus a "Raw answer" fold). **If not:** how OptiFine and pack results render is unknown; send a screenshot.
 - [ ] **10.6 Do:** View Source and DevTools > Network while using the panel. **Expect:** only `/api/tools/preview` and `/api/tools/run`; no response or page text contains your key.
 - [ ] **10.7 Do:** type `/mcsearch sodium`, `/mcfind 1.20.1 fabric sodium`, `/mcproject sodium`. **Expect:** all three appear in the palette and run without a confirmation. **If not:** one missing means the palette's tool-command list did not load.
 
 ---
 
-## 11. Wrap-up
+## 11. Watched folders, replacing a file, undo
 
-- [ ] **11.1 Do:** `python -c "from jarvis import tools; t=tools.AUTO_TOOL_PACK_INSTRUCTIONS['minecraft']; print(t.count('give the official optifine.net page link'))"`. **Expect:** `1`.
-- [ ] **11.2 Do:** check `D:/McTest` and Downloads. **Expect:** only what you asked for; nothing was installed, no launcher profile touched.
-- [ ] **11.3 Do:** send the results: each step that did not match, with the step number and what you saw. Steps 5.6, 6.11 and 6.12 are the ones nobody has seen work.
+Use a COPY of a mods folder (for example `D:/McTest/mods` holding two older Modrinth jars). Nobody has run any step of this section against a real folder.
+
+- [ ] **11.1 Do:** Ask: `Watch D:/McTest/mods for 1.20.1 on Fabric` (confirm). **Expect:** `ok: true`, an entry with an id, channel release and `auto` false; `check_mc_watched` now lists the folder under `watched`. Adding it again is `reason: exists`.
+- [ ] **11.2 Do:** Run `check_mc_watched`. **Expect:** the older jar under `updates` with an `id` (`f` + 8 characters, a colon, a sha1); a file that could not be decided only in one sentence under `problems`; the folder is unchanged.
+- [ ] **11.3 Do:** Run `apply_mc_update` with that `id` and `dry_run: true`. **Expect:** one `plan` line naming the folder, the old and the new file; nothing created (no new folder under `~/.jarvis/modhosts/replaced/`), the mods folder unchanged.
+- [ ] **11.4 Do:** the same without `dry_run`, confirm. **Expect:** `state: done`, `needs_restart: true`; the new jar is in the folder under its official name; the old jar is NOT in the folder and not deleted: it is in `~/.jarvis/modhosts/replaced/<date-time>/` beside a `replaced.json` with no key in it; no `.part` is left in `replaced/_staging/`.
+- [ ] **11.5 Do:** run `apply_mc_update` with the same `id` again. **Expect:** nothing is replaced: the answer is `state: unchanged` (no file in the folder has that hash any more).
+- [ ] **11.6 Do:** Run `list_mc_replaced`. **Expect:** the batch, newest first, with the old file's backup marked as still there.
+- [ ] **11.7 Do:** `undo_mc_update` with that batch id, `dry_run: true`, then for real. **Expect:** the dry run moves nothing; the real run moves the new jar to `~/.jarvis/modhosts/replaced/undone/<id>/` and the old jar back; nothing is overwritten or deleted. Edit the new jar first (or copy another file over it) and the undo is refused with "you changed it since".
+- [ ] **11.8 Do:** `mc_watch` with `action: remove` for the folder. **Expect:** it is off the list; its files were not touched.
+
+---
+
+## 12. Reading and updating a pack file
+
+- [ ] **12.1 Do:** Run `inspect_modpack` with the path of a pack `make_modpack_file` wrote. **Expect:** name, version, Minecraft version, loader, every file, the number of override files; no new file or folder appears on disk; an `untrusted_note`.
+- [ ] **12.2 Do:** Run it on a zip that is not a pack and on a path with `..`. **Expect:** a refusal that names the rule; nothing read beyond the zip's list of names.
+- [ ] **12.3 Do:** Run `update_modpack_file` with `dry_run: true` on that pack. **Expect:** a report of what is unchanged, updated (old -> new), skipped (with the reason) and added as dependencies; nothing written.
+- [ ] **12.4 Do:** run it for real, confirm. **Expect:** a NEW file `<name>-updated.mrpack` (or `.zip`) beside the destination you gave; the original pack has the same size and date as before. Run it again: `-updated-2`. Open the new pack in a launcher only if you want to; nobody has done that yet.
+
+---
+
+## 13. Wrap-up
+
+- [ ] **13.1 Do:** `python -c "from jarvis import tools; t=tools.AUTO_TOOL_PACK_INSTRUCTIONS['minecraft']; print(t.count('give the official optifine.net page link'))"`. **Expect:** `1`.
+- [ ] **13.2 Do:** check `D:/McTest` and Downloads. **Expect:** only what you asked for (and the backups under `~/.jarvis/modhosts/replaced/`); nothing was installed, no launcher profile touched.
+- [ ] **13.3 Do:** send the results: each step that did not match, with the step number and what you saw. Steps 5.6, 6.11 and 6.12 are the ones nobody has seen work.

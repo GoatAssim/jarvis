@@ -33,7 +33,11 @@ Covers (static and declarative: nothing here opens a browser or the network):
      imported when they are there. What can only hold once those two patches are applied is in test_needs_m1_* and
      test_needs_m2_* below; everything else passes with only the M3 patch applied.
 
-Run: python3 tests/test_minecraft_panel.py        (written by the S3, M2, M5 and M3 agents; not run by them)
+  12. Round 10 (MC-A): the folder picker the panel stands aside for is read FROM path-picker.js (so the two cannot drift
+     apart again), a pack can be built from a tray with items of both platforms (every entry sends its own source; the
+     tool's schema allows it), and the Pack and OptiFine results scroll into view. The hand_10a_* fixtures parse.
+
+Run: python3 tests/test_minecraft_panel.py        (written by the S3, M2, M5, M3 and MC-A agents; not run by them)
 """
 import json
 import os
@@ -290,6 +294,8 @@ const out = {
   download_optifine: P.optifineArgs({ mc_version: '1.20.1', version: 'I6', preview: true, dest: 'D:/x', filename: 'o.jar' }, true),
   make_modpack_file: P.packArgs({ format: 'curseforge', entries_from: 'modrinth', download_to_match: true, name: 'n', version: '1', author: 'a', summary: 's', mc_version: '1.20.1',
     loader: 'fabric', loader_version: '0.15', entries: 'a | f | beta', channel: 'beta', src: 'D:/s', dest: 'D:/d', filename: 'f', include_dependencies: false, overwrite: true }, false),
+  make_modpack_file_mixed: P.packArgs({ format: 'modrinth', name: 'n', mc_version: '1.20.1', loader: 'fabric',
+    entries: P.entriesText([P.trayItemFrom({ source: 'modrinth', id: 'M1', name: 'a' }, { file_id: 'f1', version: '1' }), P.trayItemFrom({ source: 'curseforge', id: '394468', name: 'b' }, null)], 'typed | | beta', { sources: true, own: 'modrinth' }) }, true),
   mc_watch_list: P.watchArgs('list', {}, false),
   mc_watch_add: P.watchArgs('add', { folder: 'D:/m', label: 'L', mc_version: '1.20.1', loader: 'fabric', channel: 'beta', auto: true }, true),
   mc_watch_set: P.watchArgs('set', { folder: 'D:/m', label: 'L', mc_version: '1.20.1', loader: 'fabric', channel: 'beta', auto: false }, false),
@@ -307,13 +313,23 @@ process.stdout.write(JSON.stringify(out));
     check("the panel's argument builders ran under node", isinstance(built, dict), done.stderr[:300])
     if isinstance(built, dict):
         for tool, args in sorted(built.items()):
-            real = "mc_watch" if tool.startswith("mc_watch") else tool
+            real = "mc_watch" if tool.startswith("mc_watch") else ("make_modpack_file" if tool.startswith("make_modpack_file") else tool)
             if real not in SCHEMAS:
                 continue                    # the M1 / M2 tools: compared in test_needs_m1_* / test_needs_m2_* once their files exist
             check("%s: every argument name the panel sends is in the tool's schema" % tool, set(args) <= set(SCHEMAS[real]), sorted(set(args) - set(SCHEMAS[real])))
         entry_keys = set(SCHEMAS["make_modpack_file"]["entries"]["items"]["properties"])
         for e in built["make_modpack_file"]["entries"]:
             check("a pack entry only has keys the schema declares", set(e) <= entry_keys, sorted(set(e) - entry_keys))
+        # Round 10: a mixed pack sends `source` on EVERY entry, and the schema allows exactly those values.
+        source_enum = SCHEMAS["make_modpack_file"]["entries"]["items"]["properties"].get("source", {}).get("enum")
+        mixed_built = built["make_modpack_file_mixed"]
+        check("a mixed pack: every entry sends a source, a value the schema allows (modrinth or curseforge)",
+              bool(source_enum) and all(e.get("source") in source_enum for e in mixed_built["entries"]) and len(mixed_built["entries"]) == 3, mixed_built["entries"])
+        check("a mixed pack: each entry only has keys the schema declares", all(set(e) <= entry_keys for e in mixed_built["entries"]))
+        check("a mixed pack: entries_from is the OTHER platform than the pack's format, and is an allowed value",
+              mixed_built.get("entries_from") == "curseforge" and mixed_built["entries_from"] in SCHEMAS["make_modpack_file"]["entries_from"].get("enum", []) and mixed_built["format"] == "modrinth", mixed_built)
+        check("a mixed pack: each entry sends the platform it was added from (the tray's own), a typed line the pack's",
+              [e["source"] for e in mixed_built["entries"]] == ["modrinth", "curseforge", "modrinth"], mixed_built["entries"])
         enums = {"channel": ("make_modpack_file", "download_mc_file"), "loader": ()}
         for key, tools_ in enums.items():
             for t in tools_:
@@ -417,6 +433,69 @@ check("a folder is added with the path picker the other tabs use", "pickFolder(f
 check("a watched-folder change, an update and an undo each make a dry run first and then ONE dialog (their flows are in the panel)",
       all(("async function %s(" % f_) in js for f_ in ("watchSteps", "applySteps", "undoSteps")) and "WATCH_DIALOG" in js)
 check("the stylesheet has the Updates tab's classes", all(w in css for w in (".mc-section", ".mc-watchform", ".mc-lines", ".mc-results--tight")))
+
+# --- 12. Round 10 (MC-A) --------------------------------------------------------------------------
+# 12a. The shared folder picker. The panel's Tab trap and Escape stand aside while the picker is open; to know that, it
+# has to name what the picker REALLY adds to the page. It once named `.pp-overlay, .path-picker`, which the picker never
+# had. Everything below is read from path-picker.js, so a rename there fails here.
+picker_js = read(PUBLIC / "path-picker.js")
+picker_css = read(PUBLIC / "path-picker.css")
+m_back = re.search(r'const backdrop = el\("div", \{ cls: "([^"]+)" \}, \[card\]\);', picker_js)
+m_card = re.search(r'const card = el\("div", \{ cls: "([^"]+)", role: "dialog"', picker_js)
+check("path-picker.js builds a backdrop element around its card (found by reading it)", bool(m_back) and bool(m_card))
+back_cls = m_back.group(1) if m_back else "?"
+card_cls = m_card.group(1) if m_card else "?"
+check("path-picker.js really appends that backdrop to the page", "appendChild(backdrop)" in picker_js and "(document.body || document.documentElement).appendChild(backdrop)" in picker_js)
+check("path-picker.css styles those same two classes", ("." + back_cls) in picker_css and re.search(r"\.%s\s*\{" % re.escape(card_cls), picker_css) is not None)
+m_sel = re.search(r'const PICKER_SELECTOR = "([^"]+)";', js)
+check("the panel has ONE picker selector constant", bool(m_sel) and js.count("PICKER_SELECTOR =") == 1)
+tokens = [t.strip() for t in (m_sel.group(1) if m_sel else "").split(",")]
+check("the panel's selector names the picker's backdrop (the class path-picker.js adds)", ("." + back_cls) in tokens, (tokens, back_cls))
+check("the panel's selector names the picker's card too", ("." + card_cls) in tokens, (tokens, card_cls))
+check("the classes the panel once guessed (.pp-overlay, .path-picker, pp-backdrop) are gone from the panel",
+      re.search(r"(?<![\w-])pp-(?:overlay|backdrop)|\.path-picker\b", js) is None)
+check("the picker's classes are not defined by the panel's own stylesheet (they are the picker's)", back_cls not in css and ("." + card_cls + "{") not in css)
+on_key = js[js.index("S.onKey = (e) => {"):js.index('document.addEventListener("keydown", S.onKey, true);')]
+check("the panel's key handler stands aside for the picker BEFORE it reads Escape or Tab",
+      "pickerOpen(document)" in on_key and on_key.index("pickerOpen(document)") < on_key.index('e.key === "Escape"') < on_key.index('e.key !== "Tab"'), on_key[:400])
+check("...and for a confirmation dialog, as before", on_key.index("#jui-layer .jui-modal") < on_key.index("pickerOpen(document)"))
+check("the picker still handles its own Escape and Tab (the panel relies on it for the keys inside the card)",
+      'e.key === "Escape"' in picker_js and 'e.key === "Tab"' in picker_js and 'addEventListener("keydown", onKey, true)' in picker_js)
+
+# 12b. Mixed pack lists: the tool must still allow what the panel sends.
+pk_src = read(ROOT / "jarvis-cli" / "jarvis" / "actions" / "minecraft_packs.py")
+cm_src = read(ROOT / "jarvis-cli" / "jarvis" / "modhosts" / "crossmatch.py")
+check("the pack tool takes a per-entry source and says it is for entries_from", '"source": {"type": "string", "enum": ["modrinth", "curseforge"]' in pk_src and "only with entries_from" in pk_src)
+check("crossmatch decides what to match PER ENTRY: an entry's own source, else entries_from, against the pack's platform",
+      'foreign = [i for i, e in enumerate(entries) if (e["source"] or origin) != target]' in cm_src)
+check("crossmatch keeps the entries already on the pack's platform (a mixed list still has native entries to build from)",
+      "a mixed list still has its native entries to build from" in cm_src and "rebuilt.append(_raw_entry(parsed))" in cm_src)
+check("the pack builder skips an entry whose source is not its platform (so a stray source cannot be matched silently)", '"wrong_platform"' in read(ROOT / "jarvis-cli" / "jarvis" / "modhosts" / "packs.py"))
+check("the panel: every mixed entry's source is written in ONE place (packArgs), never one tool call per platform",
+      js.count("e.source = args.format") == 1)
+check("the panel: a mixed pack names entries_from itself (the other platform), not from the form",
+      "const from = mixed ? otherPlatform(args.format) : oneOf(f.entries_from, PLATFORMS, \"\");" in js)
+check("the panel's pack tab offers 'Both' for the tray's platforms and still lets the owner use one platform only",
+      '["both", "Both: each project on its own platform"]' in js and '["modrinth", "Modrinth only"]' in js and '["curseforge", "CurseForge only"]' in js)
+check("the panel's pack tab shows each entry with its platform badge and says what happens to it", "mc-pack-entry" in js and "goes in as it is" in js and ".mc-pack-entry" in css)
+check("the mixed list's styles use the shared tokens only (no hex or rgba)", not re.search(r"#[0-9a-fA-F]{3,8}\b|rgba?\(", css[css.index("A mixed pack: each entry"):css.index("A mixed pack: each entry") + 900]))
+
+# 12c. Scroll into view.
+check("the Pack tab brings its result (and its one-line problem) into view", js.count("reveal(host);") == 2, js.count("reveal(host);"))
+check("the OptiFine tab brings its list and its download result into view", js.count("reveal(listHost);") == 1 and js.count("reveal(dlHost);") == 3, (js.count("reveal(listHost);"), js.count("reveal(dlHost);")))
+check("the tray still brings its own result into view, as before", "results.scrollIntoView({ block: \"nearest\" })" in js)
+
+# 12d. the round-10 fixtures
+H10 = ["hand_10a_pack_mixed_dry.json", "hand_10a_pack_mixed_needs_download.json", "hand_10a_pack_mixed_written.json"]
+h10 = sorted(p.name for p in DATA.glob("hand_10a_*.json"))
+check("the hand_10a_ fixtures are all there (git add -f: tests/data is git-ignored)", h10 == H10, sorted(set(H10) ^ set(h10)))
+for name in h10:
+    try:
+        ok = isinstance(json.loads(read(DATA / name)), dict)
+    except Exception:  # noqa: BLE001
+        ok = False
+    check("%s parses" % name, ok)
+check("no round-10 fixture holds anything that looks like a key", not any(re.search(r"[A-Za-z0-9_\-]{32,}", read(DATA / n)) for n in h10))
 
 # Run the checks that need another agent's patch last, so a missing patch is one clearly named group of failures.
 test_needs_m1_update_source_tools()

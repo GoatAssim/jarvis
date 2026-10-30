@@ -518,8 +518,8 @@ def test_apply_builds_the_exact_argv_and_never_uses_a_shell():
         assert ran[0]["timeout"] == pu.APPLY_TIMEOUT_S
         assert all(isinstance(a, str) for a in ran[0]["argv"]), "an argv LIST, never one string for a shell"
     source = (ROOT / "jarvis-cli" / "jarvis" / "actions" / "pkg_updates.py").read_text(encoding="utf-8")
-    for word in ("shell=True", "os.system", "os.popen", "import subprocess", "Popen(", "ShellExecute", "runas"):
-        assert word not in source, "no shell and no elevation in pkg_updates.py: %s" % word
+    for word in ("shell=True", "os.system", "os.popen", "import subprocess", "Popen(", "ShellExecute"):
+        assert word not in source, "no shell in pkg_updates.py: %s" % word      # round 10: the opt-in elevated run is pinned in tests/test_pkg_admin.py
 
 
 def test_apply_dry_run_runs_nothing():

@@ -398,6 +398,25 @@ def test_h6_the_probe_over_a_fake_transport():
         clear_key()
 
 
+# ---- H7 (merge audit) -------------------------------------------------------------------------------------------
+def test_h7_cdn_refused_is_a_listed_reason():
+    from jarvis import modhosts
+    check("cdn_refused is in modhosts.REASONS and net.py uses the same word",
+          modhosts.CDN_REFUSED == "cdn_refused" and "cdn_refused" in modhosts.REASONS and net.CDN_REFUSED == modhosts.CDN_REFUSED)
+    check("the earlier fifteen reasons are all still there",
+          {"no_key", "bad_key", "rate_limited", "not_found", "ambiguous", "not_distributable", "no_compatible_file",
+           "no_loader_version", "bad_dest", "exists", "too_big", "verify_failed", "vendor_changed", "offline",
+           "unsupported"} <= set(modhosts.REASONS))
+    set_key(FAKE_KEY)
+    route = "%s/mods/900100/files/9001004/download-url" % CF_API
+    with Net([net.Reply(302, {"Location": CDN}), net.Reply(403, {}, b"")]):
+        raw = net.fetch("curseforge", route)
+    check("the CDN's 403 comes out of net.fetch as a LISTED reason", raw.get("reason") == "cdn_refused"
+          and raw.get("reason") in modhosts.REASONS, raw)
+    check("fail() passes it on unchanged", modhosts.fail(raw.get("reason"), "x").get("reason") == "cdn_refused")
+    clear_key()
+
+
 # --- runner (keep BELOW every test: it reads globals() when it executes) ----------------------------------------
 
 if __name__ == "__main__":

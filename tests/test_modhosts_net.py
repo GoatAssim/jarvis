@@ -549,6 +549,337 @@ def test_a_403_from_the_download_host_is_not_a_key_problem():
     check("another vendor's 403 is unchanged (vendor_changed)", res["reason"] == "vendor_changed" and res["status"] == 403, res)
 
 
+# ------------------------------------------------------------------ streaming a download to a .part file (MC-B)
+# `to_file=` / `discard=`: the answer is written to a file the caller made as it arrives, the size cap is checked while it
+# streams, SHA-1 and SHA-512 are computed over what arrived, and any failure hands the file to the caller's `discard`
+# (net.py itself never deletes anything).  Without `to_file` every answer is what it always was.
+
+import hashlib  # noqa: E402
+
+SDL = "https://cdn.modrinth.com/data/AANobbMI/versions/V1/sodium.jar"
+
+
+class Discards:
+    """The caller's `discard`: remembers every call (and how big the file was at that moment) and really removes the
+    file, as modhosts/apply.py's own function does."""
+
+    def __init__(self):
+        self.calls, self.sizes = [], []
+
+    def __call__(self, path):
+        self.calls.append(path)
+        try:
+            self.sizes.append(os.path.getsize(path))
+        except OSError:
+            self.sizes.append(None)
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+class Feed:
+    """A body that arrives in chunks: counts the chunks taken, and may break like a cut connection after the last one."""
+
+    def __init__(self, parts, then=None):
+        self.parts, self.then, self.taken = list(parts), then, 0
+
+    def __iter__(self):
+        for part in self.parts:
+            self.taken += 1
+            yield part
+        if self.then is not None:
+            raise self.then
+
+
+def new_part(name="download.part"):
+    """A fresh empty file the way the caller makes it: exclusively created, then closed."""
+    folder = tempfile.mkdtemp(prefix="stream-", dir=HOME)
+    path = os.path.join(folder, name)
+    os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600))
+    return path
+
+
+def stream(reply, vendor="modrinth", url=SDL, **kw):
+    """One streamed fetch against a script (one reply, or a list of them) -> (result, path, discards, script)."""
+    path = new_part()
+    disc = Discards()
+    script = Script(*reply) if isinstance(reply, (list, tuple)) else Script(reply)
+    with Env(script):
+        res = net.fetch(vendor, url, want="bytes", to_file=path, discard=disc, **kw)
+    return res, path, disc, script
+
+
+def test_stream_writes_the_file_and_hashes_what_arrived():
+    data = bytes(range(256)) * 400                                   # 102 400 bytes
+    cuts = [0, 1, 700, 4096, 4097, 65536, 90000, len(data)]
+    parts = [data[a:b] for a, b in zip(cuts, cuts[1:])]
+    parts.insert(2, b"")                                             # an empty chunk is skipped, not a problem
+    reply = net.Reply(200, {"Content-Type": "application/java-archive", "Content-Length": str(len(data)),
+                            "Set-Cookie": "a=b"}, chunks=Feed(parts))
+    res, path, disc, script = stream(reply, max_bytes=len(data))
+    check("ok, with the path, the size and both hashes, and no body held in memory",
+          res["ok"] is True and res["path"] == path and res["size"] == len(data) and res["body"] is None
+          and res["sha1"] == hashlib.sha1(data).hexdigest() and res["sha512"] == hashlib.sha512(data).hexdigest(), res)
+    check("status, headers and final_url come back as for any call, and the cookie is dropped",
+          res["status"] == 200 and res["final_url"] == SDL and res["headers"]["content-type"] == "application/java-archive"
+          and "set-cookie" not in res["headers"], res)
+    with open(path, "rb") as handle:
+        on_disk = handle.read()
+    check("the file holds exactly the bytes that arrived, and nothing was discarded", on_disk == data and disc.calls == [],
+          (len(on_disk), disc.calls))
+    sent = script.calls[0]
+    check("it is a plain GET with the honest agent and no key", sent["method"] == "GET" and sent["headers"]["User-Agent"].startswith("Jarvis/")
+          and "x-api-key" not in sent["headers"], sent)
+
+
+def test_stream_the_cap_is_checked_while_streaming():
+    feed = Feed([b"x" * 1000 for _ in range(20)])
+    res, path, disc, _ = stream(net.Reply(200, {}, chunks=feed), max_bytes=5000)
+    check("too_big, and the stream stopped at the chunk that crossed the cap, not at the end",
+          res["ok"] is False and res["reason"] == "too_big" and "limit" in res["error"] and feed.taken == 6, (res, feed.taken))
+    check("the file was handed to discard once, after it was closed (5000 bytes were in it), and is gone",
+          disc.calls == [path] and disc.sizes == [5000] and not os.path.exists(path), (disc.calls, disc.sizes))
+
+    feed = Feed([b"x" * 1000 for _ in range(5)])
+    res, path, disc, _ = stream(net.Reply(200, {}, chunks=feed), max_bytes=5000)
+    check("a file of exactly the cap is fine (the same boundary as an in-memory read)",
+          res["ok"] is True and res["size"] == 5000 and disc.calls == [] and os.path.getsize(path) == 5000, res)
+
+    feed = Feed([b"x" * 10])
+    res, path, disc, _ = stream(net.Reply(200, {"Content-Length": "999999"}, chunks=feed), max_bytes=5000)
+    check("a Content-Length over the cap is refused before one byte is read or written",
+          res["ok"] is False and res["reason"] == "too_big" and feed.taken == 0 and disc.sizes == [0] and not os.path.exists(path),
+          (res, feed.taken, disc.sizes))
+
+
+def test_stream_short_and_long_reads_are_failures():
+    body = b"s" * 6000
+    res, path, disc, _ = stream(net.Reply(200, {"Content-Length": "10000"}, chunks=Feed([body[:3000], body[3000:]])), max_bytes=20000)
+    check("a body that ends short of its Content-Length is offline, with the counts",
+          res["ok"] is False and res["reason"] == "offline" and "6000 of 10000" in res["error"], res)
+    check("...and the file is discarded once and gone", disc.calls == [path] and not os.path.exists(path), disc.calls)
+
+    res, path, disc, _ = stream(net.Reply(200, {"Content-Length": "100"}, chunks=Feed([b"l" * 150])), max_bytes=20000)
+    check("a body that runs past its Content-Length is vendor_changed and the file is gone",
+          res["ok"] is False and res["reason"] == "vendor_changed" and disc.calls == [path] and not os.path.exists(path), res)
+
+    res, path, disc, _ = stream(net.Reply(200, {"Content-Length": "300", "Content-Encoding": "identity"}, chunks=Feed([b"i" * 200])), max_bytes=1000)
+    check("an 'identity' encoding is still compared", res["ok"] is False and res["reason"] == "offline" and disc.calls == [path], res)
+
+    res, path, disc, _ = stream(net.Reply(200, {"Content-Length": "50", "Content-Encoding": "gzip"}, chunks=Feed([b"g" * 200])), max_bytes=1000)
+    check("a content-encoded answer is not compared with its (encoded) Content-Length",
+          res["ok"] is True and res["size"] == 200 and disc.calls == [], res)
+    res, path, disc, _ = stream(net.Reply(200, {"Content-Length": "9999999", "Content-Encoding": "gzip"}, chunks=Feed([b"g" * 200])), max_bytes=1000)
+    check("...nor refused up front because of it (the cap is still checked chunk by chunk)", res["ok"] is True and res["size"] == 200, res)
+
+
+def test_stream_the_hashes_are_of_the_bytes_that_arrived():
+    published = b"the file the vendor published"
+    served = b"some other file entirely, served instead"
+    res, path, disc, _ = stream(net.Reply(200, {}, chunks=Feed([served[:10], served[10:]])), max_bytes=1000)
+    check("net does not judge a file: it reports what arrived, so the caller sees a mismatch",
+          res["ok"] is True and res["sha1"] == hashlib.sha1(served).hexdigest() and res["sha512"] == hashlib.sha512(served).hexdigest()
+          and res["sha1"] != hashlib.sha1(published).hexdigest() and res["sha512"] != hashlib.sha512(published).hexdigest(), res)
+    with open(path, "rb") as handle:
+        check("...and the file on disk is the served bytes", hashlib.sha1(handle.read()).hexdigest() == res["sha1"])
+    check("a mismatch is the caller's to act on: net did not discard a whole file", disc.calls == [])
+
+
+def test_stream_a_dropped_connection_is_offline_and_the_file_goes():
+    secret = "https://cdn.modrinth.com/data/secret-path?token=abc123"
+    feed = Feed([b"a" * 1000, b"b" * 1000], then=ConnectionError("connection reset " + secret))
+    res, path, disc, _ = stream(net.Reply(200, {"Content-Length": "5000"}, chunks=feed), max_bytes=10000)
+    check("offline, and it says the kind of failure",
+          res["ok"] is False and res["reason"] == "offline" and "ConnectionError" in res["error"] and "dropped" in res["error"], res)
+    check("the address and the token from the library's message are not in the answer",
+          "secret" not in json.dumps(res) and "token" not in json.dumps(res) and "https://" not in json.dumps(res), res)
+    check("the half-written file (2000 bytes) went to discard once, after it was closed, and is gone",
+          disc.calls == [path] and disc.sizes == [2000] and not os.path.exists(path), (disc.calls, disc.sizes))
+
+    class ReadTimeout(Exception):
+        pass
+
+    res, path, disc, _ = stream(net.Reply(200, {}, chunks=Feed([b"a" * 10], then=ReadTimeout("read timed out"))), max_bytes=1000)
+    check("a read timeout mid-stream is offline and says it took too long",
+          res["ok"] is False and res["reason"] == "offline" and "took too long" in res["error"] and disc.calls == [path], res)
+
+    res, path, disc, _ = stream(net.Reply(200, {}, chunks=Feed([b"a" * 10], then=TimeoutError("slow"))), max_bytes=1000)
+    check("a server that stalls past the overall deadline is offline too, and the file goes",
+          res["ok"] is False and res["reason"] == "offline" and "too long" in res["error"] and disc.calls == [path]
+          and not os.path.exists(path), res)
+
+
+def test_stream_every_failure_leaves_no_file():
+    cases = [
+        ("a 404", [net.Reply(404, {}, b"")], "not_found", {}),
+        ("a 500", [net.Reply(500, {}, b"")], "offline", {}),
+        ("an odd status", [net.Reply(418, {}, b"")], "vendor_changed", {}),
+        ("a 204 is not a file", [net.Reply(204, {}, b"")], "vendor_changed", {}),
+        ("a 206 is not the whole file", [net.Reply(206, {"Content-Range": "bytes 0-9/100"}, b"x" * 10)], "vendor_changed", {}),
+        ("rate limited twice", [net.Reply(429, {"Retry-After": "1"}, b""), net.Reply(429, {"Retry-After": "1"}, b"")], "rate_limited", {}),
+        ("a redirect off the allow-list", [net.Reply(302, {"Location": "https://evil.example.com/a.jar"})], "unsupported", {}),
+        ("a redirect loop", [net.Reply(302, {"Location": SDL})], "vendor_changed", {}),
+        ("a 3xx handed back (max_redirects=0)", [net.Reply(302, {"Location": SDL})], "vendor_changed", {"max_redirects": 0}),
+    ]
+    for label, replies, reason, kw in cases:
+        res, path, disc, _ = stream(replies, **kw)
+        check("%s: failed with %s, the file went to discard once and is gone" % (label, reason),
+              res["ok"] is False and res["reason"] == reason and disc.calls == [path] and not os.path.exists(path), (res, disc.calls))
+
+    res, path, disc, script = stream(net.Reply(200, {}, b"x"), url="https://evil.example.com/a.jar")
+    check("a host off the allow-list: refused with no request, the file goes",
+          res["reason"] == "unsupported" and script.calls == [] and disc.calls == [path], (res, script.calls))
+    res, path, disc, script = stream(net.Reply(200, {}, b"x"), url="http://cdn.modrinth.com/a.jar")
+    check("plain http: refused with no request, the file goes", res["reason"] == "unsupported" and script.calls == [] and disc.calls == [path], res)
+    res, path, disc, script = stream(net.Reply(200, {}, b"x"), vendor="nowhere")
+    check("an unknown vendor: refused with no request, the file goes", res["reason"] == "unsupported" and script.calls == [] and disc.calls == [path], res)
+
+    path, disc, script = new_part(), Discards(), Script(net.Reply(200, {}, b"x"))
+    with Env(script, resolver=lambda host, port: ["10.0.0.5"]):
+        res = net.fetch("modrinth", SDL, want="bytes", to_file=path, discard=disc)
+    check("an address the SSRF guard refuses: no request, the file goes", res["ok"] is False and script.calls == [] and disc.calls == [path], res)
+
+    path, disc = new_part(), Discards()
+    with Env(Script(ConnectionError("no route to https://cdn.modrinth.com/x"))):
+        res = net.fetch("modrinth", SDL, want="bytes", to_file=path, discard=disc)
+    check("a connection that cannot be opened: offline, no address in the answer, the file goes",
+          res["ok"] is False and res["reason"] == "offline" and "https://" not in res["error"] and disc.calls == [path], res)
+
+    res, path, disc, _ = stream([net.Reply(302, {"Location": "https://cdn.modrinth.com/data/final.jar"}), net.Reply(200, {}, b"PKdata")], max_bytes=1000)
+    check("a redirect to an allowed host is followed and the final answer is what is written",
+          res["ok"] is True and res["final_url"] == "https://cdn.modrinth.com/data/final.jar" and res["size"] == 6 and disc.calls == [], res)
+
+
+def test_stream_a_disk_error_is_bad_dest_and_the_file_goes():
+    real = os.fsync
+
+    def boom(fd):
+        raise OSError(28, "No space left on device")
+
+    os.fsync = boom
+    try:
+        res, path, disc, _ = stream(net.Reply(200, {}, chunks=Feed([b"q" * 100])), max_bytes=1000)
+    finally:
+        os.fsync = real
+    check("a write that cannot be made durable is bad_dest, not a success",
+          res["ok"] is False and res["reason"] == "bad_dest" and "disk" in res["error"], res)
+    check("...and the file is discarded once and gone", disc.calls == [path] and not os.path.exists(path), disc.calls)
+
+
+def test_stream_refuses_a_file_that_is_not_a_fresh_part_and_touches_nothing():
+    folder = tempfile.mkdtemp(prefix="stream-", dir=HOME)
+
+    def make(name, content=b""):
+        path = os.path.join(folder, name)
+        with open(path, "wb") as handle:
+            handle.write(content)
+        return path
+
+    keep, full, empty = make("keep.jar", b"keep me"), make("full.part", b"already has bytes"), make("empty.part")
+    os.mkdir(os.path.join(folder, "dir.part"))
+    cases = [("a file that is not a .part", keep), ("a .part that already holds bytes", full),
+             ("a .part that does not exist", os.path.join(folder, "missing.part")), ("a relative path", "rel.part"),
+             ("a folder named like a .part", os.path.join(folder, "dir.part")), ("an empty string", ""), ("a number", 5),
+             ("bytes instead of a path", os.path.join(folder, "empty.part").encode())]
+    link = os.path.join(folder, "link.part")
+    try:
+        os.symlink(empty, link)
+        cases.append(("a link to an empty .part", link))
+    except (OSError, NotImplementedError, AttributeError):
+        pass                                                         # no symlinks here (Windows without the right)
+    disc, script = Discards(), Script(net.Reply(200, {}, b"x"))
+    with Env(script):
+        for label, target in cases:
+            res = net.fetch("modrinth", SDL, want="bytes", to_file=target, discard=disc)
+            check("%s: refused as unsupported" % label, res["ok"] is False and res["reason"] == "unsupported", res)
+    check("no request was sent and discard was never called (a file that is not ours is never removed)",
+          script.calls == [] and disc.calls == [], (script.calls, disc.calls))
+    with open(keep, "rb") as handle:
+        check("the other file still holds its bytes", handle.read() == b"keep me")
+    with open(full, "rb") as handle:
+        check("the non-empty .part still holds its bytes", handle.read() == b"already has bytes")
+    check("the folder is still there", os.path.isdir(os.path.join(folder, "dir.part")))
+
+    path = new_part()
+    with Env(script):
+        for label, change in (("want=json", {"want": "json"}), ("want=head", {"want": "head"}), ("want=bytes_prefix", {"want": "bytes_prefix"}),
+                              ("a POST", {"method": "POST"}), ("no discard function", {"discard": None})):
+            args = {"want": "bytes", "discard": disc}
+            args.update(change)
+            res = net.fetch("modrinth", SDL, to_file=path, **args)
+            check("%s with to_file: refused as unsupported" % label, res["ok"] is False and res["reason"] == "unsupported", res)
+    check("those refusals sent nothing and left the fresh file where it was",
+          script.calls == [] and disc.calls == [] and os.path.getsize(path) == 0, (script.calls, disc.calls))
+
+
+def test_stream_key_hygiene():
+    data = b"PK" + b"j" * 500
+    with Config():
+        res, path, disc, script = stream(net.Reply(200, {"Content-Length": str(len(data))}, chunks=Feed([data])), vendor="curseforge",
+                                         url=CDN, max_bytes=1000)
+        check("a CurseForge file from the download host streams fine, with no key sent there and none in the answer",
+              res["ok"] is True and "x-api-key" not in script.calls[0]["headers"] and FAKE_KEY not in json.dumps(res, default=str), res)
+        res, path, disc, script = stream(net.Reply(403, {}, ("denied " + FAKE_KEY).encode()), vendor="curseforge",
+                                         url="https://api.curseforge.com/v1/mods/1/files/2/download")
+        check("a 403 from the API host is bad_key with the key scrubbed, and the file goes",
+              res["ok"] is False and res["reason"] == "bad_key" and FAKE_KEY not in json.dumps(res, default=str) and disc.calls == [path], res)
+    with Config(key=None):
+        res, path, disc, script = stream(net.Reply(200, {}, b"x"), vendor="curseforge",
+                                         url="https://api.curseforge.com/v1/mods/1/files/2/download")
+        check("no key: no_key, no request, and the file goes", res["ok"] is False and res["reason"] == "no_key" and script.calls == []
+              and disc.calls == [path], res)
+
+
+def test_without_to_file_nothing_changes():
+    import inspect
+    params = inspect.signature(net.fetch).parameters
+    check("to_file and discard are optional keyword-only arguments, off by default",
+          params["to_file"].default is None and params["discard"].default is None
+          and params["to_file"].kind is inspect.Parameter.KEYWORD_ONLY and params["discard"].kind is inspect.Parameter.KEYWORD_ONLY)
+    body = b"PK" + b"z" * 300
+    headers = {"content-type": "application/octet-stream", "content-length": str(len(body))}
+    expected = {"ok": True, "status": 200, "headers": headers, "body": body, "final_url": SDL}
+    for label, kw in (("omitted", {}), ("to_file=None", {"to_file": None}), ("a discard alone is ignored", {"discard": Discards()}),
+                      ("both None", {"to_file": None, "discard": None})):
+        with Env(Script(net.Reply(200, headers, body))):
+            res = net.fetch("modrinth", SDL, want="bytes", max_bytes=1000, **kw)
+        check("%s: the very same dict as before, with none of the file keys" % label, res == expected, res)
+    discarded = Discards()
+    with Env(Script(net.Reply(200, {}, b"x" * 3000))):
+        res = net.fetch("modrinth", SDL, want="bytes", max_bytes=1000, discard=discarded)
+    check("too_big without to_file is the same sentence and keys as before",
+          res == {"ok": False, "error": "Modrinth answered with more data than the 1 MB limit.", "reason": "too_big", "status": 200}
+          and discarded.calls == [], res)
+    with Env(Script(net.Reply(404, {}, b""))):
+        res = net.fetch("modrinth", SDL, want="bytes")
+    check("a 404 without to_file is the same as before",
+          res == {"ok": False, "error": "Modrinth has no such page (HTTP 404).", "reason": "not_found", "status": 404}, res)
+    with Env(Script(ConnectionError("x"))):
+        res = net.fetch("modrinth", SDL, want="bytes")
+    check("a refused connection without to_file is the same as before",
+          res == {"ok": False, "error": "Modrinth could not be reached (ConnectionError).", "reason": "offline"}, res)
+    with Env(Script(net.Reply(302, {"Location": SDL}))):
+        res = net.fetch("modrinth", SDL, want="bytes", max_redirects=0)
+    check("max_redirects=0 without to_file still hands the 3xx back", res["ok"] is True and res["status"] == 302 and res["body"] == b"", res)
+
+
+def test_net_py_never_deletes_anything():
+    import ast
+    tree = ast.parse(Path(net.__file__).read_text(encoding="utf-8"))
+    bad = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module in ("os", "shutil") and node.level == 0:
+            bad += [a.name for a in node.names if a.name in ("unlink", "remove", "rmtree", "rmdir", "removedirs", "rename", "replace", "move")]
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            base = node.func.value
+            on_files = isinstance(base, ast.Name) and base.id in ("os", "shutil")
+            if (on_files and node.func.attr in ("unlink", "remove", "rmtree", "rmdir", "removedirs", "rename", "replace", "move")) \
+                    or node.func.attr in ("unlink", "rmdir"):
+                bad.append(node.func.attr)
+    check("net.py calls nothing that deletes, renames or moves a file: the caller's discard does that (G11 stays as it is)", not bad, bad)
+
+
 # --- runner (keep BELOW every test: it reads globals() when it executes) ----
 
 if __name__ == "__main__":

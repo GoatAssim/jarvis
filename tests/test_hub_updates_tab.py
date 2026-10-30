@@ -56,8 +56,11 @@ check("the link opens the new panel through window.JarvisUpdates, and says where
       re.search(r'\$\("#updatesLink"\)\.addEventListener\("click"', js) is not None and "window.JarvisUpdates" in js and "Menu > Updates" in js)
 check("the Sources tab leaves out the providers that only report and apply updates",
       "visibleSourceProviders(r.providers, only)" in js and "p.updates_only !== true" in js and "visibleSourceProviders," in js)
-check("the one remaining read of the updates answer is the list of those providers (no check, dismiss, apply, dry-run or set from here)",
-      js.count('"/api/hub/updates"') == 1 and not re.search(r'/api/hub/updates/', js))
+# DH-A (updates inside the Downloads list) changed this on purpose: the panel now also reads the answer for its update rows and names the dismiss
+# route for its Hide button.  The Update button goes through the Updates page's own flow (dry run, apply), so those routes are still not named here,
+# and nothing in this file asks for a check.  The new behaviour is pinned in tests/verify_hub_updates_rows.js.
+check("the reads of the updates answer are the Sources tab's list of those providers and the Downloads list's update rows; the only route written here is dismiss (no check, apply, dry-run or set)",
+      js.count('"/api/hub/updates"') == 2 and js.count('"/api/hub/updates/dismiss"') == 1 and not re.search(r'/api/hub/updates/(?!dismiss")', js))
 check("that read is kept for a minute, and a failed read keeps what there was", "60000" in js and "keep what we had" in js)
 check("the panel still sends its writes with the hub header and closes cleanly without the Updates timer",
       '"X-Jarvis-Hub": "1"' in js and "S.updTimer" not in js and "clearTimeout(histTimer);" in js)

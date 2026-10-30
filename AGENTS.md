@@ -542,17 +542,21 @@ things that were already fixed once.
   not become ones.** The `/api/settings/*` routes require a loopback Host, a same-origin `Origin` when present and the
   `X-Jarvis-Settings: 1` header; don't weaken that, and don't point the page at `/api/config/*` for new work.
 
-- **Minecraft mod sources (the `minecraft` tool group: `search_mc_mods`, `get_mc_project`, `download_mc_file`,
-  `make_modpack_file`, `list_optifine_versions`, `download_optifine`, `check_mc_updates`; code in `jarvis/modhosts/`
-  and `actions/minecraft_*.py`; the owner's guide is `DOCUMENTATION/MINECRAFT_GUIDE.md`).** Nothing here is ever
+- **Minecraft mod sources (the `minecraft` tool group, 14 tools: `search_mc_mods`, `get_mc_project`, `download_mc_file`,
+  `make_modpack_file`, `list_optifine_versions`, `download_optifine`, `check_mc_updates`, `check_mc_watched`,
+  `apply_mc_update`, `mc_watch`, `list_mc_replaced`, `undo_mc_update`, `inspect_modpack`, `update_modpack_file`; code in
+  `jarvis/modhosts/` and `actions/minecraft_*.py`; the owner's guide is `DOCUMENTATION/MINECRAFT_GUIDE.md`).** Nothing here is ever
   "installed": no tool name says install, and a result says "queued", "written", "downloaded, not installed" or
-  "a newer file is available" (never "updated"). `tests/test_minecraft_guards.py` pins most of what follows;
+  "a newer file is available" (never "updated"; `apply_mc_update`'s `installed` key only carries the new file's name). `tests/test_minecraft_guards.py` pins most of what follows;
   `tests/test_minecraft_integration.py` runs the real adapters and the real `net.py` over a fake transport.
-  - *Owner only, asked first.* Every tool of the group is in `tools.OWNER_ONLY_TOOLS` (all seven are, in 182), AND each
+  - *Owner only, asked first.* Every tool of the group is in `tools.OWNER_ONLY_TOOLS` (all 14 are), AND each
     handler refuses a chat guest itself before any network call or file read (an unreadable sender counts as a guest).
-    The three that write a file, `download_mc_file`, `make_modpack_file` and `download_optifine`, are confirm-gated by
-    name (`TOOL_CONFIRM_REQUIRED`); the other four only read (`check_mc_updates` hashes files in a folder the owner names
-    and writes nothing there) and have an empty confirm set. A new tool of the group joins `OWNER_ONLY_TOOLS` (and
+    The seven that write a file or the watched list, `download_mc_file`, `make_modpack_file`, `download_optifine`,
+    `apply_mc_update`, `mc_watch`, `undo_mc_update` and `update_modpack_file`, are confirm-gated by name
+    (`TOOL_CONFIRM_REQUIRED`); the other seven only read (`check_mc_updates` hashes files in a folder the owner names and
+    writes nothing there) and have an empty confirm set. Only `modhosts/apply.py` and `modhosts/packupdate.py` may
+    rename, move or delete a file of the owner's; `tests/test_minecraft_guards.py` (G11) lists the few other files that
+    touch their own temp or state files (`actions/minecraft_undo.py` only removes an empty folder it just made). A new tool of the group joins `OWNER_ONLY_TOOLS` (and
     `tests/test_l28b_followups.py`'s expected set) and, if it writes or fetches a file, `TOOL_CONFIRM_REQUIRED`; the guard
     test loops over the whole group, so a new tool also needs its handler's module added to the guard test's
     `_handler()` lookup.
@@ -563,10 +567,14 @@ things that were already fixed once.
     12+ lines apart so separate patches do not collide).
   - *The CurseForge key.* It lives in `~/.jarvis/curseforge.json` as `{"api_key": ...}` (or the environment variable
     `CURSEFORGE_API_KEY`) and is read ONLY by `modhosts/config.py`. `config.get_key()` has exactly four callers:
-    `net.py` (puts it in the `x-api-key` header for `api.curseforge.com` only, and drops a key header a caller supplies),
-    `cache.py` (refuses to cache anything that holds it), `sources.py` (a yes/no "is one set") and `curseforge.py`
+    `net.py` (puts it in the `x-api-key` header for `api.curseforge.com` only, and drops a key header a caller supplies;
+    a 403 from a CurseForge host that is NOT the API host is `cdn_refused`, a 403 from the API host stays `bad_key`;
+    `curseforge.download_url` still folds both into `not_distributable`),
+    `cache.py` (refuses to cache anything that holds it, in every spelling the cache file can carry, and CurseForge
+    answers are never cached), `sources.py` (a yes/no "is one set") and `curseforge.py`
     (scrubs it from messages, says "no key" before any request). It is never in a result, a Downloads row, the cache or
-    a log; the Settings gate masks it on read. The guard test keeps allow-lists of the files that may name
+    a log; the Settings gate masks it on read, and `policy.py` scores a READ of the key file like a write.
+    `tests/modhosts_cdn_check.py` is the owner-run probe of the real download host and fingerprint route (not a test). The guard test keeps allow-lists of the files that may name
     `curseforge.json` or call `get_key()`; a new reader or namer is a decision to make on purpose (add it to the list
     and say why here), or use `config.py`. The environment variable is readable by a shell command the model runs, like
     other env keys, so the file is the safer home.
@@ -611,30 +619,65 @@ things that were already fixed once.
     answer "which files in ONE folder have a newer compatible file on Modrinth" and change nothing: no download, no
     rename, no write into the folder. It hashes (SHA-1) the `.jar`, `.zip` and `.mrpack` files one level deep (no
     sub-folders, links, hidden files; opened with `O_NOFOLLOW` where the OS has it) and asks Modrinth
-    `POST /version_files` through `net.fetch`: only hashes leave the PC. The folder is the named one, else the last one
-    checked, else `default_dest`, and must pass `outdir.protected_reason` as written and as resolved (never `~/.jarvis`,
+    `POST /version_files` through `net.fetch`: only hashes (and, for the CurseForge half, fingerprints) leave the PC. The folder is the named one, else the last one
+    checked; with neither the answer is `needs_folder` with an `ask` line that suggests `default_dest` (nothing is read,
+    hashed or sent, `~/Downloads` is never read on its own). The folder must pass `outdir.protected_reason` as written and as resolved (never `~/.jarvis`,
     the home folder, an OS folder, a link). "Newer" compares Modrinth's publication dates for the same Minecraft version
-    and loader, never version numbers. A file Modrinth does not know, CurseForge files included, is "not checked" with
-    `why: not_on_modrinth` and a `curseforge_note` (this check computes no CurseForge fingerprint); a file that lists
+    and loader, never version numbers. A file Modrinth does not know is looked up on CurseForge by its fingerprint (murmur2, computed on this PC; only
+    numbers leave it) but only with the owner's key, and it counts as a match only when the fingerprint AND the SHA-1
+    both agree; **that route is UNVERIFIED** and the answer says so. With no key, or no exact match, it is "not checked"
+    (`why: not_on_modrinth` / `not_on_curseforge`, plus a `curseforge_note`), never guessed. A file that lists
     several versions or loaders and got no answer is `needs_mc_version` / `needs_loader` with `needs_clarification`;
     another version or loader is `other_version`, never "up to date". The state file
-    `~/.jarvis/modhosts/update_state.json` holds only a hash cache (`[size, mtime_ns, sha1]` per path) and the last folder;
+    `~/.jarvis/modhosts/update_state.json` holds only a hash cache (`[size, mtime_ns, sha1]` per path, with the CurseForge fingerprint beside it) and the last folder;
     losing it costs one re-hash. It is not reachable from Settings.
-  - *Panel and palette.* `web/public/minecraft-panel.js` (+ `.css`; Menu > Minecraft, tabs Search, Project files,
-    OptiFine, Make a pack) is a thin face on the six tools it names (`TOOLS` in the file; `check_mc_updates` is not one of
-    them in 182): every action goes through `/api/tools/preview` and then `/api/tools/run`, writes get a dry run and one
-    dialog showing the exact folder first. It never reads `curseforge.json` ("no key" comes from the tool's `no_key`
-    answer), never builds HTML from vendor text (`textContent` / `setAttribute` only) and links only https addresses on
-    `modrinth.com`, `curseforge.com` or `optifine.net`. `tests/test_minecraft_panel.py` and `tests/verify_minecraft_panel.js`
-    pin this, including that the panel's tool list equals the six tools the action files declare. `minecraft` is a panel
-    verb in `slash-commands-data.js` with `covers: []` (the panel has no CLI subcommand, like `guides`; nothing goes into
-    `reserved_names.py`) and is in `PANEL_VERBS` in `slash-palette.js`; a new verb means updating the hard-coded counts in
-    `tests/verify_slash_palette.js` (41 verbs in 182). `actions/minecraft_lookup.py` ships three `TOOL_COMMANDS`, all
-    `safe` lookups: `/mcsearch <query>`, `/mcfind <mc_version> <loader> <query>`, `/mcproject <project> [mc_version] [loader]`;
-    it is on `tests/test_tool_commands.py`'s allow-list of files that may name `TOOL_COMMANDS`. Downloads and packs are
-    deliberately not commands. In 182 `web/server.js` does not act on the `confirm_ui` flag the panel sends, so a write to
-    a folder outside the downloads library (including the default `~/Downloads`) from the panel ends in "Not confirmed";
-    the panel then offers its "Minecraft" library folder instead.
+  - *Watched folders and the update source (`modhosts/watched.py`, `actions/minecraft_update_source.py`).* The owner puts
+    mod folders on a WATCHED list (`~/.jarvis/modhosts/watched.json`, at most 20 folders, same folder rules as the
+    update check); `check_mc_watched` (read) runs the update check over every watched folder in the shape the Download
+    Hub's update runner expects, `mc_watch` (confirm) adds, removes or sets a folder (`action` is add / remove / set;
+    listing is `check_mc_watched`'s `watched`), and `apply_mc_update` (confirm) replaces ONE file by a finding `id`
+    (`<folder id>:<sha1 of the installed file>`, folder id `f` + 8 hex of the path's SHA-1). The id is re-checked against
+    the current folder, so a stale finding is refused. The `auto` flag is the owner's wish; the HUB honours it (`unattended`
+    is set only by the hub's own tick), this file never updates by itself. A file the check could not decide is never a
+    finding: each folder adds one sentence to `problems`.
+  - *Replacing a file and the way back (`modhosts/apply.py`, `actions/minecraft_undo.py`).* `apply_update` is the one
+    place in the group that changes a file of the owner's: only in a watched folder, one file per call, only after the
+    confirmation, and NEVER deleting: the old file is MOVED to `~/.jarvis/modhosts/replaced/<UTC stamp>/` with a record
+    (`replaced.json`) written first. The new file must have a published hash (no hash = refused, stricter than
+    `download_mc_file`), is downloaded through `net.fetch` into `replaced/_staging/` (never the mods folder), is checked
+    on disk and again after placing, and is moved in without replacing anything. `dry_run` creates nothing. The result is
+    `state: done` with `needs_restart: true`; required dependencies are reported, never added. After a success the oldest
+    backups beyond 50 batches or 2 GB are pruned, **the one place Jarvis deletes anything** (`_remove_batch`, which refuses
+    anything that is not a batch folder). `list_mc_replaced` (read) lists the backups, `undo_mc_update` (confirm) moves the
+    new file to `replaced/undone/<id>/` and the old one back, only when both hashes still match and the old name is free;
+    it never overwrites or deletes.
+  - *Reading and updating a pack file (`modhosts/packread.py`, `modhosts/packupdate.py`, `actions/minecraft_packread.py`).*
+    `inspect_modpack` (read) opens a `.mrpack` or CurseForge `.zip` the owner names, reads exactly ONE member (the index) in
+    memory and extracts nothing: `overrides/` is listed, never read, no URL of the pack is fetched, a zip that looks like a
+    bomb or has an unsafe name is refused, an unknown format version is reported, not guessed. Names are stranger text.
+    `update_modpack_file` (confirm, `dry_run` first) writes a NEW `<name>-updated.mrpack` / `.zip` (`-updated-2` ... when the
+    name is taken; there is no overwrite argument), never touching the original. "Newer" is a later publication date for the
+    same Minecraft version and loader on the pack's own platform; an entry that cannot be updated is skipped and stays as it
+    was, an entry the writer cannot carry over blocks the whole write, and overrides are copied zip to zip unchanged.
+  - *Panel and palette.* `web/public/minecraft-panel.js` (+ `.css`; Menu > Minecraft, tabs Find, Updates, OptiFine, Make a
+    pack) is a thin face on the eleven tools it names (`TOOLS` in the file: the six lookup, download and pack tools plus
+    `check_mc_watched`, `apply_mc_update`, `mc_watch`, `list_mc_replaced`, `undo_mc_update`; `check_mc_updates`,
+    `inspect_modpack` and `update_modpack_file` are not among them): every action goes through `/api/tools/preview` and then
+    `/api/tools/run`, writes get a dry run and one dialog showing the exact folder first. It never reads `curseforge.json`
+    ("no key" comes from the tool's `no_key` answer), never builds HTML from vendor text (`textContent` / `setAttribute`
+    only) and links only https addresses on `modrinth.com`, `curseforge.com` or `optifine.net`.
+    `tests/test_minecraft_panel.py` and `tests/verify_minecraft_panel.js` pin this, including that the panel's tool list
+    matches the tools the action files declare. `web/server.js` `/api/tools/run` acts on `confirm_ui` ONLY as `=== true`
+    and ONLY for the 12 names in its `MINECRAFT_TOOLS` list: it then feeds `y` to up to 64 questions and allows 120 s;
+    every other tool still gets no stdin and 30 s. So a write outside the downloads library (including the default
+    `~/Downloads`) from the panel works after the panel's own dialog; a new Minecraft tool the panel should be able to
+    confirm must be added to `MINECRAFT_TOOLS`. `minecraft` is a panel verb in `slash-commands-data.js` with `covers: []`
+    (the panel has no CLI subcommand, like `guides`; nothing goes into `reserved_names.py`) and is in `PANEL_VERBS` in
+    `slash-palette.js`; a new verb means checking the hard-coded counts in `tests/verify_slash_palette.js`.
+    `actions/minecraft_lookup.py` ships three `TOOL_COMMANDS`, all `safe` lookups: `/mcsearch <query>`,
+    `/mcfind <mc_version> <loader> <query>`, `/mcproject <project> [mc_version] [loader]`; it is on
+    `tests/test_tool_commands.py`'s allow-list of files that may name `TOOL_COMMANDS`. Downloads, packs, updates and undo
+    are deliberately not commands.
   - *Settings and routing.* `web/server.js` `SETTINGS_NAME_RE` accepts one folder level: `channels/`, `web-data/` or
     `modhosts/`; `settings_admin._split_name` is the real gate, and `modhosts/` reaches only the files `_FILES` names
     (today `modhosts/cache.json`, read-only). `curseforge.json` is a top-level Settings file with a validator and a
@@ -776,7 +819,7 @@ actually render Markdown):
     node tests/verify_panel_open_guard.js   # I-B18(c): openScriptPanel() says so when a panel's script didn't load; no npm install
     python3 tests/verify_panel_open_guard.py  # same, in a real browser with daemons.js blocked; needs `playwright` (Python) + Chromium, prints SKIP without them
     python3 tests/test_minecraft_glue.py     # Minecraft wave-1 glue: OptiFine tools owner-only, modhosts/ settings name, pack-instruction sentence, split_dest refusal wording
-    python3 tests/test_minecraft_guards.py   # the Minecraft group's cross-file promises: owner-only (all seven tools), confirm-gated, no "install" in a name, no shared routing phrase, one network door, key allow-lists, key stays in its file, stranger text marked
+    python3 tests/test_minecraft_guards.py   # the Minecraft group's cross-file promises: owner-only (all 14 tools), confirm-gated, no "install" in a name, no shared routing phrase, one network door, key allow-lists, key stays in its file, stranger text marked
     python3 tests/test_minecraft_integration.py  # real adapters + real net.py over a fake transport: CurseForge download, blocked file, Modrinth download then pack (same checksum), CurseForge pack, dry runs; inline data, no tests/data files
     python3 tests/test_modhosts_net.py       # modhosts/net.py, hosts.py, cache.py: allow-lists, redirects, netguard, key header, scrubbing
     python3 tests/test_modhosts_config.py    # the CurseForge key: config.py, Settings entries, policy, doctor, settings.js
@@ -793,6 +836,11 @@ actually render Markdown):
     python3 tests/test_minecraft_updates.py      # S2: check_mc_updates and modhosts/updates.py against an in-process fake Modrinth (needs hand_s2_catalog.json)
     python3 tests/test_minecraft_panel.py        # S3: panel files and wiring, the `minecraft` palette verb, TOOL_COMMANDS, panel rules (needs hand_s3_*.json fixtures)
     node tests/verify_minecraft_panel.js         # S3: the panel's pure helpers (arguments, classification, safe links); no npm install (needs hand_s3_*.json fixtures)
+    python3 tests/test_minecraft_apply.py        # M2: modhosts/apply.py and minecraft_undo.py against an in-process fake Modrinth / CurseForge and temp folders
+    python3 tests/test_minecraft_update_source.py  # M1: watched.py and the three update-source tools against a fake check and a fake engine
+    python3 tests/test_minecraft_updates_cf.py   # M1: check_mc_updates, the CurseForge half and the needs_folder default, against fake Modrinth and CurseForge
+    python3 tests/test_minecraft_packread.py     # M4: inspect_modpack and update_modpack_file (inline packs, hostile zips, no fixture files)
+    python3 tests/test_minecraft_hardening.py    # M3: the key in the cache in every spelling, the two CurseForge hosts (cdn_refused), key-file reads in policy, the owner-run probe over a fake transport
     python3 tests/test_hub_http_verify.py        # Download Hub P1: the `verify` item option (sha1 / sha256 / sha512 on the finished .part) and the protected-folder refusal
 
 `tests/data/` is git-ignored (`.gitignore`), so every fixture a Minecraft test reads from `tests/data/modhosts/`

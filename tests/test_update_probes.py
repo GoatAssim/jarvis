@@ -235,6 +235,36 @@ stm.main(["--root", str(Path(HOME) / "nowhere")], out=buf)
 check("steam probe: no Steam folder is said, not an error", "Steam folder not found" in buf.getvalue())
 check("steam probe: a huge manifest is capped", len(stm.read_raw(ACF)) <= stm.MAX_RAW)
 
+# --------------------------------------------------------------------------- round 10: --admin (still read-only)
+pkg.RUN = fake_run
+installed.update({"choco", "whoami", "icacls"})
+outputs.clear()
+outputs["/groups"] = (0, "Mandatory Label\\Medium Mandatory Level\n", "", 0.1, "")
+outputs["icacls"] = (0, "C:\\ProgramData\\chocolatey BUILTIN\\Users:(RX)\n", "", 0.1, "")
+os.environ["ChocolateyInstall"] = "C:\\ProgramData\\chocolatey"
+ran.clear()
+buf = io.StringIO()
+pkg.main(["--only", "npm"], out=buf)
+check("admin: without --admin nothing about administrator rights is recorded or run",
+      "[admin]" not in buf.getvalue() and not any("icacls" in a[0] or "whoami" in a[0] for a in ran))
+ran.clear()
+buf = io.StringIO()
+pkg.main(["--only", "npm", "--admin"], out=buf)
+admin_text = buf.getvalue()
+check("admin: it records whether this window runs as an administrator", "[admin] this window runs as an administrator: " in admin_text)
+check("admin: it records where Chocolatey lives", "[admin] %ChocolateyInstall% = C:\\ProgramData\\chocolatey" in admin_text
+      and "[admin] choco is at: C:\\tools\\choco.exe" in admin_text)
+check("admin: it lists who may write in Chocolatey's folders (icacls with a folder and nothing else)",
+      sum(1 for a in ran if "icacls" in a[0]) == 2 and all(len(a) == 2 for a in ran if "icacls" in a[0])
+      and "BUILTIN\\Users:(RX)" in admin_text)
+check("admin: every command it ran is read-only", all(pkg.is_read_only(a) for a in ran))
+check("admin: the report still says nothing of its own about what is outdated", not any(
+    w in admin_text.lower() for w in ("is outdated", "needs update", "update available", "up to date", "newer version")))
+del os.environ["ChocolateyInstall"]
+buf = io.StringIO()
+pkg.main(["--only", "npm", "--admin"], out=buf)
+check("admin: no ChocolateyInstall is said, not an error", "%ChocolateyInstall% = (not set)" in buf.getvalue())
+
 print()
 print(f"{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

@@ -1000,6 +1000,225 @@ def test_everything_returns_a_dict_and_never_raises():
     check("check_pack(garbage) answers (False, why)", packs.check_pack(None, "modrinth")[0] is False)
 
 
+# --------------------------------------------------------------------------- overrides from ANOTHER PACK (the zip source; agent MC-C)
+
+def _old_pack(path, members, stored=False, extra=None):
+    """A zip standing in for the pack whose overrides are copied: {name: bytes}.  `extra` = ZipInfo objects written as given."""
+    import warnings
+    kind = zipfile.ZIP_STORED if stored else zipfile.ZIP_DEFLATED
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with zipfile.ZipFile(path, "w", kind) as z:
+            for name, data in members.items():
+                z.writestr(name, data)
+            for info, data in (extra or []):
+                z.writestr(info, data)
+    return Path(path)
+
+
+def _member_list(path, prefix="overrides/"):
+    with zipfile.ZipFile(path) as z:
+        return [(i.filename, i.filename, i.file_size, i.CRC) for i in z.infolist() if i.filename.startswith(prefix) and not i.filename.endswith("/")]
+
+
+def _zip_plan(fmt, pack, members, out):
+    """A plan from the fake catalog with the overrides taken from `pack`'s members, aimed at the folder `out`."""
+    plan, got = plan_of(base_args(fmt, dest=str(out)))
+    assert plan, got
+    ov, bad = packs.overrides_from_zip(pack, members, fmt)
+    assert ov is not None, bad
+    plan["overrides"] = ov
+    return plan
+
+
+def test_zip_source_writes_the_same_bytes_as_the_folder_source():
+    with both():
+        src = make_src()
+        (src / "shaderpacks").mkdir()
+        (src / "shaderpacks" / "notes.txt").write_bytes(bytes(range(256)) * 40)
+        for fmt in ("modrinth", "curseforge"):
+            from_folder = make(base_args(fmt, src=str(src)))
+            check("%s: the folder-source pack is written" % fmt, from_folder["ok"] and from_folder["written"], from_folder)
+            members = _member_list(from_folder["path"])
+            out = new_dir("out")
+            plan = _zip_plan(fmt, from_folder["path"], members, out)
+            before = Path(from_folder["path"]).read_bytes()
+            got = packs.write_pack(plan)
+            check("%s: the zip-source pack is written" % fmt, got["ok"] and got["written"], got)
+            check("%s: byte for byte the pack the folder source made (same names, same order, same bytes)" % fmt,
+                  Path(got["path"]).read_bytes() == before, (len(before), listing(out)))
+            check("%s: the old pack was only read" % fmt, Path(from_folder["path"]).read_bytes() == before)
+            check("%s: the report counts the override files and says they came from a pack" % fmt,
+                  got["overrides"]["files"] == 3 and got["overrides"].get("from_pack") is True, got.get("overrides"))
+            ok, why = packs.check_pack(got["path"], fmt)
+            check("%s: and it re-checks clean" % fmt, ok, why)
+        with_report = packs.write_pack(_zip_plan("modrinth", from_folder["path"], members, new_dir("out")),
+                                       describe_with=lambda plan, dry_run, written=None: {"ok": True, "custom": True, "written": written})
+        check("write_pack(describe_with=...) uses that report and still adds the size", with_report.get("custom") is True and with_report["size"] > 0, with_report)
+
+
+def test_zip_source_refuses_unsafe_names_duplicates_and_odd_input():
+    base = [("overrides/ok.txt", "overrides/ok.txt", 3, 1)]
+    cases = [("a .. part", ("overrides/../x", "overrides/../x", 1, 1)), ("a backslash", ("overrides\\a", "overrides\\a", 1, 1)),
+             ("a leading slash", ("/overrides/a", "/overrides/a", 1, 1)), ("a drive", ("C:/overrides/a", "C:/overrides/a", 1, 1)),
+             ("a colon", ("overrides/a:b", "overrides/a:b", 1, 1)), ("an empty part", ("overrides//a", "overrides//a", 1, 1)),
+             ("a reserved device name", ("overrides/config/CON.txt", "overrides/config/CON.txt", 1, 1)),
+             ("a trailing dot", ("overrides/dir./f.txt", "overrides/dir./f.txt", 1, 1)),
+             ("a folder entry", ("overrides/dir/", "overrides/dir/", 0, 0)),
+             ("a new name outside the overrides folder", ("overrides/a", "mods/a.jar", 1, 1)),
+             ("a new name that is only the folder", ("overrides/a", "overrides", 1, 1)),
+             ("an unsafe NEW name only", ("overrides/a", "overrides/../a", 1, 1))]
+    for label, item in cases:
+        got, bad = packs.overrides_from_zip(Path(HOME) / "x.mrpack", base + [item], "modrinth")
+        check("refused: %s" % label, got is None and bad["ok"] is False and bad["reason"] == "verify_failed", bad)
+    got, bad = packs.overrides_from_zip(Path(HOME) / "x.mrpack", base + [("overrides/A.txt", "overrides/A.TXT", 1, 1), ("overrides/b", "overrides/a.txt", 1, 1), ("overrides/c", "overrides/OK.txt", 1, 1)], "modrinth")
+    check("refused: two files that would share a name (any case)", got is None and bad["reason"] == "verify_failed" and "same name" in bad["error"], bad)
+    for label, item in (("a size that isn't a number", ("overrides/a", "overrides/a", "3", 1)), ("a negative size", ("overrides/a", "overrides/a", -1, 1)),
+                        ("a crc that isn't a number", ("overrides/a", "overrides/a", 1, None)), ("a boolean size", ("overrides/a", "overrides/a", True, 1)),
+                        ("a member that isn't four things", ("overrides/a", 1))):
+        got, bad = packs.overrides_from_zip(Path(HOME) / "x.mrpack", [item], "modrinth")
+        check("refused: %s" % label, got is None and bad["ok"] is False and bad["reason"] == "unsupported", bad)
+    got, bad = packs.overrides_from_zip(Path(HOME) / "x.mrpack", "not a list", "modrinth")
+    check("refused: members that aren't a list", got is None and bad["reason"] == "unsupported")
+    got, bad = packs.overrides_from_zip(Path(HOME) / "x.mrpack", base, "rift")
+    check("refused: an unknown pack format", got is None and bad["reason"] == "unsupported")
+    got, bad = packs.overrides_from_zip(Path(HOME) / "x.mrpack", [("overrides/a", "client-overrides/a", 1, 1), ("overrides/b", "server-overrides/b", 1, 1)], "modrinth")
+    check("a Modrinth pack may keep client-overrides/ and server-overrides/", got is not None and [m[1] for m in got["members"]] == ["client-overrides/a", "server-overrides/b"], bad)
+    got, bad = packs.overrides_from_zip(Path(HOME) / "x.zip", [("overrides/a", "client-overrides/a", 1, 1)], "curseforge")
+    check("a CurseForge pack has overrides/ only", got is None and bad["reason"] == "verify_failed", bad)
+    got, bad = packs.overrides_from_zip(Path(HOME) / "x.mrpack", [], "modrinth")
+    check("no members at all is fine: an empty list of files", got is not None and got["files"] == [] and got["bytes"] == 0, bad)
+    got, bad = packs.overrides_from_zip(Path(HOME) / "x.mrpack", [("overrides/.hidden/.env", "overrides/.hidden/.env", 1, 1), ("overrides/id_rsa", "overrides/id_rsa", 1, 1)], "modrinth")
+    check("hidden files and secret-looking names are copied, not skipped (the pack's own bytes are unchanged)", got is not None and len(got["members"]) == 2 and got["skipped"] == [], bad)
+
+
+def test_zip_source_uses_the_three_overrides_caps():
+    members = [("overrides/f%d.txt" % i, "overrides/f%d.txt" % i, 2048, 7) for i in range(30)]
+    try:
+        set_settings()
+        got, bad = packs.overrides_from_zip(Path(HOME) / "x.mrpack", members, "modrinth")
+        check("defaults: 0 = unlimited (30 files, no caps)", got is not None and len(got["files"]) == 30, bad)
+        set_settings(overrides_max_files=10)
+        got, bad = packs.overrides_from_zip(Path(HOME) / "x.mrpack", members, "modrinth")
+        check("overrides_max_files refuses more files than the cap", got is None and bad["reason"] == "too_big", bad)
+        set_settings(overrides_max_files=30)
+        check("...30 is allowed with a cap of 30", packs.overrides_from_zip(Path(HOME) / "x.mrpack", members, "modrinth")[0] is not None)
+        set_settings(overrides_max_total_mb=1)
+        big = members + [("overrides/big.bin", "overrides/big.bin", 1024 * 1024, 7)]
+        got, bad = packs.overrides_from_zip(Path(HOME) / "x.mrpack", big, "modrinth")
+        check("overrides_max_total_mb refuses a total over the cap", got is None and bad["reason"] == "too_big", bad)
+        set_settings(overrides_max_file_mb=1)
+        got, bad = packs.overrides_from_zip(Path(HOME) / "x.mrpack", [("overrides/big.bin", "overrides/big.bin", 1024 * 1024 + 1, 7)], "modrinth")
+        check("overrides_max_file_mb refuses one file over the cap, and names it", got is None and bad["reason"] == "too_big" and "big.bin" in bad["error"], bad)
+    finally:
+        set_settings()
+    got, bad = packs.overrides_from_zip(Path(HOME) / "x.mrpack", big, "modrinth")
+    check("back to unlimited", got is not None, bad)
+
+
+def test_zip_source_stops_when_the_old_pack_changed_or_is_damaged():
+    import stat as stat_mod
+    with both():
+        files = {"overrides/config/a.cfg": b"a=1\n" * 100, "overrides/options.txt": b"fov:90\n"}
+        scenarios = []
+        # 1. one member replaced by different bytes of the same length: size matches, CRC does not
+        old = _old_pack(new_dir("old") / "p.mrpack", files)
+        members = _member_list(old)
+        _old_pack(old, dict(files, **{"overrides/options.txt": b"fov:70\n"}))
+        scenarios.append(("a member with other bytes (same size)", old, members))
+        # 2. a member with another size
+        old = _old_pack(new_dir("old") / "p.mrpack", files)
+        members = _member_list(old)
+        _old_pack(old, dict(files, **{"overrides/options.txt": b"fov:90\nmore\n"}))
+        scenarios.append(("a member with another size", old, members))
+        # 3. a member that is gone
+        old = _old_pack(new_dir("old") / "p.mrpack", files)
+        members = _member_list(old)
+        _old_pack(old, {"overrides/config/a.cfg": files["overrides/config/a.cfg"]})
+        scenarios.append(("a member that is gone", old, members))
+        # 4. stored data flipped in place: the header still says the old CRC
+        old = _old_pack(new_dir("old") / "p.mrpack", files, stored=True)
+        members = _member_list(old)
+        raw = bytearray(old.read_bytes())
+        with zipfile.ZipFile(old) as z:
+            info = z.getinfo("overrides/config/a.cfg")
+        at = info.header_offset + 30 + len(info.filename) + len(info.extra) + 5
+        raw[at] ^= 0xFF
+        old.write_bytes(bytes(raw))
+        scenarios.append(("bytes damaged inside the pack (the checksum no longer fits)", old, members))
+        # 5. the old pack is gone
+        old = _old_pack(new_dir("old") / "p.mrpack", files)
+        members = _member_list(old)
+        old.unlink()
+        scenarios.append(("the old pack deleted", old, members))
+        # 6. a link entry under a listed name
+        link = zipfile.ZipInfo("overrides/options.txt")
+        link.create_system = 3
+        link.external_attr = (stat_mod.S_IFLNK | 0o777) << 16
+        old = _old_pack(new_dir("old") / "p.mrpack", {"overrides/config/a.cfg": files["overrides/config/a.cfg"]}, extra=[(link, b"/etc/passwd")])
+        with zipfile.ZipFile(old) as z:
+            members = [(i.filename, i.filename, i.file_size, i.CRC) for i in z.infolist()]
+        scenarios.append(("a link entry among the members", old, members))
+        # 7. two entries with one name
+        old = _old_pack(new_dir("old") / "p.mrpack", files)
+        members = _member_list(old)
+        old = _old_pack(old, dict(files), extra=[(zipfile.ZipInfo("overrides/options.txt"), b"fov:90\n")])
+        scenarios.append(("a name that is in the pack twice", old, members))
+        for label, old, members in scenarios:
+            out = new_dir("out")
+            plan = _zip_plan("modrinth", old, members, out)
+            kept = old.read_bytes() if old.exists() else None
+            got = packs.write_pack(plan)
+            check("%s: the write is refused, verify_failed" % label, got["ok"] is False and got["reason"] == "verify_failed" and got["written"] is False, got)
+            check("%s: nothing is left in the destination (no .part either)" % label, listing(out) == [], listing(out))
+            check("%s: the old pack was not touched" % label, (old.read_bytes() if old.exists() else None) == kept)
+        if symlinks_work():
+            old = _old_pack(new_dir("old") / "p.mrpack", files)
+            members = _member_list(old)
+            moved = old.with_name("real.mrpack")
+            old.rename(moved)
+            os.symlink(moved, old)
+            out = new_dir("out")
+            got = packs.write_pack(_zip_plan("modrinth", old, members, out))
+            check("the old pack turned into a symlink: refused, nothing left", got["ok"] is False and got["reason"] == "verify_failed" and listing(out) == [], (got, listing(out)))
+
+
+def test_zip_source_never_opens_a_member_as_an_archive_or_runs_it():
+    with both():
+        inner = new_dir("inner") / "nested.zip"
+        _old_pack(inner, {"x.txt": b"x" * 100})
+        files = {"overrides/mods/nested.jar": inner.read_bytes(), "overrides/run.bat": b"@echo off\r\ndel /q C:\\*\r\n",
+                 "overrides/evil.sh": b"#!/bin/sh\nrm -rf ~\n", "overrides/config/a.cfg": b"a=1\n"}
+        old = _old_pack(new_dir("old") / "p.mrpack", files)
+        members = _member_list(old)
+        out = new_dir("out")
+        plan = _zip_plan("modrinth", old, members, out)
+        opened = []
+        real = zipfile.ZipFile
+        saved = packs.zipfile.ZipFile
+
+        class Spy(real):
+            def __init__(self, file, *a, **k):
+                opened.append(str(file) if isinstance(file, (str, Path)) else "<handle>")
+                super().__init__(file, *a, **k)
+        packs.zipfile.ZipFile = Spy
+        try:
+            got = packs.write_pack(plan)
+        finally:
+            packs.zipfile.ZipFile = saved
+        check("the pack is written", got["ok"] and got["written"], got)
+        with zipfile.ZipFile(got["path"]) as z:
+            copied = {n: z.read(n) for n in z.namelist() if n.startswith("overrides/")}
+        check("every member, the nested zip and the scripts too, is copied byte for byte and nothing else is in the pack",
+              copied == files and len(zipfile.ZipFile(got["path"]).namelist()) == 5, sorted(copied))
+        named = [o for o in opened if o != "<handle>"]
+        check("the only zip files opened by name are the old pack and the temp file being written; a member is never opened",
+              all(o == str(old) or o.endswith(".part") for o in named) and str(old) in named, named)
+        check("nothing but the pack is in the destination (nothing extracted, no script run)", listing(out) == [Path(got["path"]).name], listing(out))
+    text = (ROOT / "jarvis-cli" / "jarvis" / "modhosts" / "packs.py").read_text(encoding="utf-8")
+    check("packs.py never extracts, and has no os.remove / shutil / subprocess / exec", not re.search(
+        r"extractall|\.extract\(|os\.remove|shutil\.|subprocess|os\.system|\bexec\(|\beval\(", text))
+
 # --- runner (keep BELOW every test: it reads globals() when it executes) ----
 
 if __name__ == "__main__":

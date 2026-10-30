@@ -18,7 +18,11 @@
  *     tick is disabled (with the reason in words) when the source has no updater of its own or the master switch is off.
  *   - Everything another program said (names, versions, sources, messages, errors) is untrusted. It is put on the page with
  *     textContent / setAttribute only, capped and stripped of control characters. This file never touches innerHTML.
- *   - The panel's own switches live in the panel (nothing is added to settings.js) and nothing is kept in the browser.
+ *   - The panel's own switches live in the panel (nothing is added to settings.js).
+ *   - Layout (round 10, DH-D): each source block can be folded and dragged. Only the person's layout is kept in this browser
+ *     (localStorage, inside try/catch, under one key): the order of the sources by id, the blocks he folded or unfolded by hand and
+ *     which blocks it already decided for. It is never sent to the hub. With storage empty, blocked or full, everything still works
+ *     for as long as the panel's page lives.
  *
  * Public:  window.JarvisUpdates.open() / .close() / .refreshBadge()
  * Tested:  window.JarvisUpdates._pure and ._flows (tests/verify_updates_panel.js, with a fake hub built from the contract).
@@ -42,6 +46,13 @@
     mods: "Include mods", games: "Include games", packages: "Include package managers", apps: "Include apps", other: "Include other sources",
   };
   const DOT = " \u00b7 ";
+  // Layout (round 10, DH-D). A source with this many updates or more starts folded the first time it is shown with updates;
+  // after the person folds or unfolds it himself his choice wins. 8 is what still fits one screen without the list clumping.
+  const COLLAPSE_AT = 8;
+  const LAYOUT_KEY = "jarvis.updates.layout";
+  const LAYOUT_VERSION = 1;
+  const MAX_IDS = 400;
+  const DRAG_STALE_MS = 120000;
   const POLL = { slow: 20000, checking: 4000, applying: 3000, closed: 60000 };
   const FAST_AFTER_CHECK_MS = 90000;
   const FAST_AFTER_APPLY_MS = 120000;
@@ -253,6 +264,160 @@
       (loud ? shown : quiet).push(b);
     });
     return { shown: shown, quiet: quiet };
+  }
+
+  // ---- the layout: which sources are folded and in what order (round 10, DH-D). Pure; the storage is passed in.
+
+  // A source id that is safe to keep: a clean string of sane length (anything else is not remembered).
+  function idKey(v) {
+    const s = typeof v === "string" ? v : "";
+    return s && s.length <= 120 && s === text(s) ? s : "";
+  }
+
+  function newLayout() {
+    return { order: [], choice: Object.create(null), seen: Object.create(null), auto: Object.create(null) };
+  }
+
+  // Whatever came out of storage (a string, an object, junk) becomes a layout that is safe to use. Never throws.
+  function cleanLayout(raw) {
+    const out = newLayout();
+    let v = raw;
+    if (typeof v === "string") { try { v = JSON.parse(v); } catch (_) { return out; } }
+    if (!isObj(v) || v.v !== LAYOUT_VERSION) return out;
+    const seen = new Set();
+    (Array.isArray(v.order) ? v.order : []).forEach((x) => {
+      const id = idKey(x);
+      if (id && !seen.has(id) && out.order.length < MAX_IDS) { seen.add(id); out.order.push(id); }
+    });
+    const pick = (src, into, wantBool) => {
+      if (!isObj(src)) return;
+      Object.keys(src).slice(0, MAX_IDS).forEach((k) => {
+        const id = idKey(k);
+        if (!id) return;
+        if (wantBool && typeof src[k] === "boolean") into[id] = src[k];
+        else if (!wantBool && src[k] === true) into[id] = true;
+      });
+    };
+    pick(v.choice, out.choice, true);
+    pick(v.seen, out.seen, false);
+    pick(v.auto, out.auto, false);
+    return out;
+  }
+
+  function layoutToJson(layout) {
+    const l = layout || newLayout();
+    return JSON.stringify({ v: LAYOUT_VERSION, order: l.order, choice: l.choice, seen: l.seen, auto: l.auto });
+  }
+
+  // `storage` is anything with getItem/setItem (the page's localStorage, or a fake). null, empty or broken gives the default.
+  function readLayout(storage) {
+    try { return storage ? cleanLayout(storage.getItem(LAYOUT_KEY)) : newLayout(); } catch (_) { return newLayout(); }
+  }
+  // true when it was kept, false when the browser would not (the layout then lasts for this page only).
+  function writeLayout(storage, layout) {
+    try { if (!storage) return false; storage.setItem(LAYOUT_KEY, layoutToJson(layout)); return true; } catch (_) { return false; }
+  }
+
+  // Folded or not: his own choice if he made one, else what the first sight of a big source decided.
+  function isCollapsed(layout, id) {
+    const l = layout || newLayout();
+    return typeof l.choice[id] === "boolean" ? l.choice[id] : l.auto[id] === true;
+  }
+
+  // The first time a source is shown WITH updates, a big one starts folded (unless he already chose). Returns true when it changed.
+  function noteSeen(layout, blocks) {
+    let changed = false;
+    (blocks || []).forEach((b) => {
+      const id = idKey(b && b.id);
+      if (!id || !b.rows || !b.rows.length || layout.seen[id] === true || Object.keys(layout.seen).length >= MAX_IDS) return;
+      layout.seen[id] = true;
+      if (b.rows.length >= COLLAPSE_AT && typeof layout.choice[id] !== "boolean") layout.auto[id] = true;
+      changed = true;
+    });
+    return changed;
+  }
+
+  // His choice for these sources (Collapse all / Expand all and the toggle). Returns true when something changed.
+  function setCollapsed(layout, ids, value) {
+    let changed = false;
+    (ids || []).forEach((raw) => {
+      const id = idKey(raw);
+      if (!id || layout.choice[id] === !!value) return;
+      if (Object.keys(layout.choice).length >= MAX_IDS && !(id in layout.choice)) return;
+      layout.choice[id] = !!value;
+      changed = true;
+    });
+    return changed;
+  }
+
+  // Saved places first, in the saved order; a source with no saved place after them, in the order it came (group, then name).
+  function orderBlocks(blocks, order) {
+    const list = Array.isArray(blocks) ? blocks : [];
+    const place = new Map();
+    (Array.isArray(order) ? order : []).forEach((id, i) => { if (!place.has(id)) place.set(id, i); });
+    const placed = list.filter((b) => place.has(b.id)).sort((x, y) => place.get(x.id) - place.get(y.id));
+    return placed.concat(list.filter((b) => !place.has(b.id)));
+  }
+
+  // The saved order with every source that has no place yet added at the end; ids of sources not reported now stay where they were.
+  function materializeOrder(order, blocks) {
+    const out = [];
+    const seen = new Set();
+    (Array.isArray(order) ? order : []).concat((blocks || []).map((b) => b.id)).forEach((id) => {
+      if (idKey(id) && !seen.has(id)) { seen.add(id); out.push(id); }
+    });
+    return out.slice(0, MAX_IDS);
+  }
+
+  // `id` moved to just before or just after `target`. A new list; the same content when either is unknown.
+  function moveRelative(list, id, target, side) {
+    const a = Array.isArray(list) ? list : [];
+    if (id === target || a.indexOf(id) < 0 || a.indexOf(target) < 0) return a.slice();
+    const out = a.filter((x) => x !== id);
+    out.splice(out.indexOf(target) + (side === "after" ? 1 : 0), 0, id);
+    return out;
+  }
+
+  // Move up / Move down: next to the neighbour that is SHOWN above or below it now (`shownIds` is the list as drawn).
+  function moveStep(list, shownIds, id, dir) {
+    const at = (shownIds || []).indexOf(id);
+    const neighbour = at < 0 ? undefined : shownIds[at + (dir < 0 ? -1 : 1)];
+    return neighbour === undefined ? (Array.isArray(list) ? list.slice() : []) : moveRelative(list, id, neighbour, dir < 0 ? "before" : "after");
+  }
+
+  // Dropped on the upper half of a block: before it. On the lower half: after it.
+  function dropSide(y, rect) {
+    const top = num(rect && rect.top), h = num(rect && rect.height);
+    if (num(y) === null || top === null || h === null) return "before";
+    return y < top + h / 2 ? "before" : "after";
+  }
+
+  // What the layout changes on screen; part of the page's redraw signature so a fold or a move redraws and nothing else does.
+  function layoutSignature(layout) {
+    const l = layout || newLayout();
+    return JSON.stringify([l.order, Object.keys(l.choice).sort().map((k) => [k, l.choice[k]]), Object.keys(l.auto).sort()]);
+  }
+
+  // A folded source still tells how its updates are going: the ones running or waiting and the ones that failed.
+  function applySummary(rows) {
+    let busy = 0, failed = 0;
+    (rows || []).forEach((f) => { const v = applyView(f && f.apply); if (v && v.busy) busy += 1; else if (v && v.state === "failed") failed += 1; });
+    const parts = [];
+    if (busy) parts.push(plural(busy, "update", "updates") + " running or waiting");
+    if (failed) parts.push(failed + " failed");
+    return { text: parts.join(DOT), bad: failed > 0 };
+  }
+
+  // After a redraw the focused control may be gone (a button that is now disabled, a row that is folded away): where focus goes then.
+  function focusFallbacks(key) {
+    const k = String(key || "");
+    const parts = k.split(":");
+    if (parts[0] === "up" || parts[0] === "dn") return ["tog:" + parts.slice(1).join(":"), "chip:all"];
+    if (parts[0] === "upd" || parts[0] === "ign") return ["tog:" + parts[1], "chip:all"];
+    if (k === "tools:collapse") return ["tools:expand", "chip:all"];
+    if (k === "tools:expand") return ["tools:collapse", "chip:all"];
+    if (k === "tools:reset") return ["tools:collapse", "tools:expand", "chip:all"];
+    return [];
   }
 
   // What to say when there is nothing to list (null when there is a list).
@@ -537,9 +702,18 @@
     data: null, loaded: false, error: "", busy: false, again: false, timer: 0, readAt: 0,
     filter: "all", drawer: "", off: {}, asking: false, working: false, fastUntil: 0, sig: "",
     ref: {},
+    layout: null, saved: true, shown: [], drag: "", dragAt: 0, deferred: false,
   };
   const FLOWS = makeFlows();
   const FOCUSABLE = "a[href], button:not([disabled]), input:not([disabled]):not([type=hidden]), select:not([disabled]), textarea:not([disabled]), summary, [tabindex]:not([tabindex=\"-1\"])";
+
+  // ---- the layout in this browser (round 10, DH-D): one key in localStorage, always inside try/catch, never sent anywhere
+  function browserStore() { try { return global.localStorage || null; } catch (_) { return null; } }
+  function ensureLayout() { if (!S.layout) S.layout = readLayout(browserStore()); return S.layout; }
+  function keepLayout() { S.saved = writeLayout(browserStore(), ensureLayout()); }
+  function allBlocks() { return blocksOf(S.data, "all", S.off); }
+  function dragging() { return !!S.drag && Date.now() - S.dragAt < DRAG_STALE_MS; }
+  function announce(msg) { if (S.ref.live) S.ref.live.textContent = text(msg, 200); }
 
   function setBadge(data) {
     if (typeof document === "undefined") return;
@@ -601,6 +775,7 @@
     return el("button", {
       type: "button", class: "btn btn--ghost btn--sm" + (o && o.cls ? " " + o.cls : ""), text: label,
       title: o && o.title, "aria-label": o && o.aria, "aria-pressed": o && o.pressed !== undefined ? String(!!o.pressed) : null,
+      "aria-expanded": o && o.expanded !== undefined ? String(!!o.expanded) : null,
       "data-focus": o && o.key, disabled: o && o.disabled, onclick: o && o.onclick,
     });
   }
@@ -701,35 +876,147 @@
     ]);
   }
 
-  function renderBlock(b) {
+  // ---- the layout actions: fold, move, drag (round 10, DH-D)
+
+  function toggleBlock(id) {
+    const l = ensureLayout();
+    setCollapsed(l, [id], !isCollapsed(l, id));
+    keepLayout();
+    render(true);
+  }
+
+  function foldAll(value) {
+    setCollapsed(ensureLayout(), S.shown, value);
+    keepLayout();
+    announce(value ? "All sources in this list are folded." : "All sources in this list are open.");
+    render(true);
+  }
+
+  function resetOrder() {
+    ensureLayout().order = [];
+    keepLayout();
+    announce("Order reset: groups first, then by name.");
+    render(true);
+  }
+
+  // Stores `next` as the saved order when it differs from `base`; always redraws. True when the order changed.
+  function applyMove(base, next) {
+    const changed = JSON.stringify(base) !== JSON.stringify(next);
+    if (changed) { ensureLayout().order = next; keepLayout(); }
+    render(true);
+    return changed;
+  }
+
+  function moveBlock(id, dir) {
+    const blocks = allBlocks();
+    const base = materializeOrder(ensureLayout().order, blocks);
+    const at = S.shown.indexOf(id);
+    const found = blocks.find((b) => b.id === id);
+    if (applyMove(base, moveStep(base, S.shown, id, dir))) announce((found ? found.label : id) + " moved " + (dir < 0 ? "up" : "down") + ", place " + (at + (dir < 0 ? 0 : 2)) + " of " + S.shown.length + ".");
+  }
+
+  function markDrop(node, side) {
+    node.classList.remove("is-drop-before");
+    node.classList.remove("is-drop-after");
+    if (side) node.classList.add("is-drop-" + side);
+  }
+
+  function dropOn(targetId, side) {
+    const id = S.drag;
+    S.drag = ""; S.deferred = false;
+    if (!id || id === targetId) { render(true); return; }
+    const blocks = allBlocks();
+    const base = materializeOrder(ensureLayout().order, blocks);
+    const label = (x) => { const f = blocks.find((b) => b.id === x); return f ? f.label : x; };
+    if (applyMove(base, moveRelative(base, id, targetId, side))) announce(label(id) + " moved " + (side === "after" ? "below " : "above ") + label(targetId) + ".");
+  }
+
+  function endDrag() {
+    const redraw = !!S.drag || S.deferred;
+    S.drag = ""; S.deferred = false;
+    if (redraw) render(true);                                                   // a read that came in during the drag is drawn now
+  }
+
+  function renderBlock(b, at, count) {
     const p = b.provider;
     const health = healthText(p);
     const plan = planAll(S.data, { provider: b.id });
     const can = !!(p && p.can_check);
-    return el("div", { class: "up-block", role: "group", "aria-label": b.label, "data-provider": b.id }, [
+    const folded = isCollapsed(ensureLayout(), b.id);
+    const sum = folded ? applySummary(b.rows) : { text: "", bad: false };
+    const grip = el("span", { class: "up-grip", title: "Drag to move this source", "aria-hidden": "true", text: "\u22ee\u22ee" });
+    const node = el("div", { class: "up-block" + (folded ? " is-collapsed" : ""), role: "group", "aria-label": b.label, "data-provider": b.id }, [
       el("div", { class: "up-block__head" }, [
+        grip,
+        button(folded ? "\u25b8" : "\u25be", {
+          cls: "up-fold", key: "tog:" + b.id, expanded: !folded, aria: (folded ? "Expand " : "Collapse ") + b.label,
+          title: folded ? "Show the updates of this source." : "Hide the updates of this source. Its name, count and any error stay.", onclick: () => toggleBlock(b.id),
+        }),
         el("span", { class: "up-block__name", text: b.label }),
         el("span", { class: "up-tag", text: GROUP_NAME[b.group] }),
         el("span", { class: "up-block__n", text: plural(b.rows.length, "update", "updates") }),
         p && p.auto_update === true ? el("span", { class: "up-tag up-tag--on", text: "updates by itself" }) : null,
+        sum.text ? el("span", { class: "up-summary" + (sum.bad ? " is-bad" : ""), text: sum.text }) : null,
         el("span", { class: "up-spacer" }),
         can ? button("Check now", { key: "chk:" + b.id, disabled: S.asking, aria: "Check " + b.label + " again", title: "Ask this source again. This only looks; nothing is installed.", onclick: () => doCheck(b.id) }) : null,
         plan.count ? button("Update all", { key: "all:" + b.id, aria: "Update all of " + b.label, title: "Update everything this source lists, one after another.", onclick: () => doUpdateMany({ provider: b.id }, b.label) }) : null,
         button("Details", { key: "det:" + b.id, pressed: S.drawer === b.id, aria: "Details of " + b.label, onclick: () => { S.drawer = S.drawer === b.id ? "" : b.id; render(true); } }),
+        button("\u2191", { cls: "up-move", key: "up:" + b.id, disabled: at === 0, aria: "Move " + b.label + " up", title: "Move up", onclick: () => moveBlock(b.id, -1) }),
+        button("\u2193", { cls: "up-move", key: "dn:" + b.id, disabled: at === count - 1, aria: "Move " + b.label + " down", title: "Move down", onclick: () => moveBlock(b.id, 1) }),
       ]),
-      health.text ? el("div", { class: "up-health" + (health.tone ? " is-" + health.tone : "") }, [text(health.text)].concat(health.lines.map((t) => el("div", { class: "up-health__line", text: t })))) : null,
-      el("div", { class: "up-block__rows", role: "list" }, b.rows.map(renderRow)),
+      // Folded: only a problem is still told (the last check failed or was partial); the plain "checked 5 min ago" line goes with the rows.
+      health.text && (!folded || health.tone) ? el("div", { class: "up-health" + (health.tone ? " is-" + health.tone : "") }, [text(health.text)].concat(health.lines.map((t) => el("div", { class: "up-health__line", text: t })))) : null,
+      folded ? null : el("div", { class: "up-block__rows", role: "list" }, b.rows.map(renderRow)),
     ]);
+    // Only the grip starts a drag, so the text and the buttons of the block stay selectable and clickable.
+    grip.addEventListener("mousedown", () => { node.setAttribute("draggable", "true"); });
+    grip.addEventListener("mouseup", () => { if (!S.drag) node.removeAttribute("draggable"); });
+    node.addEventListener("dragstart", (e) => {
+      if (node.getAttribute("draggable") !== "true") return;
+      S.drag = b.id; S.dragAt = Date.now();
+      node.classList.add("is-dragging");
+      try { e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", b.id); } catch (_) { /* some browsers refuse; the drag still works */ }
+    });
+    node.addEventListener("dragover", (e) => {
+      if (!dragging() || S.drag === b.id) return;
+      e.preventDefault();
+      try { e.dataTransfer.dropEffect = "move"; } catch (_) { /* ignore */ }
+      markDrop(node, dropSide(e.clientY, node.getBoundingClientRect()));
+    });
+    node.addEventListener("dragleave", () => markDrop(node, ""));
+    node.addEventListener("drop", (e) => {
+      if (!dragging() || S.drag === b.id) return;
+      e.preventDefault();
+      dropOn(b.id, dropSide(e.clientY, node.getBoundingClientRect()));
+    });
+    node.addEventListener("dragend", endDrag);
+    return node;
+  }
+
+  // Above the list: fold or open every source in it, and bring the usual order back.
+  function renderTools() {
+    const box = S.ref.tools;
+    box.textContent = "";
+    const ids = S.loaded ? S.shown : [];
+    box.hidden = !ids.length;
+    if (!ids.length) return;
+    const l = ensureLayout();
+    const folded = ids.filter((id) => isCollapsed(l, id)).length;
+    box.appendChild(button("Collapse all", { key: "tools:collapse", disabled: folded === ids.length, title: "Fold every source in this list. Names, counts and errors stay.", onclick: () => foldAll(true) }));
+    box.appendChild(button("Expand all", { key: "tools:expand", disabled: folded === 0, title: "Open every source in this list.", onclick: () => foldAll(false) }));
+    box.appendChild(button("Reset order", { key: "tools:reset", disabled: !l.order.length, title: "Back to the usual order: group, then name. Folded sources stay folded.", onclick: resetOrder }));
+    if (!S.saved) box.appendChild(el("span", { class: "up-hint", text: "This browser would not keep the layout, so it lasts only until this page is closed." }));
   }
 
   function renderList() {
     const box = S.ref.list;
     box.textContent = "";
+    S.shown = [];
     if (!S.loaded) {
       box.appendChild(el("div", { class: "up-empty", text: S.error || "Reading the updates\u2026" }));
       return;
     }
-    const blocks = blocksOf(S.data, S.filter, S.off);
+    const blocks = orderBlocks(blocksOf(S.data, S.filter, S.off), ensureLayout().order);
     const empty = emptyState(S.data, S.filter, blocks);
     if (empty) {
       box.appendChild(el("div", { class: "up-empty", "data-kind": empty.kind }, [
@@ -738,7 +1025,8 @@
       ]));
     }
     const parts = splitBlocks(blocks, S.drawer);
-    parts.shown.forEach((b) => box.appendChild(renderBlock(b)));
+    S.shown = parts.shown.map((b) => b.id);
+    parts.shown.forEach((b, i) => box.appendChild(renderBlock(b, i, parts.shown.length)));
     if (parts.quiet.length) {
       box.appendChild(el("div", { class: "up-quiet", text: "No updates reported by: " + parts.quiet.map((b) => b.label).join(", ") + "." }));
     }
@@ -800,19 +1088,23 @@
 
   function render(force) {
     if (!S.overlay) return;
+    if (dragging()) { S.deferred = true; return; }                              // a redraw under the hand would kill the drag; it is drawn when the drag ends
     S.ref.sub.textContent = headerText(S.data, { error: S.error });
     S.ref.sub.className = "debug-panel__subtitle" + (S.data && S.data.daemon_alive === false ? " is-error" : "");
-    const sig = signature(S.data) + "|" + S.filter + "|" + S.drawer + "|" + Object.keys(S.off).join(",") + "|" + S.asking + "|" + S.working + "|" + S.loaded + "|" + S.error;
+    ensureLayout();
+    if (S.loaded && isObj(S.data) && noteSeen(S.layout, allBlocks())) keepLayout();
+    const sig = signature(S.data) + "|" + layoutSignature(S.layout) + "|" + S.saved + "|" + S.filter + "|" + S.drawer + "|" + Object.keys(S.off).join(",") + "|" + S.asking + "|" + S.working + "|" + S.loaded + "|" + S.error;
     if (!force && sig === S.sig) return;
     S.sig = sig;
     // Redrawing must not cost the person their place: keep the focused control and the scroll positions.
     const active = document.activeElement && S.panel && S.panel.contains(document.activeElement) ? document.activeElement.getAttribute("data-focus") : "";
     const scrolls = [S.ref.list, S.ref.left, S.ref.drawer].map((n) => n.scrollTop);
-    renderChips(); renderGroupSwitches(); renderAuto(); renderBanner(); renderList(); renderDrawer(); renderHeadButtons();
+    renderChips(); renderGroupSwitches(); renderAuto(); renderBanner(); renderList(); renderTools(); renderDrawer(); renderHeadButtons();
     S.ref.count.textContent = S.loaded ? String(totalCount(S.data)) : "";
     [S.ref.list, S.ref.left, S.ref.drawer].forEach((n, i) => { n.scrollTop = scrolls[i]; });
     if (active) {
-      const again = Array.prototype.find.call(S.panel.querySelectorAll("[data-focus]"), (n) => n.getAttribute("data-focus") === active && !n.disabled);
+      const find = (key) => Array.prototype.find.call(S.panel.querySelectorAll("[data-focus]"), (n) => n.getAttribute("data-focus") === key && !n.disabled);
+      const again = [active].concat(focusFallbacks(active)).map(find).find(Boolean);
       if (again) again.focus();
     }
   }
@@ -853,10 +1145,12 @@
     ]);
     const count = el("span", { class: "debug-tool-count" });
     const banner = el("div", { class: "up-banners" });
+    const tools = el("div", { class: "up-tools", role: "toolbar", "aria-label": "List layout" });
+    const live = el("div", { class: "up-live", role: "status", "aria-live": "polite" });
     const list = el("div", { class: "up-list" });
     const drawerTitle = el("h3", { text: "Source" });
     const drawer = el("div", { class: "up-drawer" });
-    S.ref = { sub: sub, check: checkBtn, all: allBtn, chips: chips, groups: groups, auto: auto, left: left, count: count, banner: banner, list: list, drawer: drawer, drawerTitle: drawerTitle };
+    S.ref = { sub: sub, check: checkBtn, all: allBtn, chips: chips, groups: groups, auto: auto, left: left, count: count, banner: banner, tools: tools, live: live, list: list, drawer: drawer, drawerTitle: drawerTitle };
     S.panel = el("div", { class: "debug-panel up-panel", role: "dialog", "aria-modal": "true", "aria-label": "Updates" }, [
       el("div", { class: "panel__corner panel__corner--tl" }), el("div", { class: "panel__corner panel__corner--br" }),
       el("div", { class: "debug-panel__head" }, [
@@ -866,7 +1160,7 @@
       ]),
       el("div", { class: "debug-body up-body" }, [
         el("section", { class: "debug-pane", "aria-label": "Filter" }, [el("div", { class: "debug-pane__head" }, [el("h3", { text: "Filter" })]), left]),
-        el("section", { class: "debug-pane", "aria-label": "Updates" }, [el("div", { class: "debug-pane__head" }, [el("h3", { text: "Updates" }), count]), banner, list]),
+        el("section", { class: "debug-pane", "aria-label": "Updates" }, [el("div", { class: "debug-pane__head" }, [el("h3", { text: "Updates" }), count]), banner, tools, list, live]),
         el("section", { class: "debug-pane", "aria-label": "Source" }, [el("div", { class: "debug-pane__head" }, [drawerTitle]), drawer]),
       ]),
     ]);
@@ -899,7 +1193,7 @@
     document.removeEventListener("keydown", S.onKey, true);
     if (S.overlay.parentNode) S.overlay.parentNode.removeChild(S.overlay);
     const back = S.prevFocus;
-    S.overlay = null; S.panel = null; S.onKey = null; S.ref = {}; S.sig = ""; S.drawer = ""; S.filter = "all";
+    S.overlay = null; S.panel = null; S.onKey = null; S.ref = {}; S.sig = ""; S.drawer = ""; S.filter = "all"; S.drag = ""; S.deferred = false;
     schedule();                                                                  // back to the slow badge poll
     if (back && back.focus && document.contains(back)) { try { back.focus(); } catch (_) { /* gone */ } }
   }
@@ -917,6 +1211,8 @@
       text, trimmed, num, fmtBytes, fmtAgo, groupOf, rowsOf, providersOf, groupsOf, includedMap, settingsOf, totalCount, chipsOf,
       applyView, isBusy, versionText, metaParts, healthText, headerText, badgeText, blocksOf, splitBlocks, emptyState,
       planAll, confirmAllText, confirmOneText, autoTick, setArgs, pollDelay, signature, checkNotice, applyNotice,
+      COLLAPSE_AT, LAYOUT_KEY, LAYOUT_VERSION, MAX_IDS, idKey, newLayout, cleanLayout, layoutToJson, readLayout, writeLayout, isCollapsed,
+      noteSeen, setCollapsed, orderBlocks, materializeOrder, moveRelative, moveStep, dropSide, layoutSignature, applySummary, focusFallbacks,
     },
     _flows: makeFlows,
   };

@@ -349,7 +349,8 @@ function viewMatches(view, row) {
 
 function viewCounts(rows) {
   const out = {};
-  VIEWS.forEach((v) => { out[v.id] = rows.filter((r) => viewMatches(v.id, r)).length; });
+  const list = rows.filter((r) => !(r && r.update === true && r.owner === "update"));      // DH-A: an update is not a download, whatever the caller passed
+  VIEWS.forEach((v) => { out[v.id] = list.filter((r) => viewMatches(v.id, r)).length; });
   return out;
 }
 
@@ -1481,6 +1482,131 @@ function torrentGroupMeta(rows, info) {
   return done + "/" + rows.length + " done" + of;
 }
 
+// ---- DH-A: updates inside the Downloads list.  Every finding of the hub's updates answer (GET /api/hub/updates, the call Menu > Updates
+// makes) becomes a row marked as an UPDATE, in one section per update group.  They are not downloads: they live in their own array
+// (S.upd.rows) and join the others only in viewRows(); the counts, the running line, Pause all / Resume all, Clear finished, the
+// queue order, the notifications and History never see them.  Everything in a finding is another program's text: capped here,
+// drawn with textContent only.
+const UPD_GROUPS = [["mods", "Mods"], ["games", "Games"], ["packages", "Packages"], ["apps", "Apps"], ["other", "Other"]];
+const UPD_POLL_MS = 180000;           // "every few minutes"
+const UPD_BUSY_POLL_MS = 5000;        // while an apply is queued or running, so its state moves on the row (a read, never a scan)
+const UPD_MAX_ROWS = 1000;
+const UPD_NO_UPDATER = "No updater of its own: update it in the program itself.";
+const SHOW_UPDATES_TIP = "List the available updates here, in their own sections, marked as updates. Off: none are listed and none are read. Nothing is installed either way.";
+const HIDE_UPDATE_DIALOG = {
+  title: "Hide this update?",
+  body: "It stays hidden until the program reports a different version. Nothing is installed, changed or deleted. To hide every update in this list, switch off Show updates.",
+  confirmLabel: "Hide",
+};
+
+// Text from another program: no control or bidi characters, capped.
+function updText(v, max) {
+  let s = v === null || v === undefined ? "" : String(v);
+  s = s.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u202a-\u202e\u2066-\u2069]/g, "");
+  return max && s.length > max ? s.slice(0, max - 1) + "\u2026" : s;
+}
+
+function updGroupOf(v) {
+  const g = updText(v, 20).trim().toLowerCase();
+  return UPD_GROUPS.some((x) => x[0] === g) ? g : "other";
+}
+
+// How an apply stands, in words.  A failed one shows the program's own message.
+function updApplyView(a) {
+  if (!a || typeof a !== "object" || Array.isArray(a)) return null;
+  const state = updText(a.state, 20).trim();
+  const msg = updText(a.message, 200).trim();
+  if (state === "queued") return { state: state, label: "Waiting its turn", detail: msg, tone: "", busy: true };
+  if (state === "running") return { state: state, label: "Updating now\u2026", detail: msg, tone: "", busy: true };
+  if (state === "done") return { state: state, label: "Done", detail: msg, tone: "ok", busy: false };
+  if (state === "started") return { state: state, label: "Handed over", detail: msg, tone: "warn", busy: false };
+  if (state === "failed") return { state: state, label: "Failed", detail: msg || "No reason was given.", tone: "bad", busy: false };
+  return null;
+}
+
+// Why a finding has no Update button: the provider's own problem with its updater when the answer carries one, else the usual words.
+function updWhyNot(prov) {
+  const problem = prov && typeof prov === "object" ? updText(prov.apply_problem, 160).trim() : "";
+  return problem ? "Its updater can't be used: " + problem : UPD_NO_UPDATER;
+}
+
+// The hub's updates answer -> rows.  A hidden finding, or one with no provider or id, is dropped.
+function updateRowsFrom(data) {
+  const d = data && typeof data === "object" && !Array.isArray(data) ? data : {};
+  const provs = {};
+  (Array.isArray(d.providers) ? d.providers : []).forEach((p) => {
+    if (p && typeof p === "object" && typeof p.provider === "string") provs[p.provider] = p;
+  });
+  const out = [];
+  (Array.isArray(d.updates) ? d.updates : []).forEach((f) => {
+    if (out.length >= UPD_MAX_ROWS || !f || typeof f !== "object" || Array.isArray(f) || f.hidden === true) return;
+    const provider = updText(f.provider, 40).trim();
+    const id = updText(f.id, 120).trim();
+    if (!provider || !id) return;
+    const can = f.can_apply === true;
+    const label = updText(f.provider_label, 60).trim() || (provs[provider] && updText(provs[provider].label, 60).trim()) || provider;
+    const source = updText(f.source, 40).trim();
+    out.push({
+      id: "upd:" + provider + ":" + id, owner: "update", kind: "update", state: "update", update: true,
+      provider: provider, local_id: id, group_key: updGroupOf(f.group), provider_label: label,
+      title: updText(f.title || id, 200).trim() || id, subtitle: (label + " " + source).trim(),
+      installed: updText(f.installed, 80).trim(), available: updText(f.available, 80).trim(),
+      size_bytes: num(f.size_bytes), source: source, age_s: num(f.age_s),
+      can_apply: can, why: can ? "" : updWhyNot(provs[provider]), apply: updApplyView(f.apply),
+    });
+  });
+  return out;
+}
+
+function isUpdateRow(r) { return !!r && r.update === true && r.owner === "update"; }
+
+// -> { downloads, updates }: the same list, split.
+function splitUpdates(rows) {
+  const list = Array.isArray(rows) ? rows : [];
+  return { downloads: list.filter((r) => !isUpdateRow(r)), updates: list.filter(isUpdateRow) };
+}
+
+// One section per update group that has findings, in the fixed order.  `open` = { group: true } for the ones the owner opened:
+// a group nobody has opened is collapsed (the first time, a long npm or pip list must not bury the real downloads).
+function updateSections(rows, open) {
+  const by = {};
+  (Array.isArray(rows) ? rows : []).filter(isUpdateRow).forEach((r) => { (by[r.group_key] = by[r.group_key] || []).push(r); });
+  const o = open && typeof open === "object" ? open : {};
+  return UPD_GROUPS.filter((g) => by[g[0]]).map((g) => ({
+    key: "u:" + g[0], group: g[0], title: g[1], open: o[g[0]] === true, count: by[g[0]].length,
+    rows: by[g[0]].slice().sort((a, b) => String(a.title).toLowerCase() < String(b.title).toLowerCase() ? -1 : String(a.title).toLowerCase() > String(b.title).toLowerCase() ? 1 : 0),
+  }));
+}
+
+function updateSectionLabel(section) {
+  const n = section ? section.count : 0;
+  return "Updates: " + (section ? section.title : "") + DOT + n + (n === 1 ? " update" : " updates");
+}
+
+// What one update row says and offers.  Pure.
+function updateRowModel(row) {
+  const r = row || {};
+  const version = (r.installed || "version not stated") + " \u2192 " + (r.available || "version not stated");
+  const meta = [];
+  const size = fmtBytes(r.size_bytes);
+  if (size && num(r.size_bytes) > 0) meta.push(size);
+  if (r.source) meta.push("via " + r.source);
+  else if (r.provider_label) meta.push("via " + r.provider_label);
+  if (num(r.age_s) !== null && r.age_s >= 0) meta.push("checked " + fmtAgo(r.age_s));
+  const view = r.apply || null;
+  const busy = !!(view && view.busy);
+  return {
+    name: r.title || r.local_id || "", version: version, meta: meta, apply: view, busy: busy,
+    canUpdate: r.can_apply === true, why: r.can_apply === true ? "" : (r.why || UPD_NO_UPDATER),
+    updateLabel: view && view.state === "failed" ? "Try again" : "Update",
+  };
+}
+
+// Is anything being applied right now (so the panel reads a little faster)?
+function updatesBusy(rows) {
+  return (Array.isArray(rows) ? rows : []).some((r) => isUpdateRow(r) && r.apply && r.apply.busy);
+}
+
 const pure = {
   ACTIVE, FINAL, VIEWS, KIND_ICON, fmtBytes, fmtSpeed, fmtEta, fmtAgo, percentText, speedText, etaText,
   sizeText, statusText, barLook, rowActions, sourceKey, sourceLabel, viewMatches, viewCounts,
@@ -1501,6 +1627,7 @@ const pure = {
   DRY_RUN_CHUNK, ADD_LIST_SHOWN, reasonWords, linkEngineWord, linkKindOf, torrentLinkCount, describeLinks, chunked, mergeDecisions, ignoredNote, looksAbsolute,
   addButtonLabel, groupStates, VIDEO_QUALITIES, VIDEO_CONTAINERS, VIDEO_CODECS, AUDIO_FORMATS, VIDEO_FLAGS, videoOptionsFromForm,
   followUpFor, startWords, describeAdd, remainingLinks,
+  UPD_GROUPS, UPD_POLL_MS, UPD_BUSY_POLL_MS, UPD_NO_UPDATER, SHOW_UPDATES_TIP, HIDE_UPDATE_DIALOG, updText, updGroupOf, updApplyView, updWhyNot, updateRowsFrom, isUpdateRow, splitUpdates, updateSections, updateSectionLabel, updateRowModel, updatesBusy,
 };
 if (host && host.__hubPureOnly) return pure;
 
@@ -1521,6 +1648,8 @@ const S = {
   tab: "downloads", live: false, liveAt: 0, es: null, liveTimer: 0, dragId: "", dragGroup: "", picker: null,
   sources: null, srcTimer: 0, srcLoaded: false, srcBusy: false,
   updOnly: null, updOnlyAt: 0,      // ids of the providers that only report and apply updates (they are not download sources)
+  // DH-A: the updates listed inside the Downloads list.  Their own array: nothing here is ever put into S.rows.
+  upd: { on: true, rows: [], loaded: false, seq: 0, timer: 0, error: "", open: {} },
   // History (brief 25): the rows loaded so far (a page at a time), the cursor of the next page, the hub's summary of the whole
   // filtered set, the filters, the selected ids and how much of the list is already drawn.
   hist: { rows: [], next: null, more: false, loaded: false, busy: false, seq: 0, state: "all", search: "", sort: "newest", from: "", to: "",
@@ -1587,9 +1716,17 @@ async function loadPrefs() {
   } catch (e) { /* defaults */ }
 }
 
-// Every row the lists show: the live rows, plus the hidden ones when "Show hidden" is on (or one was listed again).
-function viewRows() {
+// The download rows the lists show: the live rows, plus the hidden ones when "Show hidden" is on (or one was listed again).
+// The status chips count these and nothing else.
+function downloadViewRows() {
   return mergeHidden(S.rows, S.hiddenRows, S.showHidden, S.revealed);
+}
+
+// Every row the lists show: the downloads, plus (DH-A) the updates, the ONE place they join.  The list splits them again to draw
+// them; the status chips go through viewCounts(), which leaves update rows out; everything that orders or acts on downloads
+// (the running line, Pause all / Resume all, Clear finished, the queue order, the group controls) reads S.rows.
+function viewRows() {
+  return downloadViewRows().concat(S.upd.on ? S.upd.rows : []);
 }
 
 function selectedRow() {
@@ -1632,6 +1769,9 @@ function renderTop() {
   const sh = $("#showHidden");
   sh.setAttribute("aria-pressed", S.showHidden ? "true" : "false");
   sh.classList.toggle("is-active", S.showHidden);
+  const su = $("#showUpdates");
+  su.setAttribute("aria-pressed", S.upd.on ? "true" : "false");
+  su.classList.toggle("is-active", S.upd.on);
 }
 
 function renderBanner() {
@@ -1660,7 +1800,7 @@ function chip(label, n, active, flag, onClick) {
 }
 
 function renderChips() {
-  const counts = viewCounts(viewRows());
+  const counts = viewCounts(viewRows());      // viewCounts leaves update rows out: an update is not a download
   if (!changed("chips", [counts, S.view])) return;
   const vbox = $("#viewChips");
   vbox.textContent = "";
@@ -1850,25 +1990,39 @@ function sectionHeader(section) {
 
 function renderList() {
   const rows = visibleRows();
-  const total = viewRows().length;
-  $("#count").textContent = countText(rows.length, total);
-  if (!changed("list", [rows, S.selected, S.groupBy, S.live, S.revealed, S.showHidden, S.collapsed, S.acting])) return;
+  const split = splitUpdates(rows);                         // DH-A: updates are drawn in their own sections, after the downloads
+  const total = downloadViewRows().length;
+  $("#count").textContent = countText(split.downloads.length, total);
+  const upSections = updateSections(split.updates, S.upd.open);
+  const listChanged = changed("list", [rows, S.selected, S.groupBy, S.live, S.revealed, S.showHidden, S.collapsed, S.acting]);
+  const updChanged = changed("listupd", [S.upd.open, S.upd.on, S.upd.error]);      // both signatures are stored on every pass
+  if (!listChanged && !updChanged) return;
   const list = $("#list");
   const scroll = list.scrollTop;
   list.textContent = "";
-  if (!rows.length) {
+  if (!split.downloads.length && !upSections.length) {
     list.appendChild(el("div", {
       cls: "empty",
       text: total ? "Nothing matches this filter." : "No downloads yet. Paste a link in the form, or ask Jarvis to download a file.",
     }));
-    return;
+    if (S.upd.on && S.upd.error) list.appendChild(updateReadNote());
+    return;                                                  // as before: with nothing to list, the rest of the pass is skipped
   }
-  const sections = groupRows(rows, groupMode(rows));
-  sections.forEach((section) => {
-    if (section.title) list.appendChild(sectionHeader(section));
-    if (section.title && S.collapsed[section.key]) return;
-    section.rows.forEach((r) => list.appendChild(renderRow(r)));
+  const sections = groupRows(split.downloads, groupMode(split.downloads));
+  if (split.downloads.length) {
+    sections.forEach((section) => {
+      if (section.title) list.appendChild(sectionHeader(section));
+      if (section.title && S.collapsed[section.key]) return;
+      section.rows.forEach((r) => list.appendChild(renderRow(r)));
+    });
+  } else if (upSections.length) {
+    list.appendChild(el("div", { cls: "empty empty--slim", text: total ? "No downloads match this filter." : "No downloads yet." }));
+  }
+  upSections.forEach((section) => {
+    list.appendChild(updateSectionHeader(section));
+    if (section.open) section.rows.forEach((r) => list.appendChild(renderUpdateRow(r)));
   });
+  if (S.upd.on && S.upd.error) list.appendChild(updateReadNote());
   const named = sections.filter((section) => section.title);
   const all = $("#collapseAll");
   if (all) {
@@ -1879,6 +2033,59 @@ function renderList() {
     all.setAttribute("aria-label", all.title);
   }
   list.scrollTop = scroll;
+}
+
+// ---- DH-A: the update sections and rows (drawn from updateRowModel; textContent only)
+
+function updateReadNote() {
+  return el("div", { cls: "uprow__note", text: "Couldn't read the updates: " + updText(S.upd.error, 200) });
+}
+
+function updateSectionHeader(section) {
+  const flip = () => toggleUpdateSection(section.group);
+  return el("div", { cls: "section section--upd" }, [
+    el("button", {
+      cls: "section__toggle", text: section.open ? "\u25BE" : "\u25B8", title: section.open ? "Collapse: hide these updates" : "Expand: show these updates",
+      attrs: { type: "button", "aria-expanded": section.open ? "true" : "false", "aria-label": (section.open ? "Collapse " : "Expand ") + "updates: " + section.title },
+      on: { click: (e) => { e.stopPropagation(); flip(); } },
+    }),
+    el("span", { cls: "section__t", text: updateSectionLabel(section), on: { click: flip } }),
+  ]);
+}
+
+function renderUpdateRow(row) {
+  const m = updateRowModel(row);
+  const meta = [el("span", { cls: "tag tag--upd", text: "Update", title: "An available update of a program. It is not a download." }),
+    el("span", { cls: "uprow__ver", text: m.version })];
+  m.meta.forEach((t) => meta.push(el("span", { text: t })));
+  const acts = [];
+  if (m.canUpdate) {
+    acts.push(el("button", {
+      cls: "rbtn uprow__go", text: m.updateLabel, title: m.busy ? "Already queued or running." : "Ask the program\u2019s own updater to update this one. You are asked once before anything runs.",
+      attrs: Object.assign({ type: "button", "aria-label": m.updateLabel + ": " + m.name }, m.busy ? { disabled: "disabled" } : {}),
+      on: { click: (e) => { e.stopPropagation(); e.preventDefault(); updateOneRow(row, e.currentTarget); } },
+    }));
+  }
+  acts.push(el("button", {
+    cls: "rbtn uprow__hide", text: "Hide", title: "Hide this update until the program reports a different version. Nothing is deleted.",
+    attrs: { type: "button", "aria-label": "Hide: " + m.name },
+    on: { click: (e) => { e.stopPropagation(); e.preventDefault(); hideUpdateRow(row); } },
+  }));
+  return el("div", {
+    cls: "row row--update" + (m.apply ? " is-" + m.apply.state : ""),
+    attrs: { role: "option", "aria-selected": "false", "data-id": row.id, "data-kind": "update" },
+  }, [
+    el("div", { cls: "row__top" }, [
+      el("span", { cls: "dot tone-update", attrs: { "aria-hidden": "true" } }),
+      el("span", { cls: "row__title", text: m.name, title: m.name }),
+    ]),
+    el("div", { cls: "row__meta" }, meta),
+    m.apply ? el("div", { cls: "uprow__apply is-" + (m.apply.tone || "plain"), attrs: { role: "status" } }, [
+      el("b", { text: m.apply.label }), m.apply.detail ? el("span", { text: " " + m.apply.detail }) : null,
+    ]) : null,
+    !m.canUpdate ? el("div", { cls: "row__why", text: m.why }) : null,
+    el("div", { cls: "row__acts" }, acts),
+  ]);
 }
 
 // ---- middle pane
@@ -2332,6 +2539,116 @@ async function poll() {
   }
   loadHidden(false);                    // only does anything while hidden rows are in view
   schedule();
+}
+
+// ---- DH-A: reading the updates, and the two buttons on an update row.  This panel only READS the hub's updates answer: it never
+// asks for a scan (that is Menu > Updates' "Check now"), and it never installs anything itself.  Update runs the Updates page's own
+// flow (its dry run, ONE dialog, then its apply call); Hide calls the hub's dismiss route after one question.
+
+function updSay(message, level) {
+  // The page's own toast, like the Updates page: a button's answer, not a Jarvis notification (updates never reach the Notifications inbox).
+  const ui = window.JarvisUI;
+  if (ui && typeof ui.toast === "function") { try { ui.toast({ message: updText(message, 240), level: level || "info" }); } catch (e) { /* the page may be closing */ } }
+}
+
+async function loadUpdatePrefs() {
+  try {
+    const on = await host.storage.get("show_updates");
+    if (on === "0" || on === 0 || on === false) S.upd.on = false;
+  } catch (e) { /* default: on */ }
+  try {
+    const raw = await host.storage.get("updates_open");
+    const list = raw ? JSON.parse(raw) : [];
+    if (Array.isArray(list)) list.slice(0, 20).forEach((g) => { if (UPD_GROUPS.some((x) => x[0] === g)) S.upd.open[g] = true; });
+  } catch (e) { /* default: every section collapsed */ }
+}
+
+function saveUpdateOpen() {
+  try { host.storage.set("updates_open", JSON.stringify(Object.keys(S.upd.open).filter((k) => S.upd.open[k]))).catch(() => {}); } catch (e) { /* convenience */ }
+}
+
+function toggleUpdateSection(group) {
+  if (S.upd.open[group]) delete S.upd.open[group]; else S.upd.open[group] = true;
+  saveUpdateOpen();
+  renderList();
+}
+
+function planUpdateRead() {
+  clearTimeout(S.upd.timer);
+  if (S.closed || !S.upd.on) return;
+  S.upd.timer = setTimeout(() => {
+    if (doc.hidden) { planUpdateRead(); return; }        // a hidden browser tab reads nothing
+    readUpdates();
+  }, updatesBusy(S.upd.rows) ? UPD_BUSY_POLL_MS : UPD_POLL_MS);
+}
+
+// One read of GET /api/hub/updates.  The newest call wins: an answer that arrives after "Show updates" was switched off (or after a
+// newer read started) is thrown away.  A failed read keeps what was listed and says so in one line; it is not a notification.
+async function readUpdates() {
+  clearTimeout(S.upd.timer);
+  if (S.closed || !S.upd.on) return;
+  const seq = ++S.upd.seq;
+  let data = null;
+  try {
+    data = await hubFetch("/api/hub/updates");
+  } catch (err) {
+    if (seq !== S.upd.seq || S.closed || !S.upd.on) return;
+    S.upd.error = message(err);
+    render();
+    planUpdateRead();
+    return;
+  }
+  if (seq !== S.upd.seq || S.closed || !S.upd.on) return;
+  S.upd.rows = updateRowsFrom(data);
+  S.upd.loaded = true;
+  S.upd.error = "";
+  render();
+  planUpdateRead();
+}
+
+function toggleShowUpdates() {
+  S.upd.on = !S.upd.on;
+  try { host.storage.set("show_updates", S.upd.on ? "1" : "0").catch(() => {}); } catch (e) { /* convenience */ }
+  S.upd.seq++;                          // an answer still on its way is no longer wanted
+  clearTimeout(S.upd.timer);
+  S.upd.error = "";
+  if (S.upd.on) readUpdates();
+  else { S.upd.rows = []; S.upd.loaded = false; }
+  render();
+}
+
+// The Updates page's own flow object (web/public/updates-panel.js), so the dry run, the one dialog and the apply call are the same
+// code, not a copy.  null when that script is not on the page.
+function updateFlows() {
+  const ju = window.JarvisUpdates;
+  return ju && typeof ju._flows === "function" ? ju._flows() : null;
+}
+
+async function updateOneRow(row, btn) {
+  const flows = updateFlows();
+  if (!flows) { updSay("The Updates panel isn't loaded, so nothing was started. Use Menu > Updates.", "warn"); return; }
+  if (btn) btn.disabled = true;
+  let r = null;
+  try {
+    r = await flows.updateOne({ provider: row.provider, id: row.local_id, title: row.title, installed: row.installed, available: row.available });
+  } catch (err) {
+    updSay("Could not start the update: " + updText(message(err), 160), "warn");
+  }
+  if (btn && btn.isConnected) btn.disabled = false;
+  if (r && r.ok) readUpdates();         // the row shows its state at once; reads then run faster while it is queued or running
+}
+
+async function hideUpdateRow(row) {
+  if (!(await askFirst(HIDE_UPDATE_DIALOG.title, HIDE_UPDATE_DIALOG.body, HIDE_UPDATE_DIALOG.confirmLabel))) return;
+  try {
+    await hubFetch("/api/hub/updates/dismiss", { provider: row.provider, id: row.local_id });
+  } catch (err) {
+    updSay(updText(message(err), 200), "warn");
+    return;
+  }
+  S.upd.rows = S.upd.rows.filter((x) => x.id !== row.id);
+  render();
+  readUpdates();
 }
 
 // ---- the add form (9C): links in, what each one is and who takes it, then Add.  Everything else sits in closed groups.
@@ -2864,8 +3181,9 @@ $("#pauseAll").addEventListener("click", () => allAction("pause"));
 $("#resumeAll").addEventListener("click", () => allAction("resume"));
 $("#clearFinished").addEventListener("click", clearFinished);
 $("#showHidden").addEventListener("click", toggleShowHidden);
+$("#showUpdates").addEventListener("click", toggleShowUpdates);
 $("#collapseAll").addEventListener("click", () => {
-  const rows = visibleRows();
+  const rows = splitUpdates(visibleRows()).downloads;      // the update sections have their own switch
   const named = groupRows(rows, groupMode(rows)).filter((section) => section.title);
   const anyOpen = named.some((section) => !S.collapsed[section.key]);
   named.forEach((section) => { if (anyOpen) S.collapsed[section.key] = true; else delete S.collapsed[section.key]; });
@@ -2883,7 +3201,7 @@ const list = $("#list");
   pane.addEventListener("pointercancel", () => { S.hold = 0; });
 });
 list.addEventListener("keydown", (e) => {
-  const rows = visibleRows();
+  const rows = splitUpdates(visibleRows()).downloads;      // an update row is never selected
   const ids = shownRows(rows).map((r) => r.id);
   const current = rows.find((r) => r.id === S.selected);
   if (e.key === "ArrowDown" || e.key === "ArrowUp") {
@@ -3818,14 +4136,16 @@ $("#addChoose").addEventListener("click", () => {
 
 host.onClose(() => {
   S.closed = true; clearTimeout(S.timer); clearTimeout(S.holdTimer); clearTimeout(hintTimer);
-  clearInterval(S.liveTimer); clearInterval(S.srcTimer); clearTimeout(histTimer);
+  clearInterval(S.liveTimer); clearInterval(S.srcTimer); clearTimeout(histTimer); clearTimeout(S.upd.timer);
   if (S.es) { S.es.close(); S.es = null; }
 });
 
 (async function start() {
   await loadPrefs();
+  await loadUpdatePrefs();
   $("#groupBy").value = S.groupBy;
   render();
   poll();
   startLive();
+  readUpdates();                        // DH-A: one read when the panel opens (nothing when "Show updates" is off), then every few minutes
 })();

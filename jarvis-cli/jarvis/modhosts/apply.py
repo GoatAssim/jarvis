@@ -20,9 +20,12 @@ THE STEPS, IN ORDER (each one is checked before the next; any failure stops ther
      the project page; nothing else is tried.
   3. `dry_run`: say what would happen in ONE line (`plan`) and stop.  Nothing is created, not even a temp file or a folder.
   4. Download through `net.fetch` only (the vendor's own host), capped by the Minecraft `download_max_mb` setting (0 = no
-     limit of the owner's) and by a hard ceiling of 512 MB, into an exclusively created `.part` file in
-     ~/.jarvis/modhosts/replaced/_staging/ (NOT in the mods folder).  Size and hash are checked ON DISK; any mismatch deletes
-     the `.part` (it is ours) and answers `verify_failed`.  The old file was never touched.
+     limit of the owner's) and by a hard ceiling of 512 MB.  The `.part` file is created FIRST, exclusively, in
+     ~/.jarvis/modhosts/replaced/_staging/ (NOT in the mods folder), and `net.fetch` STREAMS the answer into it (`to_file`,
+     with `_drop_part` as its `discard`): the whole file is never held in memory, the cap is checked while it arrives, and
+     SHA-1 / SHA-512 are computed as the bytes come in.  Size and hash are then checked ON DISK exactly as before (and
+     must agree with what was streamed); any failure, and any mismatch, deletes the `.part` (it is ours, and `_drop_part`
+     is the one function here that does it) and a failed download answers as before.  The old file was never touched.
   5. Swap: a record (replaced.json) is written FIRST (no record, no swap), then the OLD file is MOVED into
      ~/.jarvis/modhosts/replaced/<YYYYmmdd-HHMMSS>/<old name> (a counter is added when that batch folder exists), then the
      verified new file is moved into `folder` under its official name WITHOUT replacing anything (outdir's no-clobber
@@ -665,39 +668,29 @@ def _download(info, new, deadline_seconds):
         timeout = min(120.0, max(1.0, float(deadline_seconds))) if deadline_seconds and float(deadline_seconds) > 0 else 120.0
     except (TypeError, ValueError):
         timeout = 120.0
-    reply = net.fetch(info["source"], new["url"], want="bytes", max_bytes=wanted, timeout=timeout)
-    if not reply.get("ok"):
+    part, bad = _make_part(staging)
+    if bad:
+        return None, bad
+    # From here on the `.part` exists and is ours: every way out below either returns the verified file or drops it.
+    reply = net.fetch(info["source"], new["url"], want="bytes", max_bytes=wanted, timeout=timeout,
+                      to_file=str(part), discard=_drop_part)
+    if not isinstance(reply, dict) or not reply.get("ok"):
+        _drop_part(part)                               # net.fetch already did; asking again for a missing file is harmless
+        reply = reply if isinstance(reply, dict) else {}
         reason = reply.get("reason") or VENDOR_CHANGED
         text = _clip(reply.get("error") or "%s did not send the file." % label, 140)
         if reason == TOO_BIG and new["size"] is not None:
             return None, _failed(VERIFY_FAILED, "The download was bigger than the published size, so it was thrown away. Nothing was changed.")
         extra = {"notes": [CDN_NOTE]} if info["source"] == "curseforge" and reason not in ("rate_limited", "offline", "no_key", "bad_key") else {}
         return None, _failed(reason, "%s Nothing was changed." % text, **extra)
-    data = reply.get("body")
-    if not isinstance(data, (bytes, bytearray)) or not data:
-        return None, _failed(VERIFY_FAILED, "%s sent an empty file, so nothing was changed." % label)
-    part = staging / ("%s-%s.part" % (_stamp(_now()), os.urandom(4).hex()))
-    fd = None
-    try:
-        fd = os.open(str(part), os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
-        with os.fdopen(fd, "wb") as handle:
-            fd = None
-            handle.write(bytes(data))
-            handle.flush()
-            try:
-                os.fsync(handle.fileno())
-            except OSError:
-                pass
-    except OSError as exc:
-        if fd is not None:
-            try:
-                os.close(fd)
-            except OSError:
-                pass
+    streamed = reply.get("size")
+    if reply.get("path") != str(part) or not isinstance(streamed, int) or isinstance(streamed, bool) \
+            or not all(isinstance(reply.get(a), str) for a in ("sha1", "sha512")):
         _drop_part(part)
-        return None, _failed(BAD_DEST, "The download couldn't be saved in Jarvis's staging folder (%s). Nothing was changed." % _clip(exc, 60))
-    finally:
-        data = None
+        return None, _failed(VERIFY_FAILED, "The download could not be checked, so it was thrown away. Nothing was changed.")
+    if streamed == 0:
+        _drop_part(part)
+        return None, _failed(VERIFY_FAILED, "%s sent an empty file, so nothing was changed." % label)
     digests, size = _digest(part, new["algo"], "sha1")
     if digests is None:
         _drop_part(part)
@@ -710,7 +703,33 @@ def _download(info, new, deadline_seconds):
         _drop_part(part)
         return None, _failed(VERIFY_FAILED, "The download's %s checksum does not match the published one, so it was thrown away. "
                                             "Nothing was changed." % new["algo"].upper())
+    # What is on disk must also be what arrived: a write that went wrong shows here, before anything is swapped.
+    if size != streamed or digests["sha1"] != reply["sha1"] or digests[new["algo"]] != reply[new["algo"]]:
+        _drop_part(part)
+        return None, _failed(VERIFY_FAILED, "The file on disk is not what was received, so it was thrown away. Nothing was changed.")
     return {"path": str(part), "sha1": digests["sha1"], "size": size}, None
+
+
+def _make_part(staging):
+    """Create the `.part` the download is streamed into -> (Path, None) | (None, failure).  Created exclusively and closed
+    again (net.fetch opens it itself): a name that already exists is never reused, written or dropped, another is tried."""
+    taken = None
+    for _attempt in range(4):
+        part = staging / ("%s-%s.part" % (_stamp(_now()), os.urandom(4).hex()))
+        try:
+            fd = os.open(str(part), os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
+        except FileExistsError as exc:
+            taken = exc                                # not ours: leave it alone
+            continue
+        except OSError as exc:
+            return None, _failed(BAD_DEST, "The download couldn't be saved in Jarvis's staging folder (%s). Nothing was changed." % _clip(exc, 60))
+        try:
+            os.close(fd)
+        except OSError as exc:
+            _drop_part(part)                           # we just made it
+            return None, _failed(BAD_DEST, "The download couldn't be saved in Jarvis's staging folder (%s). Nothing was changed." % _clip(exc, 60))
+        return part, None
+    return None, _failed(BAD_DEST, "The download couldn't be saved in Jarvis's staging folder (%s). Nothing was changed." % _clip(taken, 60))
 
 
 # --------------------------------------------------------------------------- the swap

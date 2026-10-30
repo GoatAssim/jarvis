@@ -21,6 +21,11 @@ Usage (Windows, Python 3):
     python tests/package_update_checks.py --out package-report.txt --redact
     python tests/package_update_checks.py --only winget npm --timeout 180
     python tests/package_update_checks.py --skip scoop
+    python tests/package_update_checks.py --admin --only choco --out admin-report.txt --redact
+
+--admin (round 10, still read-only) also records whether THIS window runs as an administrator, where Chocolatey
+lives, and who may write in its folders (`whoami /groups`, `icacls <folder>`: they only list).  Run it once from a
+normal window and send the report: Jarvis decides "needs an administrator window" from exactly these facts.
 
 Send back the report (--redact replaces your Windows user name with <user>).
 """
@@ -69,6 +74,35 @@ def is_read_only(argv):
     """True when no word of the command is one that changes things (a flag like --upgrade-available is fine)."""
     words = [str(w).lower() for w in argv]
     return bool(words) and not any(w in CHANGING for w in words)
+
+
+# --admin: facts about administrator rights.  Every command only LISTS (whoami, icacls with a folder and nothing else).
+ADMIN_COMMANDS = [("who am I and at what level does this window run", ["whoami", "/groups"]),
+                  ("privileges of this window", ["whoami", "/priv"])]
+
+
+def elevation_state():
+    """'yes' | 'no' | 'unknown (...)': does THIS process run as an administrator."""
+    if os.name != "nt":
+        return "unknown (not Windows)"
+    try:
+        import ctypes
+        return "yes" if ctypes.windll.shell32.IsUserAnAdmin() else "no"
+    except Exception as exc:  # noqa: BLE001
+        return "unknown (%s)" % exc
+
+
+def admin_probe(timeout, emit):
+    emit("[admin] this window runs as an administrator: %s" % elevation_state())
+    for var in ("ChocolateyInstall", "ProgramData"):
+        emit("[admin] %%%s%% = %s" % (var, os.environ.get(var) or "(not set)"))
+    emit("[admin] choco is at: %s" % (which("choco") or "(not on PATH)"))
+    for label, argv in ADMIN_COMMANDS:
+        record("admin", label, argv, timeout, emit)
+    root = os.environ.get("ChocolateyInstall")
+    if root:
+        record("admin", "who may write in Chocolatey's folder", ["icacls", root], timeout, emit)
+        record("admin", "who may write in Chocolatey's lib folder", ["icacls", os.path.join(root, "lib")], timeout, emit)
 
 
 def now_text():
@@ -155,6 +189,7 @@ def main(argv=None, out=None):
     parser.add_argument("--timeout", type=float, default=120.0, help="seconds each command may take (default 120)")
     parser.add_argument("--out", help="also write the report to this file")
     parser.add_argument("--redact", action="store_true", help="replace your user name with <user>")
+    parser.add_argument("--admin", action="store_true", help="also record administrator-rights facts (read-only)")
     args = parser.parse_args(argv)
     user = (os.environ.get("USERNAME") or os.environ.get("USER")) if args.redact else None
     report = []
@@ -177,6 +212,8 @@ def main(argv=None, out=None):
                 listing = got
         if manager == "pipx" and listing:
             pipx_index_lookups(listing, args.timeout, emit)
+    if args.admin:
+        admin_probe(args.timeout, emit)
     emit("done.")
     if args.out:
         Path(args.out).write_text("\n".join(report) + "\n", encoding="utf-8")

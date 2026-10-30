@@ -441,9 +441,167 @@ def parse_pipx_outdated(text):
 
 # --------------------------------------------------------------------------- what an upgrade printed
 
-_ADMIN = re.compile(
-    r"administrator|elevated|elevation|run as admin|requires? admin|access (?:to the path .{0,200}?)?is denied"
-    r"|permission denied|0x80070005|UAC", re.I)
+# Why an upgrade FAILED is the part most tempting to over-claim, so it is read in three honest steps (this is the
+# round-10 rewrite of the old single "administrator|elevated|denied|UAC" pattern, which blamed administrator
+# rights for ANY failure of a Chocolatey run, because Chocolatey prints a long "you are not running from an
+# elevated command shell ... require admin rights ... Run as Administrator" banner on EVERY run from a normal
+# window, whatever goes wrong afterwards):
+#
+#   1. Chocolatey's banner is cut out first (`strip_choco_banner`); that it was there is kept as evidence.
+#   2. What is left is sorted into ONE of four verdicts, or none (`admin_verdict`):
+#        needs_admin    the output says, in words that mean exactly that, that administrator rights / elevation
+#                       are required (or it is Chocolatey's banner plus access denied in Chocolatey's own folder);
+#        access_denied  access was refused: administrator rights are ONE possible reason (a program still open
+#                       and antivirus are others); the caller must NOT claim which;
+#        refuses_admin  the program says it will NOT run from an administrator window (Scoop does; some
+#                       installers do): the OPPOSITE of needs_admin, and blamed on admin rights by the old pattern;
+#        uac_cancelled  a Windows UAC prompt was closed or declined.
+#   3. A negation right in front ("does not require administrator rights") cancels a needs-admin match.
+#
+# WARNING: guessed wording.  The phrases come from memory of what Chocolatey, winget, Scoop, pip, npm and
+# Windows (error 740, msiexec 1925, 1223) print; none was read from a real run.  tests/package_update_checks.py
+# --admin records the real thing on the owner's PC.
+
+ADMIN_NEEDED = "needs_admin"
+ADMIN_DENIED = "access_denied"
+ADMIN_REFUSED = "refuses_admin"
+ADMIN_UAC_CANCELLED = "uac_cancelled"
+
+_CHOCO_BANNER = re.compile(r"Chocolatey detected you are not running from an elevated command shell", re.I)
+_CHOCO_BANNER_END = re.compile(r"for details\.|Do you want to continue\?[^\r\n]*", re.I)
+_CHOCO_BANNER_WORDS = re.compile(
+    r"many functions|require admin rights|elevated shell|Run as Administrator|non-administrat|default install"
+    r"|for details|\(cmd/powershell\)|you may experience errors|advanced users|Do you want to continue", re.I)
+
+# a negation right in front of a match ("does not require administrator rights"): within the last two words before it
+_NEGATION_BEFORE = re.compile(r"(?:\bnot|n't|\bnever|\bwithout|\bno longer|\bnor)\s+(?:\w+\s+){0,2}$", re.I)
+
+_NEEDS_ADMIN = re.compile(
+    r"requested operation requires elevation"
+    r"|\bWinError 740\b"
+    r"|\b(?:exit|error|return) code:? (?:740|1925)\b"
+    r"|sufficient privileges to complete this installation"
+    r"|\b(?:requires?|needs?|needed|required)\b[^.\n]{0,25}\badmin(?:istrator)?(?:'s)?\s+(?:rights|privileges|permissions|access)\b"
+    r"|\badmin(?:istrator)?\s+(?:rights|privileges|permissions)\s+(?:is|are)\s+(?:required|needed)\b"
+    r"|\b(?:requires?|needs?)\s+(?:an?\s+)?(?:elevated|administrator)\s+(?:command|session|shell|prompt|window|terminal|account)\b"
+    r"|\bmust be (?:run|started|launched|executed|ran) (?:as|from|in|with)\b[^.\n]{0,15}\b(?:administrator|admin|elevated)\b",
+    re.I)
+
+_REFUSES_ADMIN = re.compile(
+    r"\b(?:as|from|in|with)\s+(?:an?\s+)?(?:administrator|admin|elevated)\b[^.\n]{0,40}\b(?:is|are)\s+"
+    r"(?:disabled|not (?:allowed|supported|permitted|recommended))"
+    r"|\b(?:cannot|can't|can not|must not|may not|should not|shouldn't|refuses? to|not allowed to|isn't allowed to)\s+"
+    r"(?:be\s+)?(?:run|started|executed|launched|installed|used)\b[^.\n]{0,40}\b(?:as|from|in|with)\s+(?:an?\s+)?"
+    r"(?:administrator|admin|elevated)\b",
+    re.I)
+
+_DENIED = re.compile(
+    r"\baccess (?:to the path\b[^\n]{0,260}?)?is denied|\baccess denied\b|\bpermission denied\b|\bEACCES\b|\bEPERM\b"
+    r"|\b0x80070005\b|\bWinError 5\b|unable to obtain lock file access", re.I)
+
+_UAC_CANCELLED = re.compile(
+    r"operation was canceled by the user|\b(?:exit|error) code:? 1223\b|\bWinError 1223\b"
+    r"|UAC prompt was (?:cancel|declin|denied|dismiss)", re.I)
+
+_ERROR_LINE = re.compile(r"\b(?:error|failed|failure|denied|cannot|can't|could not|couldn't|unable|not found|no such|"
+                         r"refused|exception)\b", re.I)
+_ERROR_NOISE = re.compile(r"\b0 (?:errors?|failed|failures?)\b|^\s*see the log", re.I)
+
+
+def strip_choco_banner(text):
+    """(text without Chocolatey's 'not running from an elevated command shell' banner, whether it was there).  The
+    banner is cut from its first words to 'for details.' (or to 'Do you want to continue?'); if neither is found
+    (the wording changed) only the lines that still read like the banner go.  Pure text work."""
+    text = str(text or "")
+    seen = False
+    while True:
+        found = _CHOCO_BANNER.search(text)
+        if not found:
+            return text, seen
+        seen = True
+        tail = text[found.end(): found.end() + 1500]
+        stop = _CHOCO_BANNER_END.search(tail)
+        if stop:
+            cut = stop.end()
+        else:
+            # The wording changed: cut the rest of that line and the lines (of the next 14) up to the LAST one that
+            # still uses the banner's vocabulary.  Lines that do not are kept: they may be the real error.
+            parts = tail.split("\n", 14)
+            last = 0
+            for number, line in enumerate(parts[:14]):
+                if number == 0 or _CHOCO_BANNER_WORDS.search(line):
+                    last = number
+            cut = min(len(tail), sum(len(line) + 1 for line in parts[: last + 1]))
+        text = text[: found.start()] + text[found.end() + cut:]
+
+
+def _positive(pattern, text):
+    """The first match of `pattern` in `text` that is not turned around by a negation just before it, or ''."""
+    for found in pattern.finditer(text):
+        before = text[max(0, found.start() - 24): found.start()]
+        if _NEGATION_BEFORE.search(before):
+            continue
+        return found.group(0)
+    return ""
+
+
+def admin_verdict(text):
+    """(verdict, evidence, banner_seen) for what a failed upgrade printed.  `verdict` is one of ADMIN_NEEDED,
+    ADMIN_DENIED, ADMIN_REFUSED, ADMIN_UAC_CANCELLED or '' (no claim at all); `evidence` is the matched words (for
+    a message to quote), `banner_seen` whether Chocolatey's own 'not elevated' banner was in the text.  WARNING:
+    guessed wording (see the comment above)."""
+    rest, banner = strip_choco_banner(text)
+    cancelled = _positive(_UAC_CANCELLED, rest)
+    if cancelled:
+        return ADMIN_UAC_CANCELLED, cancelled, banner
+    needs = _positive(_NEEDS_ADMIN, rest)
+    refuses = _positive(_REFUSES_ADMIN, rest)
+    if needs and refuses:
+        return "", "", banner                    # it says both: claim nothing
+    if needs:
+        return ADMIN_NEEDED, needs, banner
+    if refuses:
+        return ADMIN_REFUSED, refuses, banner
+    found_denied = _DENIED.search(rest)           # no negation reading here: "could not ... Access is denied" IS a denial
+    denied = found_denied.group(0) if found_denied else ""
+    if denied:
+        # Chocolatey told us itself that it is not elevated AND the refusal is in its own folder (or its lock file)
+        if banner and ("chocolatey" in denied.lower() or "lock file" in denied.lower()):
+            return ADMIN_NEEDED, denied, banner
+        return ADMIN_DENIED, denied, banner
+    return "", "", banner
+
+
+def failure_line(out, err, limit=120):
+    """The line of a failed program's output worth showing: the first one (stderr, then stdout, Chocolatey's banner
+    cut out) that reads like an error; else the first line of stderr or stdout, as before."""
+    for text in (err, out):
+        rest = strip_choco_banner(text)[0]
+        for raw in rest.replace("\r", "\n").split("\n"):
+            line = clean_text(raw, limit)
+            if line and _ERROR_LINE.search(line) and not _ERROR_NOISE.search(line):
+                return line
+    return first_line(err or out, limit)
+
+
+CHOCO_RESTART_CODES = (1641, 3010)     # Chocolatey: 1641 = restart started, 3010 = restart needed: the upgrade WORKED
+
+
+def parse_elevated_marker(text):
+    """What the (not elevated) PowerShell that opened the UAC window printed on its own stdout:
+    ('exit', code) | ('cancelled', None) | ('nostart', None) | ('unknown', None).  The elevated window itself cannot
+    pipe anything back (see actions/pkg_updates.py); only these marker lines are read from it."""
+    text = str(text or "")
+    found = re.search(r"JARVIS_ELEVATED_EXIT=(-?\d{1,10})", text)
+    if found:
+        return "exit", int(found.group(1))
+    if "JARVIS_ELEVATED_CANCELLED" in text:
+        return "cancelled", None
+    if "JARVIS_ELEVATED_NOSTART" in text:
+        return "nostart", None
+    return "unknown", None
+
+
 _NOTHING = re.compile(
     r"no (?:available|applicable) upgrade|no newer package versions|no applicable update|is the latest version"
     r"|already up[- ]to[- ]date|no updates? (?:are )?available", re.I)
@@ -452,8 +610,10 @@ _NOTHING = re.compile(
 
 
 def looks_like_needs_admin(text):
-    """True when an upgrade's output reads like 'this needs an elevated session'.  WARNING: guessed wording."""
-    return bool(_ADMIN.search(str(text or "")))
+    """True only when an upgrade's output says administrator rights are needed (the stricter `admin_verdict`
+    reading: a bare 'access denied', Chocolatey's banner alone or a 'cannot run as administrator' are NOT it).
+    WARNING: guessed wording."""
+    return admin_verdict(text)[0] == ADMIN_NEEDED
 
 
 def looks_like_nothing_to_do(text):

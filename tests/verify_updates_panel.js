@@ -209,6 +209,13 @@ check("apply notice: how many were queued and why the others were not", (() => {
 check("apply notice: nothing queued shows the hub's own sentence, or the error of an answer without results",
   P.applyNotice({ ok: false, results: [{ status: "refused", message: "Not allowed here." }] }).text === "Not allowed here." && P.applyNotice({ ok: false, error: "unattended" }).text === "unattended" && P.applyNotice(null).queued === 0);
 
+// ---- round 10 (DH-D): the layout helpers exist and leave today's list alone (their own tests: tests/verify_updates_panel_layout.js)
+check("the layout helpers are exported", ["orderBlocks", "cleanLayout", "readLayout", "writeLayout", "noteSeen", "isCollapsed", "moveRelative", "layoutSignature"].every((k) => typeof P[k] === "function"));
+check("with no saved order the list is today's: group, then name (the saved order only moves blocks, blocksOf itself is unchanged)",
+  JSON.stringify(P.orderBlocks(blocks, []).map((b) => b.id)) === JSON.stringify(blocks.map((b) => b.id)) && JSON.stringify(P.orderBlocks(blocks, undefined).map((b) => b.id)) === JSON.stringify(["minecraft", "steam_updates", "pkg_choco", "pkg_npm", "pkg_pip"]));
+check("a missing, empty or broken storage reads as the default layout and never throws",
+  JSON.stringify(P.readLayout(null)) === JSON.stringify(P.newLayout()) && JSON.stringify(P.readLayout({ getItem() { throw new Error("blocked"); } })) === JSON.stringify(P.newLayout()));
+
 // ---- the flows: the ORDER and CONTENT of every write.  A fake hub records every call.
 function fakeFlows(opts) {
   const o = opts || {};

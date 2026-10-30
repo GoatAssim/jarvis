@@ -643,6 +643,7 @@ FILE_CALLS_ALLOWED = {
     "modhosts/outdir.py": {"os.rename", "os.replace", "os.unlink", "os.rmdir"},   # the shared safe writer: a NEW file, its temp file
     "modhosts/updates.py": {"os.replace"},                             # its own update_state.json
     "modhosts/watched.py": {"os.replace", "os.unlink"},                # (M1) its own watched.json and its temp file
+    "actions/minecraft_undo.py": {"os.rmdir"},                         # (M2) an EMPTY folder the tool just made under replaced/undone/ (os.rmdir refuses anything else)
 }
 # New this round, and the only two files that may change a file of the owner's (M2's engine; M4's NEW pack file).
 FILE_CALLS_ANY = {"modhosts/apply.py", "modhosts/packupdate.py"}
@@ -686,6 +687,24 @@ def test_g11_only_the_listed_files_rename_move_or_delete():
                  "actions/minecraft_download.py", "actions/minecraft_packs.py"):
         if (PKG / name).exists():
             check("%s calls no rename / move / delete at all" % name, not _file_calls(PKG / name), sorted(_file_calls(PKG / name)))
+
+
+# ---- G12 (merge audit) -----------------------------------------------------------------------------------------
+def test_g12_cdn_refused_is_a_listed_reason():
+    from jarvis import modhosts as mh
+    from jarvis.modhosts import apply as ap
+    from jarvis.modhosts import net as net_mod
+    contract = {"no_key", "bad_key", "rate_limited", "not_found", "ambiguous", "not_distributable", "no_compatible_file",
+                "no_loader_version", "bad_dest", "exists", "too_big", "verify_failed", "vendor_changed", "offline", "unsupported"}
+    check("the fifteen contract reasons are all still listed", contract <= set(mh.REASONS), set(mh.REASONS))
+    check("cdn_refused is listed too, and net.py's own constant is the same word",
+          mh.CDN_REFUSED == "cdn_refused" and mh.CDN_REFUSED in mh.REASONS and net_mod.CDN_REFUSED == mh.CDN_REFUSED)
+    check("the list has no repeated entry", len(set(mh.REASONS)) == len(mh.REASONS))
+    check("fail() keeps cdn_refused", mh.fail("cdn_refused", "The download server refused the file.")["reason"] == "cdn_refused")
+    check("fail() still turns an unlisted word into vendor_changed", mh.fail("made_up_reason", "x")["reason"] == "vendor_changed")
+    res = ap._failed("cdn_refused", "The download server refused the file. Nothing was changed.")
+    check("apply passes cdn_refused on instead of turning it into vendor_changed",
+          res.get("ok") is False and res.get("state") == "failed" and res.get("reason") == "cdn_refused", res)
 
 
 def main():

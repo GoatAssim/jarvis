@@ -10,6 +10,10 @@ WHAT IT DOES
   describe(plan)    the owner-facing report of a plan (resolved / dependencies_added / skipped / overrides / warnings).
   write_pack(plan)  builds the zip in a temp file in the destination folder, re-opens it and re-parses its manifest
                     (check_pack), then moves it into place (outdir.write_atomic).  Nothing half-written is left behind.
+  overrides_from_zip(source, members, fmt)
+                    the OTHER source of overrides: the members of an existing pack (update_modpack_file copies the old
+                    pack's overrides into the new one).  Checks names and the caps up front; write_pack then streams each
+                    member from the old zip into the new one (see the rules below).
   check_pack(path)  what a pack must satisfy to be accepted again: a zip that opens, no unsafe entry name, no duplicate,
                     a manifest that parses and is valid for its format.  Also used on the file just written.
 
@@ -33,6 +37,13 @@ THE RULES
     .env, *.key, *.pem, ...) are skipped and reported, never packed.  A file is read through a handle that refuses links
     and is compared with what the scan saw.  The caps (file count, total size, one file's size) are tool settings, 0 =
     unlimited; a folder over a cap is refused.
+  * Overrides from a PACK (`overrides_from_zip`): the old pack is opened for reading only, and only when the pack is
+    written.  Each member is streamed through UNINTERPRETED (never extracted to disk, never opened as an archive, never
+    run), its CRC-32 is computed again on the way and must match what the old pack declared, and its size and CRC must
+    still be the ones that were listed (a pack that changed meanwhile stops the write).  The same name rules as for a
+    folder (no '..', no drive, no backslash, no colon, no reserved or trailing-dot names), a link entry or a duplicate
+    name in the old pack stops the write, and the same three caps apply.  The one difference: hidden files and secrets
+    are not skipped, because a pack's own bytes are copied unchanged (the skip rule protects the owner's disk).
   * The three text fields are clipped and stripped of control characters.  The loader version is `latest` (looked up by
     modhosts/loaders.py when it exists) or `given` (shape-checked, used exactly); a pack without one is refused with reason
     no_loader_version.
@@ -44,6 +55,7 @@ import re
 import stat
 import time
 import zipfile
+import zlib
 
 from . import (AMBIGUOUS, BAD_DEST, NO_COMPATIBLE_FILE, NO_LOADER_VERSION, NOT_DISTRIBUTABLE, NOT_FOUND, OFFLINE,
                TOO_BIG, UNSUPPORTED, VENDOR_CHANGED, VERIFY_FAILED, fail, outdir, resolve, sources, untrusted)
@@ -417,6 +429,142 @@ def _open_for_read(abs_path, expected_size):
         raise
 
 
+# --------------------------------------------------------------------------- overrides from ANOTHER PACK (a zip)
+
+OVERRIDE_FOLDERS = {"modrinth": ("overrides", "client-overrides", "server-overrides"), "curseforge": ("overrides",)}
+COPY_CHUNK = 1 << 20
+_REPARSE = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+
+
+def overrides_from_zip(source, members, fmt):
+    """The overrides of a new pack taken from the members of an EXISTING pack instead of from a folder.
+
+    `source`   the old pack (a path).  Nothing is opened here: this only checks the list and the caps.
+    `members`  [(name in the old pack, name in the new pack, size, crc32)] in the order they are to be written; size and
+               CRC are what the old pack's own listing declared.  The new name's first part is the overrides folder
+               (`overrides`, and for a Modrinth pack also `client-overrides` / `server-overrides`).
+    -> ({"kind": "zip", "folder": source, "zip": source, "members": [...], "files": [(new name, old name, size)],
+         "bytes": int, "skipped": [], "skipped_count": 0}, None) | (None, failure).
+    The result goes in a plan as plan["overrides"]; write_pack streams the members.  Same rules as a folder's overrides:
+    every name is checked (a name that is not safe stops the whole pack, because dropping a file would make the new pack
+    smaller than the old one), no name is used twice (case-insensitive), and the three size caps (tool settings, 0 = no
+    cap) apply.  Hidden files and secrets are NOT skipped here: a pack's own bytes are copied unchanged."""
+    from pathlib import Path
+    if fmt not in FORMATS:
+        return None, fail(UNSUPPORTED, "Unknown pack format for the overrides.")
+    max_files = _cap("overrides_max_files")
+    max_total = _cap("overrides_max_total_mb", 1024 * 1024)
+    max_file = _cap("overrides_max_file_mb", 1024 * 1024)
+    if not isinstance(members, (list, tuple)):
+        return None, fail(UNSUPPORTED, "The overrides of a pack must be a list of members.")
+    out, names, total = [], set(), 0
+    for item in members:
+        try:
+            old, new, size, crc = item
+        except (TypeError, ValueError):
+            return None, fail(UNSUPPORTED, "An override member isn't (old name, new name, size, crc).")
+        if not isinstance(size, int) or isinstance(size, bool) or size < 0 or not isinstance(crc, int) or isinstance(crc, bool):
+            return None, fail(UNSUPPORTED, "An override member has no valid size or checksum.")
+        if not _member_ok(old) or not _member_ok(new) or old.endswith("/") or new.endswith("/"):
+            return None, fail(VERIFY_FAILED, "An override file has a name that isn't safe (%s); nothing was written."
+                              % untrusted.clip(new if isinstance(new, str) else old, 80))
+        top, _slash, rel = new.partition("/")
+        if top not in OVERRIDE_FOLDERS[fmt] or not rel:
+            return None, fail(VERIFY_FAILED, "An override file isn't under %s (%s); nothing was written."
+                              % (" or ".join(OVERRIDE_FOLDERS[fmt]), untrusted.clip(new, 80)))
+        if not all(outdir.safe_part(part) for part in rel.split("/")):
+            return None, fail(VERIFY_FAILED, "An override file has a name that isn't safe on every system (%s); nothing "
+                                            "was written." % untrusted.clip(new, 80))
+        if new.lower() in names:
+            return None, fail(VERIFY_FAILED, "Two override files would end up with the same name in the new pack; nothing "
+                                            "was written.")
+        names.add(new.lower())
+        if max_file is not None and size > max_file:
+            return None, fail(TOO_BIG, "%s is larger than the one-file limit for overrides (%d MB, a tool setting)."
+                              % (untrusted.clip(new, 100), max_file // (1024 * 1024)))
+        total += size
+        if max_total is not None and total > max_total:
+            return None, fail(TOO_BIG, "The overrides are larger than the overrides size limit (%d MB, a tool setting)."
+                              % (max_total // (1024 * 1024)))
+        out.append((old, new, size, crc))
+        if max_files is not None and len(out) > max_files:
+            return None, fail(TOO_BIG, "The pack holds more than %d override files (the overrides file limit, a tool "
+                                      "setting)." % max_files)
+    source = Path(source)
+    return {"kind": "zip", "folder": source, "zip": source, "members": out,
+            "files": [(new, old, size) for old, new, size, _crc in out], "bytes": total, "skipped": [],
+            "skipped_count": 0}, None
+
+
+def _zip_link(info):
+    """A zip entry that is a link: a Unix symlink, or a Windows reparse point (junction / symlink)."""
+    if info.create_system == 3 and stat.S_ISLNK(info.external_attr >> 16):
+        return True
+    return bool(info.external_attr & _REPARSE)
+
+
+def _changed():
+    return outdir.Refused(VERIFY_FAILED, "The original pack changed while the new one was written; nothing was kept.")
+
+
+def _open_pack(path):
+    """Open the old pack for reading and check it once: not a link, no duplicate or unsafe name."""
+    if outdir.is_link(path):
+        raise outdir.Refused(VERIFY_FAILED, "The original pack turned into a link while the new one was written; nothing "
+                                           "was kept.")
+    try:
+        zf = zipfile.ZipFile(str(path))
+    except (zipfile.BadZipFile, OSError, ValueError):
+        raise outdir.Refused(VERIFY_FAILED, "The original pack couldn't be opened again; nothing was kept.") from None
+    try:
+        seen = set()
+        for info in zf.infolist():
+            key = info.filename.rstrip("/").lower()
+            if not _member_ok(info.filename) or key in seen:
+                raise outdir.Refused(VERIFY_FAILED, "The original pack has an unsafe or duplicate name; nothing was kept.")
+            seen.add(key)
+        return zf
+    except BaseException:
+        zf.close()
+        raise
+
+
+def _stream_member(pack, old, size, crc, dst):
+    """One member of the old pack into the open entry `dst`: the bytes pass through untouched (never to disk, never
+    interpreted) and their CRC-32 is worked out again.  A member that differs from what was listed, is a link or an
+    encrypted entry, or whose bytes don't add up, stops the write."""
+    try:
+        info = pack.getinfo(old)
+    except KeyError:
+        raise _changed() from None
+    if info.file_size != size or info.CRC != crc or info.flag_bits & 0x1 or old.endswith("/"):
+        raise _changed()
+    if _zip_link(info):
+        raise outdir.Refused(VERIFY_FAILED, "The original pack has a link entry (%s); nothing was kept."
+                             % untrusted.clip(old, 60))
+    left, running = size, 0
+    try:
+        with pack.open(info) as src:
+            while True:
+                chunk = src.read(min(COPY_CHUNK, left + 1))
+                if not chunk:
+                    break
+                left -= len(chunk)
+                if left < 0:
+                    raise outdir.Refused(VERIFY_FAILED, "A file in the original pack is larger than it said; nothing was "
+                                                       "kept.")
+                running = zlib.crc32(chunk, running)
+                dst.write(chunk)
+    except (zipfile.BadZipFile, zlib.error, EOFError, OSError, RuntimeError, NotImplementedError, ValueError):
+        raise outdir.Refused(VERIFY_FAILED, "A file in the original pack is damaged (its checksum doesn't match); nothing "
+                                           "was kept.") from None
+    if left != 0:
+        raise outdir.Refused(VERIFY_FAILED, "A file in the original pack is shorter than it said; nothing was kept.")
+    if (running & 0xFFFFFFFF) != crc:
+        raise outdir.Refused(VERIFY_FAILED, "A file in the original pack is damaged (its checksum doesn't match); nothing "
+                                           "was kept.")
+
+
 # --------------------------------------------------------------------------- vetting one file for a pack
 
 def _clean_file_name(file, kind):
@@ -567,32 +715,53 @@ def _info(name):
     return info
 
 
+def _override_items(plan):
+    """What goes under the overrides folder, in the order it is written: [(name in the zip, kind, where, size, crc)].  A
+    folder's files come sorted; a pack's members come in the order they were given (so a copy is laid out like the old pack)."""
+    ov = plan.get("overrides") or {}
+    if ov.get("kind") == "zip":
+        return [(new, "zip", old, size, crc) for old, new, size, crc in ov.get("members", [])]
+    return [(OVERRIDES + "/" + rel, "disk", abs_path, size, None) for rel, abs_path, size in ov.get("files", [])]
+
+
 def _expected_names(plan, manifest_name):
     names = {manifest_name}
-    for rel, _abs, _size in (plan.get("overrides") or {}).get("files", []):
-        names.add(OVERRIDES + "/" + rel)
+    for arc, _kind, _where, _size, _crc in _override_items(plan):
+        names.add(arc)
     return names
 
 
 def _build_zip(fh, plan):
     manifest_name, doc = build_manifest(plan)
     plan["_doc"] = doc
-    with zipfile.ZipFile(fh, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr(_info(manifest_name), _json_bytes(doc))
-        for rel, abs_path, size in (plan.get("overrides") or {}).get("files", []):
-            arc = OVERRIDES + "/" + rel
-            if not _member_ok(arc):
-                raise outdir.Refused(VERIFY_FAILED, "An unsafe name in src (%s) stopped the pack; nothing was kept." % rel[:80])
-            with _open_for_read(abs_path, size) as src:
-                with zf.open(_info(arc), "w", force_zip64=size >= (1 << 31)) as dst:
-                    left = size
-                    while left > 0:
-                        chunk = src.read(min(1 << 20, left))
-                        if not chunk:
-                            raise outdir.Refused(VERIFY_FAILED, "A file in src got shorter while the pack was built; "
-                                                                "nothing was kept.")
-                        dst.write(chunk)
-                        left -= len(chunk)
+    pack = None
+    try:
+        with zipfile.ZipFile(fh, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr(_info(manifest_name), _json_bytes(doc))
+            for arc, kind, where, size, crc in _override_items(plan):
+                if not _member_ok(arc):
+                    raise outdir.Refused(VERIFY_FAILED, "An unsafe name in %s (%s) stopped the pack; nothing was kept."
+                                         % ("the old pack" if kind == "zip" else "src", arc[len(OVERRIDES) + 1:][:80]
+                                            if kind == "disk" else arc[:80]))
+                if kind == "zip":
+                    if pack is None:
+                        pack = _open_pack(plan["overrides"]["zip"])
+                    with zf.open(_info(arc), "w", force_zip64=size >= (1 << 31)) as dst:
+                        _stream_member(pack, where, size, crc, dst)
+                    continue
+                with _open_for_read(where, size) as src:
+                    with zf.open(_info(arc), "w", force_zip64=size >= (1 << 31)) as dst:
+                        left = size
+                        while left > 0:
+                            chunk = src.read(min(1 << 20, left))
+                            if not chunk:
+                                raise outdir.Refused(VERIFY_FAILED, "A file in src got shorter while the pack was built; "
+                                                                    "nothing was kept.")
+                            dst.write(chunk)
+                            left -= len(chunk)
+    finally:
+        if pack is not None:
+            pack.close()
 
 
 # --------------------------------------------------------------------------- re-checking a pack
@@ -1134,6 +1303,8 @@ def describe(plan, dry_run, written=None):
     if ov:
         result["overrides"] = {"folder": str(ov["folder"]), "files": len(ov["files"]), "bytes": ov["bytes"],
                                "skipped": ov["skipped"][:REPORT_SKIPPED_MAX], "skipped_count": ov["skipped_count"]}
+        if ov.get("kind") == "zip":
+            result["overrides"]["from_pack"] = True
     if plan["warnings"]:
         result["warnings"] = list(plan["warnings"])[:20]
     what = "%d project file%s" % (len(listed), "" if len(listed) == 1 else "s")
@@ -1159,8 +1330,11 @@ def describe(plan, dry_run, written=None):
     return untrusted.mark(result, *texts)
 
 
-def write_pack(plan):
-    """Write the planned pack.  -> the describe() result with written=True, or a failure (nothing left behind)."""
+def write_pack(plan, describe_with=None):
+    """Write the planned pack.  -> the describe() result with written=True, or a failure (nothing left behind).
+
+    `describe_with(plan, dry_run, written=...)` replaces describe() as the owner-facing report of a pack that WAS written
+    (update_modpack_file has its own report: updated / unchanged / skipped); a failure is the same either way."""
     try:
         manifest_name = INDEX_NAME if plan["format"] == "modrinth" else MANIFEST_NAME
         names = _expected_names(plan, manifest_name)
@@ -1175,7 +1349,7 @@ def write_pack(plan):
         if not got.get("ok"):
             got.setdefault("written", False)
             return got
-        result = describe(plan, False, written=True)
+        result = (describe_with or describe)(plan, False, written=True)
         result["size"] = got["size"]
         if got.get("created_folder"):
             result["created_folder"] = True

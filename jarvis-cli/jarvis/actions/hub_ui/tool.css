@@ -477,3 +477,20 @@ input[type=time], input[type=number] { width: auto; }
 .tab-link { align-self: center; margin-left: 10px; padding: 4px 6px; background: transparent; border: 0; color: var(--h-dimmer); font: inherit; font-size: 11.5px; text-decoration: underline; cursor: pointer; }
 .tab-link:hover { color: var(--h-text); }
 .tab-link:focus-visible { outline: 2px solid var(--h-acc); outline-offset: 1px; }
+
+/* ---- DH-A: updates listed inside the Downloads list (one section per update group; marked "Update", never taken for a download) ---- */
+.listbar { flex-wrap: wrap; }
+#showUpdates.is-active { border-color: var(--h-acc); color: var(--h-acc2); background: color-mix(in srgb, var(--h-acc) 12%, transparent); }
+.section--upd { color: var(--h-sec); }
+.empty--slim { padding: 10px 14px; }
+.row--update { border-left-style: dashed; border-left-color: var(--h-sec); cursor: default; }
+.row--update:hover { transform: none; border-color: var(--h-line); }
+.dot.tone-update { background: transparent; border: 1.5px solid var(--h-sec); }
+.tag--upd { color: var(--h-sec); border-color: var(--h-sec); font-weight: 600; }
+.uprow__ver { font-family: var(--h-mono); color: var(--h-dim); overflow-wrap: anywhere; }
+.uprow__apply { margin-top: 5px; font-size: 11px; line-height: 1.45; color: var(--h-dim); overflow-wrap: anywhere; }
+.uprow__apply.is-ok b { color: var(--h-green); }
+.uprow__apply.is-warn b { color: var(--h-orange); }
+.uprow__apply.is-bad { color: var(--h-red); }
+.uprow__apply.is-bad b { color: var(--h-red); }
+.uprow__note { margin: 8px 4px 0; font-size: 10.5px; color: var(--h-red); }

@@ -26,20 +26,41 @@ Rules this file enforces (tests/test_modhosts_net.py pins each one):
 fetch() never raises.  Success: {"ok": True, "status", "headers" (lower-case names), "body", "final_url"};
 failure: {"ok": False, "error", "reason"} plus `status` (and a short `body`) when the vendor answered.
 
+Streaming a download to disk (`to_file=` and `discard=`; used by modhosts/apply.py, which replaces a file in the owner's
+mods folder).  Without `to_file` nothing below applies and every answer is exactly what it was.  With it:
+  * `to_file` is a `.part` file the CALLER created exclusively (absolute path, already there, empty, not a link) and
+    `discard` is the caller's own function that throws such a file away.  Anything else is refused up front and
+    nothing is touched or discarded: a file that is not what the caller says it is is not ours to remove.  This file
+    never deletes anything itself (tests/test_minecraft_guards.py, G11, keeps it that way); the caller's `discard` does.
+  * Only a plain GET that wants the bytes, and only an HTTP 200 answer, is written.  The same host allow-list, redirect
+    rules, failure reasons and key hygiene as for any other call; the size cap (`max_bytes`, else the usual bytes cap)
+    is checked on the Content-Length first and then on every chunk, so a too-big answer stops at the cap.
+  * The bytes go to the file as they arrive and SHA-1 and SHA-512 are computed over what was written.  The file is
+    flushed and synced and closed before this returns.
+  * Success: {"ok": True, "status", "headers", "body": None, "final_url", "path", "size", "sha1", "sha512"}.  The caller
+    owns the file from then on and must still verify it (size, the published hash): this only says what arrived.
+  * On ANY failure (a refusal, a status, the cap, a short or a cut-off answer, a write error, an exception, even a
+    KeyboardInterrupt) `discard(path)` is called once, after the file is closed.  It is never called on success.
+  * A body that ends short of, or runs past, its own Content-Length is a failure (a cut-off connection must never look
+    like a whole file).  The comparison is skipped when the answer is content-encoded: its length is the encoded length.
+
 Test seams (tests inject these; none of them can take a URL or a host):
   TRANSPORT(method, url, headers, json_body, timeout) -> Reply      the one place bytes move
   RESOLVER(host, port) -> [address]                                    handed to netguard.check_url
   SLEEP(seconds)                                                       the one wait (Retry-After)
   CONTACT_PROVIDER() -> str                                            skips the tool-setting lookup
 """
+import hashlib
 import importlib
 import json
+import os
 import re
+import stat
 import time
 from urllib.parse import quote, urlencode, urljoin, urlsplit, urlunsplit
 
-from . import (BAD_KEY, NO_KEY, NOT_FOUND, OFFLINE, RATE_LIMITED, TOO_BIG, UNSUPPORTED, VENDOR_CHANGED, fail,
-               hosts)
+from . import (BAD_DEST, BAD_KEY, NO_KEY, NOT_FOUND, OFFLINE, RATE_LIMITED, TOO_BIG, UNSUPPORTED, VENDOR_CHANGED,
+               fail, hosts)
 from ..hub import netguard
 
 VENDORS = ("modrinth", "curseforge", "optifine", "loader_meta")
@@ -248,20 +269,44 @@ def _read(reply, limit, deadline):
 # --------------------------------------------------------------------------- fetch
 
 def fetch(vendor, url, *, method="GET", params=None, json_body=None, headers=None,
-          want="json", max_bytes=None, max_redirects=3, timeout=None):
-    """One guarded request.  See the module docstring.  Never raises."""
-    key = None
-    try:
-        return _fetch(vendor, url, method, params, json_body, headers, want, max_bytes, max_redirects, timeout)
-    except Exception as exc:  # noqa: BLE001 - library errors can carry a URL or a header: say only the kind
+          want="json", max_bytes=None, max_redirects=3, timeout=None, to_file=None, discard=None):
+    """One guarded request.  See the module docstring (`to_file` / `discard` stream the answer to a `.part` file).
+    Never raises."""
+    if to_file is None:
+        # The ordinary call: exactly what it always was.
+        key = None
         try:
-            key = _get_key() if vendor == KEY_VENDOR else None
-        except Exception:  # noqa: BLE001
-            key = None
-        return fail(OFFLINE, _scrub("%s did not answer (%s)." % (_label(vendor), type(exc).__name__), key))
+            return _fetch(vendor, url, method, params, json_body, headers, want, max_bytes, max_redirects, timeout)
+        except Exception as exc:  # noqa: BLE001 - library errors can carry a URL or a header: say only the kind
+            try:
+                key = _get_key() if vendor == KEY_VENDOR else None
+            except Exception:  # noqa: BLE001
+                key = None
+            return fail(OFFLINE, _scrub("%s did not answer (%s)." % (_label(vendor), type(exc).__name__), key))
+    sink, refused = _check_sink(to_file, discard, want, method)
+    if refused is not None:
+        return refused                                 # nothing was written, and nothing is discarded
+    result = None
+    try:
+        try:
+            result = _fetch(vendor, url, method, params, json_body, headers, want, max_bytes, max_redirects, timeout, sink)
+        except Exception as exc:  # noqa: BLE001 - say only the kind of failure (the file is closed by now)
+            try:
+                key = _get_key() if vendor == KEY_VENDOR else None
+            except Exception:  # noqa: BLE001
+                key = None
+            result = fail(OFFLINE, _scrub("%s did not answer (%s)." % (_label(vendor), type(exc).__name__), key))
+    finally:
+        # Whatever happened, a download that is not a success leaves no file: the caller's own `discard` removes it.
+        if not (isinstance(result, dict) and result.get("ok") is True):
+            try:
+                discard(sink)
+            except Exception:  # noqa: BLE001 - a failing clean-up must not hide the real answer
+                pass
+    return result
 
 
-def _fetch(vendor, url, method, params, json_body, headers, want, max_bytes, max_redirects, timeout):
+def _fetch(vendor, url, method, params, json_body, headers, want, max_bytes, max_redirects, timeout, sink=None):
     if vendor not in _HOST_BLOCKS:
         return fail(UNSUPPORTED, "That is not one of the sites Jarvis uses for Minecraft mods.")
     method = str(method or "GET").upper()
@@ -373,6 +418,9 @@ def _fetch(vendor, url, method, params, json_body, headers, want, max_bytes, max
 
             if 300 <= status < 400 and lowered.get("location"):
                 if allowed_redirects == 0:
+                    if sink is not None:
+                        return fail(VENDOR_CHANGED, "%s redirected the download, which is not followed here." % _label(vendor),
+                                    status=status)
                     # max_redirects=0: hand the 3xx back with its Location (hop-by-hop work).
                     return {"ok": True, "status": status, "headers": lowered,
                             "body": b"" if want in ("bytes", "bytes_prefix") else ("" if want == "text" else None),
@@ -397,6 +445,8 @@ def _fetch(vendor, url, method, params, json_body, headers, want, max_bytes, max
 
             if want == "head":
                 return {"ok": True, "status": status, "headers": lowered, "body": None, "final_url": current}
+            if sink is not None:
+                return _stream_to_file(reply, sink, cap, deadline, status, lowered, current, vendor, key)
             raw, over = _read(reply, cap, deadline)
             if over and want != "bytes_prefix":
                 return fail(TOO_BIG, "%s answered with more data than the %d MB limit." % (
@@ -432,6 +482,105 @@ def _charset(headers):
         except LookupError:
             pass
     return "utf-8"
+
+
+def _check_sink(to_file, discard, want, method):
+    """Vet the file a download is to be written into -> (path, None) | (None, failure).  A refusal touches nothing."""
+    if want != "bytes" or str(method or "GET").upper() != "GET":
+        return None, fail(UNSUPPORTED, "A download to a file is a plain GET that wants the bytes.")
+    if not callable(discard):
+        return None, fail(UNSUPPORTED, "A download to a file needs the caller's way to throw the file away; none was given.")
+    try:
+        path = os.fspath(to_file)
+        if not isinstance(path, str) or "\x00" in path or not os.path.isabs(path) or not path.lower().endswith(".part"):
+            raise ValueError("not an absolute .part path")
+        info = os.lstat(path)                          # lstat: a link is never followed
+        if not stat.S_ISREG(info.st_mode) or info.st_size != 0:
+            raise ValueError("not a new, empty file")
+    except (TypeError, ValueError, OSError):
+        return None, fail(UNSUPPORTED, "The file to download into must be a new, empty .part file that already exists.")
+    return path, None
+
+
+def _declared_length(headers):
+    """The Content-Length the server announced (a non-negative int), or None when it said nothing usable."""
+    raw = str(headers.get("content-length") or "").strip()
+    return int(raw) if raw.isdigit() and len(raw) < 16 else None
+
+
+def _too_big(vendor, cap, status):
+    return fail(TOO_BIG, "%s answered with more data than the %d MB limit." % (_label(vendor), max(1, cap // (1024 * 1024))),
+                status=status)
+
+
+def _stream_to_file(reply, path, cap, deadline, status, headers, final_url, vendor, key):
+    """Write the body of a 2xx answer into `path` as it arrives -> the success dict | a failure dict.
+
+    The caller (fetch) discards the file on every failure, after this has closed it: the file is closed on every way out
+    of here, including a raised exception.  Memory use is one chunk."""
+    label = _label(vendor)
+    if status != 200:
+        return fail(VENDOR_CHANGED, "%s answered HTTP %d, which Jarvis does not expect for a file." % (label, status),
+                    status=status)
+    declared = _declared_length(headers)
+    encoded = str(headers.get("content-encoding") or "").strip().lower() not in ("", "identity")
+    if declared is not None and not encoded and declared > cap:
+        return _too_big(vendor, cap, status)           # said so up front: not one byte is read or written
+    flags = os.O_WRONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)    # no O_CREAT: the caller made it
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        return fail(BAD_DEST, _scrub("The download could not be saved (%s)." % type(exc).__name__, key))
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size != 0:
+            return fail(UNSUPPORTED, "The file to download into is not a new, empty file any more.")
+        handle = os.fdopen(fd, "wb")
+        fd = None                                      # the handle owns it now
+    finally:
+        if fd is not None:
+            os.close(fd)
+    sha1, sha512 = hashlib.sha1(), hashlib.sha512()
+    total = 0
+    with handle:
+        chunks = reply.iter_bytes()
+        while True:
+            try:
+                chunk = next(chunks)
+            except StopIteration:
+                break
+            except TimeoutError:
+                raise                                  # fetch() words the stalled-server case
+            except Exception as exc:  # noqa: BLE001 - the connection broke part way: say the kind, never the address
+                kind = type(exc).__name__
+                slow = "Timeout" in kind or "timed out" in str(exc).lower()
+                return fail(OFFLINE, _scrub("%s %s (%s)." % (
+                    label, "took too long to send the rest of the file" if slow else "dropped the connection before "
+                    "the whole file arrived", kind), key))
+            if not chunk:
+                continue
+            if total + len(chunk) > cap:
+                return _too_big(vendor, cap, status)   # stops at the cap: nothing past it is written or read
+            try:
+                handle.write(chunk)
+            except OSError as exc:
+                return fail(BAD_DEST, _scrub("The download could not be written to disk (%s)." % type(exc).__name__, key))
+            sha1.update(chunk)
+            sha512.update(chunk)
+            total += len(chunk)
+            if time.monotonic() > deadline:
+                raise TimeoutError("the answer took too long")
+        try:
+            handle.flush()
+            os.fsync(handle.fileno())
+        except OSError as exc:
+            return fail(BAD_DEST, _scrub("The download could not be written to disk (%s)." % type(exc).__name__, key))
+    if declared is not None and not encoded and total != declared:
+        if total < declared:
+            return fail(OFFLINE, "%s's answer ended before the whole file arrived (%d of %d bytes)." % (label, total, declared))
+        return fail(VENDOR_CHANGED, "%s sent more of the file than it said it would (%d of %d bytes)." % (label, total, declared))
+    return {"ok": True, "status": status, "headers": headers, "body": None, "final_url": final_url, "path": path,
+            "size": total, "sha1": sha1.hexdigest(), "sha512": sha512.hexdigest()}
 
 
 def _http_failure(vendor, status, headers, raw, key, host=None):

@@ -8,6 +8,9 @@
 //   * M5: "what I play" (shared version, loader, source), whether a search hit fits it, errors in words, the recommended
 //     file in words, the tray (a list in memory), and the tray's BATCH flow: a dry run per item with no dialog, ONE dialog
 //     for the whole batch, then one real call per item that carries no dialog of its own.
+//   * MC-A (round 10): a pack built from a tray with items of BOTH platforms (every entry sends its own source, the pack
+//     names the other platform itself, the dialog says what is matched; an all-one-platform tray is unchanged), the folder
+//     picker the panel stands aside for (its class names are read from path-picker.js), and reveal() for results.
 // What is NOT checked here (no DOM): how the tabs, cards, tray and buttons are drawn and wired. That is checked by reading,
 // by the manual checks in the delivery notes, and (once, by looking) in a headless browser harness that is not a test.
 // Fixtures: tests/data/modhosts/hand_m5_*.json (the folder is git-ignored: `git add -f` them).
@@ -401,6 +404,97 @@ check("pack entries: tray items first (a pinned file after a bar), then what was
 check("pack entries: the text parses back into the entries the tool takes", (() => { const e = P.parseEntries(txt); return e.length === 4 && e[0].project === "AANobbMI" && e[0].file === "u1Qe3xyz" && e[1].project === "M1" && !("file" in e[1]); })());
 a = P.packArgs({ format: "modrinth", entries_from: "curseforge", name: "P", mc_version: "1.20.1", loader: "fabric", entries: P.entriesText([cf], "") }, true);
 check("pack from a CurseForge tray: entries_from is sent because it differs from the pack's platform", a.entries_from === "curseforge" && a.entries[0].project === "394468", a);
+// ---- MC-A: a mixed pack (the tray holds items of BOTH platforms; each entry sends its own source)
+const mx2 = P.trayItemFrom({ source: "modrinth", id: "M2", name: "MrTwo" }, { file_id: "f77", version: "1.0" });
+const mixedItems = [mr, cf, mx2];
+tp = P.trayPlan(mixedItems, "modrinth", "");
+check("mixed tray: automatic builds ONE pack from both platforms, nothing left out (Modrinth pack)",
+  tp.both === true && tp.mixed === true && tp.origin === "curseforge" && tp.used.length === 3 && tp.left.length === 0 && tp.native.length === 2 && tp.foreign.length === 1 && tp.foreign[0].name === "CfMod", tp);
+tp = P.trayPlan(mixedItems, "curseforge", "");
+check("mixed tray: the same tray for a CurseForge pack flips which items are matched",
+  tp.both === true && tp.origin === "modrinth" && tp.native.length === 1 && tp.native[0].name === "CfMod" && tp.foreign.length === 2 && tp.left.length === 0, tp);
+check("mixed tray: asking for 'both' by name is the same as automatic", JSON.stringify(P.trayPlan(mixedItems, "modrinth", "both")) === JSON.stringify(P.trayPlan(mixedItems, "modrinth", "")));
+tp = P.trayPlan(mixedItems, "modrinth", "modrinth");
+check("mixed tray: choosing ONE platform keeps the old behaviour (only its items, the others left out and listed)", tp.both === false && tp.used.length === 2 && tp.left.length === 1 && tp.left[0].name === "CfMod" && tp.origin === "modrinth", tp);
+tp = P.trayPlan(mixedItems, "modrinth", "curseforge");
+check("mixed tray: choosing the other platform uses only its items", tp.both === false && tp.used.length === 1 && tp.used[0].name === "CfMod" && tp.left.length === 2 && tp.origin === "curseforge", tp);
+for (const [items, fmt, pick] of [[[mr, mx2], "modrinth", ""], [[cf], "modrinth", ""], [[cf], "curseforge", ""], [[], "curseforge", ""], [[mr], "curseforge", "both"], [[mr, mx2], "modrinth", "both"]]) {
+  const was = P.trayForPack(items, fmt, pick === "both" ? "" : pick), now = P.trayPlan(items, fmt, pick);
+  check("one-platform tray (" + items.length + " item(s), " + fmt + ", '" + pick + "'): exactly what it was, nothing mixed", now.both === false && now.origin === was.origin && now.used.length === was.used.length && now.left.length === was.left.length, now);
+}
+
+const mixedTxt = P.entriesText(mixedItems, "iris | abc\nlithium | | beta | curseforge", { sources: true, own: "modrinth" });
+check("mixed entries text: every line names its platform in a fourth part; a pinned file stays; a typed line is on the pack's platform whatever it said after the third bar",
+  mixedTxt === "M1 |  | | modrinth\n394468 |  | | curseforge\nM2 | f77 | | modrinth\niris | abc |  | modrinth\nlithium |  | beta | modrinth", mixedTxt);
+const mixedParsed = P.parseEntries(mixedTxt);
+check("mixed entries text parses back: five entries, each with its source, the file and the channel kept",
+  mixedParsed.length === 5 && mixedParsed.map((e) => e.source).join() === "modrinth,curseforge,modrinth,modrinth,modrinth" && mixedParsed[2].file === "f77" && mixedParsed[4].channel === "beta", mixedParsed);
+check("entries text WITHOUT sources is byte-for-byte what it always was, and a typed fourth part is cut from it",
+  P.entriesText(mixedItems, "iris | abc\n lithium \n") === "M1\n394468\nM2 | f77\niris | abc\nlithium" && P.entriesText([mr], "x | | | curseforge") === "M1\nx"
+  && P.parseEntries(P.entriesText([mr], "x | | | curseforge")).every((e) => !("source" in e)));
+check("a source that is not a platform is ignored, never passed on", !("source" in P.parseEntries("a | | | evil")[0]) && P.parseEntries("a | | | CurseForge")[0].source === "curseforge");
+
+const mixedForm = { format: "modrinth", name: "Mixed Pack", mc_version: "1.20.1", loader: "fabric", entries: mixedTxt, entries_from: "curseforge" };
+a = P.packArgs(mixedForm, false);
+const ENTRY_KEYS = ["project", "file", "required", "channel", "source"];
+check("mixed pack (Modrinth): every entry sends its own source, entries_from is the OTHER platform, no download_to_match",
+  a.entries.length === 5 && a.entries.every((e) => e.source === "modrinth" || e.source === "curseforge") && a.entries[1].source === "curseforge" && a.entries_from === "curseforge" && !("download_to_match" in a), a);
+check("mixed pack: an entry has only keys the tool's schema declares", a.entries.every((e) => Object.keys(e).every((k) => ENTRY_KEYS.indexOf(k) >= 0)), a.entries);
+check("mixed pack: the form's own entries_from cannot overrule it (empty, same platform or wrong)",
+  ["", "modrinth", "curseforge", "weird"].every((v) => P.packArgs(Object.assign({}, mixedForm, { entries_from: v }), false).entries_from === "curseforge"));
+a = P.packArgs(Object.assign({}, mixedForm, { entries: "M1\n394468 | | | curseforge\nzz | f9 | beta" }), false);
+check("mixed pack: an entry with no source gets the PACK'S platform (never the other one, which is what the tool would assume)",
+  a.entries[0].source === "modrinth" && a.entries[1].source === "curseforge" && a.entries[2].source === "modrinth" && a.entries[2].file === "f9" && a.entries[2].channel === "beta", a.entries);
+const mixedCf = Object.assign({}, mixedForm, { format: "curseforge", entries: P.entriesText(mixedItems, "iris", { sources: true, own: "curseforge" }), entries_from: "" });
+a = P.packArgs(Object.assign({ download_to_match: true }, mixedCf), false);
+check("mixed pack (CurseForge): entries_from is Modrinth, and download_to_match goes only on a real call with the box ticked",
+  a.entries_from === "modrinth" && a.download_to_match === true && a.entries[0].source === "modrinth" && a.entries[1].source === "curseforge" && a.entries[3].source === "curseforge"
+  && !("download_to_match" in P.packArgs(Object.assign({ download_to_match: true }, mixedCf), true)) && !("download_to_match" in P.packArgs(Object.assign({ download_to_match: false }, mixedCf), false)), a);
+check("mixed pack: the direction is read from the entries, not from the form (so a flow can never ask for the wrong yes)",
+  P.directionOf(mixedForm) === "curseforge_to_modrinth" && P.directionOf(mixedCf) === "modrinth_to_curseforge" && P.directionOf(Object.assign({}, mixedForm, { entries_from: "" })) === "curseforge_to_modrinth");
+a = P.packArgs({ format: "modrinth", name: "P", mc_version: "1.20.1", loader: "fabric", entries: P.entriesText([mr, mx2], "x") }, false);
+check("an all-one-platform tray: no source on any entry, no entries_from, nothing about matching (unchanged)", a.entries.length === 3 && a.entries.every((e) => !("source" in e)) && !("entries_from" in a) && !("download_to_match" in a), a);
+a = P.packArgs({ format: "modrinth", name: "P", mc_version: "1.20.1", loader: "fabric", entries_from: "curseforge", entries: P.entriesText([cf], "") }, false);
+check("an all-CurseForge tray into a Modrinth pack: the old cross-platform pack, with no per-entry source", a.entries_from === "curseforge" && a.entries.every((e) => !("source" in e)), a);
+check("a typed 'source' cannot turn an ordinary pack into a mixed one", P.isMixed(P.parseEntries(P.entriesText([mr], "x | | | curseforge")), "modrinth") === false && P.isMixed(mixedParsed, "modrinth") === true && P.isMixed(mixedParsed, "curseforge") === true && P.isMixed([], "modrinth") === false);
+check("otherPlatform", P.otherPlatform("modrinth") === "curseforge" && P.otherPlatform("curseforge") === "modrinth");
+
+let split = P.mixedSplit(P.packArgs(mixedForm, true));
+let words = P.mixedWords(split);
+check("mixed split (Modrinth pack): 4 entries go in as they are, 1 is named on CurseForge and matched by SHA-1", split.mixed === true && split.native === 4 && split.foreign === 1 && split.from === "curseforge" && split.to === "modrinth" && split.method === "sha1", split);
+check("mixed words (SHA-1): says what goes in as it is, what is matched where and how, and that nothing is downloaded",
+  /^Mixed pack for Modrinth: 4 projects are named on Modrinth and go in as they are; 1 project is named on CurseForge and matched to the identical file on Modrinth by SHA-1 hash; nothing is downloaded\./.test(words) && /never swapped for a lookalike/.test(words), words);
+split = P.mixedSplit(P.packArgs(Object.assign({}, mixedCf), true));
+words = P.mixedWords(split);
+check("mixed words (fingerprint): the Modrinth entries of a CurseForge pack may be read once, in memory, and are not saved; it does not claim nothing is downloaded",
+  split.native === 2 && split.foreign === 2 && split.method === "fingerprint" && /^Mixed pack for CurseForge: 2 projects are named on CurseForge and go in as they are; 2 projects are named on Modrinth and matched/.test(words) && /read once, in memory, and is not saved/.test(words) && !/nothing is downloaded/.test(words), words);
+check("mixed words: singular and plural agree, and an ordinary pack says nothing", /1 project is named on Modrinth and goes in as it is/.test(P.mixedWords({ mixed: true, native: 1, foreign: 2, from: "curseforge", to: "modrinth", method: "sha1" }))
+  && P.mixedWords(P.mixedSplit(P.packArgs({ format: "modrinth", entries: "a\nb" }, true))) === "" && P.mixedWords(null) === "" && P.mixedSplit(null).mixed === false);
+const mixedDry = fx("hand_10a_pack_mixed_dry.json");
+const mixedPlan = P.confirmPlan("pack", mixedDry, P.packArgs(mixedForm, false));
+check("mixed dialog: the dry run's folder and file, the mixed sentence, then the matching counts (nothing is downloaded)",
+  mixedPlan.ok === true && /^Folder: D:\\Packs$/m.test(mixedPlan.summary) && /Mixed pack for Modrinth: 4 projects are named on Modrinth/.test(mixedPlan.summary) && /Matched on modrinth by sha1: 1 of 2 entries; 1 skipped\. Nothing is downloaded\./.test(mixedPlan.summary), mixedPlan);
+const ordPlan = P.confirmPlan("pack", mixedDry, P.packArgs({ format: "modrinth", name: "P", entries: "a\nb" }, false));
+check("an ordinary pack's dialog has no mixed sentence", ordPlan.ok === true && !/Mixed pack/.test(ordPlan.summary), ordPlan);
+check("the dialog's argument text lists each mixed entry with its source (one line each)", (P.argsText(P.packArgs(mixedForm, false)).match(/"source":"(modrinth|curseforge)"/g) || []).length === 5 && /entries_from: curseforge/.test(P.argsText(P.packArgs(mixedForm, false))));
+
+// ---- MC-A: the folder picker the panel stands aside for. Its class names are read from path-picker.js itself.
+const pickerSrc = fs.readFileSync(path.join(ROOT, "web", "public", "path-picker.js"), "utf8");
+const backdropCls = (pickerSrc.match(/const backdrop = el\("div", \{ cls: "([^"]+)" \}, \[card\]\);/) || [])[1];
+const cardCls = (pickerSrc.match(/const card = el\("div", \{ cls: "([^"]+)", role: "dialog"/) || [])[1];
+check("picker: the backdrop and card class names were found in path-picker.js, and the backdrop goes on the page", !!backdropCls && !!cardCls && /\(document\.body \|\| document\.documentElement\)\.appendChild\(backdrop\)/.test(pickerSrc), [backdropCls, cardCls]);
+// A stand-in for `document`: querySelector answers for a selector list of plain classes, like the panel's.
+const pageWith = (classes) => ({ querySelector(sel) { return String(sel).split(",").map((t) => t.trim()).some((t) => t.charAt(0) === "." && classes.indexOf(t.slice(1)) >= 0) ? {} : null; } });
+check("picker: the panel finds the picker's backdrop", P.pickerOpen(pageWith([backdropCls])) === true);
+check("picker: ...and its card", P.pickerOpen(pageWith([cardCls])) === true);
+check("picker: no picker on the page means not open (the panel's own overlay is not one)", P.pickerOpen(pageWith(["menu-overlay", "mc-overlay", "menu-panel--minecraft"])) === false && P.pickerOpen(pageWith([])) === false && P.pickerOpen({}) === false && P.pickerOpen(null) === false);
+check("picker: the selector holds the real classes and none of the ones that were guessed", P.PICKER_SELECTOR.split(",").map((t) => t.trim()).indexOf("." + backdropCls) >= 0 && !/pp-overlay|\.path-picker|(^|[^a-z])pp-backdrop/.test(P.PICKER_SELECTOR), P.PICKER_SELECTOR);
+
+// ---- MC-A: scrolling a result into view
+let scrolled = null;
+P.reveal({ scrollIntoView: (o) => { scrolled = o; } });
+check("reveal: brings the host into view without moving it when it is already visible (block nearest)", !!scrolled && scrolled.block === "nearest", scrolled);
+check("reveal: a host with no scrollIntoView, a missing host, or one that throws is fine", (() => { try { P.reveal({}); P.reveal(null); P.reveal(undefined); P.reveal({ scrollIntoView() { throw new Error("old browser"); } }); return true; } catch (e) { return false; } })());
 check("dialogs: a dry run of a writer opens none; everything else keeps the server's setting",
   P.dryRunNeedsNoDialog("download_mc_file", { dry_run: true }) && P.dryRunNeedsNoDialog("make_modpack_file", { dry_run: true }) && P.dryRunNeedsNoDialog("download_optifine", { dry_run: true })
   && !P.dryRunNeedsNoDialog("download_mc_file", { project: "x" }) && !P.dryRunNeedsNoDialog("check_mc_watched", { dry_run: true }) && !P.dryRunNeedsNoDialog("search_mc_mods", { dry_run: true }) && !P.dryRunNeedsNoDialog("download_mc_file", null));
@@ -514,6 +608,43 @@ const queued = { ok: true, queued: true, message: "sodium.jar is queued in Downl
   call = stub([dryPlain]);
   out = await F.packCheck(Object.assign({ format: "curseforge", entries_from: "modrinth", download_to_match: true }, base), call);
   check("pack check only (dry run button): one dry call, never download_to_match, never a dialog of its own", call.log.length === 1 && call.log[0].args.dry_run === true && !("download_to_match" in call.log[0].args) && !call.log[0].opts.sure && !call.log[0].opts.passYes && out.stage === "checked");
+
+  // ---- MC-A: the mixed pack's flows (a tray with items of both platforms)
+  const mixedWrote = fx("hand_10a_pack_mixed_written.json");
+  const mixedNeeds = fx("hand_10a_pack_mixed_needs_download.json");
+  const mxMr = Object.assign({}, mixedForm, { dest: "D:\\Packs" });
+  const mxCf = Object.assign({}, mixedCf, { dest: "D:\\Packs" });
+  const allSourced = (args) => args.entries.length > 0 && args.entries.every((e) => e.source === "modrinth" || e.source === "curseforge");
+  call = stub([mixedDry, mixedWrote]);
+  out = await F.packWrite(Object.assign({}, mxMr, { entries_from: "" }), call);
+  check("mixed pack flow (Modrinth pack): dry run, ONE dialog, the real call; both send every entry's source and entries_from curseforge, neither sends download_to_match",
+    call.log.length === 2 && call.log[0].args.dry_run === true && !("dry_run" in call.log[1].args) && call.log.every((c) => c.name === "make_modpack_file" && c.args.entries_from === "curseforge" && allSourced(c.args) && !("download_to_match" in c.args))
+    && call.log[1].opts.sure === true && call.log[1].opts.passYes === true && !call.log[0].opts.sure && out.stage === "done", call.log);
+  check("mixed pack flow: the dialog says what goes in as it is and what is matched, with the folder",
+    /Mixed pack for Modrinth: 4 projects are named on Modrinth and go in as they are; 1 project is named on CurseForge/.test(call.log[1].opts.summary) && /^Folder: D:\\Packs$/m.test(call.log[1].opts.summary) && /Nothing is downloaded\./.test(call.log[1].opts.summary), call.log[1].opts.summary);
+  check("mixed pack flow: each entry keeps the platform it was added from (the tray's CurseForge item is the only curseforge entry)",
+    call.log[1].args.entries.filter((e) => e.source === "curseforge").map((e) => e.project).join() === "394468" && call.log[1].args.entries[2].file === "f77", call.log[1].args.entries);
+
+  call = stub([mixedNeeds, mixedWrote]);
+  out = await F.packWrite(Object.assign({ download_to_match: false }, mxCf), call);
+  check("mixed pack flow (CurseForge pack, box NOT ticked): the count and size are shown, nothing is confirmed or downloaded",
+    call.log.length === 1 && out.stage === "needs_tick" && out.need.exposed === true && !("download_to_match" in call.log[0].args) && call.log[0].args.entries_from === "modrinth" && allSourced(call.log[0].args), out);
+  call = stub([mixedNeeds, mixedWrote]);
+  out = await F.packWrite(Object.assign({ download_to_match: true }, mxCf), call);
+  check("mixed pack flow (CurseForge pack, ticked): only the real call carries download_to_match, after one dialog with the mixed sentence, count, size and folder; entries still carry their sources",
+    call.log.length === 2 && call.log[0].args.dry_run === true && !("download_to_match" in call.log[0].args) && call.log[1].args.download_to_match === true && call.log[1].args.entries_from === "modrinth" && allSourced(call.log[1].args)
+    && call.log[1].opts.sure === true && call.log[1].opts.passYes === true
+    && /Mixed pack for CurseForge: 2 projects are named on CurseForge and go in as they are; 2 projects are named on Modrinth/.test(call.log[1].opts.summary)
+    && /Downloads: 2 mod files, 5\.0 MB in all/.test(call.log[1].opts.summary) && /^Folder: D:\\Packs$/m.test(call.log[1].opts.summary) && out.stage === "done", call.log);
+
+  call = stub([mixedDry]);
+  out = await F.packCheck(Object.assign({ download_to_match: true }, mxCf), call);
+  check("mixed pack check only: one dry call with every source, never download_to_match, never a dialog", call.log.length === 1 && call.log[0].args.dry_run === true && allSourced(call.log[0].args) && !("download_to_match" in call.log[0].args) && !call.log[0].opts.sure, call.log);
+
+  call = stub([dryPlain, wrote]);
+  out = await F.packWrite(Object.assign({ format: "modrinth", entries: P.entriesText([mr, mx2], "x"), dest: "D:\\Packs" }, { name: "P", mc_version: "1.20.1", loader: "fabric" }), call);
+  check("an all-one-platform tray through the flow: no source, no entries_from, no mixed sentence (unchanged)",
+    call.log.length >= 1 && call.log.every((c) => !("entries_from" in c.args) && c.args.entries.every((e) => !("source" in e))) && call.log.every((c) => !/Mixed pack/.test(c.opts.summary || "")), call.log);
 
   // runTool against a stub server and a stub dialog
   async function runWith(answerYes, name, args, opts, preview) {
@@ -813,6 +944,10 @@ const queued = { ok: true, queued: true, message: "sodium.jar is queued in Downl
   for (const bad of ["innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval(", "new Function", "srcdoc"]) {
     check("minecraft-panel.js never uses " + bad, noComments.indexOf(bad) < 0);
   }
+  check("MC-A: the key guard asks pickerOpen(document), and the guessed picker classes are gone", /pickerOpen\(document\)/.test(noComments) && !/(?:^|[^a-z])pp-(?:overlay|backdrop)|\.path-picker\b/.test(noComments));
+  check("MC-A: the Pack and OptiFine results are revealed (pack x2, optifine list x1, optifine download x3) and the tray's own scroll is kept",
+    (noComments.match(/reveal\(host\);/g) || []).length === 2 && (noComments.match(/reveal\(listHost\);/g) || []).length === 1 && (noComments.match(/reveal\(dlHost\);/g) || []).length === 3 && /results\.scrollIntoView\(\{ block: "nearest" \}\)/.test(noComments));
+  check("MC-A: a mixed pack's sources are filled in ONE place and download_to_match is still written once", (noComments.match(/e\.source = args\.format/g) || []).length === 1 && (noComments.match(/download_to_match = true/g) || []).length === 1);
   check("minecraft-panel.js never names the key file or a key reader", !/curseforge\.json|get_key|api[_-]?key|x-api-key/i.test(noComments));
   check("minecraft-panel.js talks only to the tool routes", (noComments.match(/"\/api\/[^"]*"/g) || []).every((u) => u === '"/api/tools/preview"' || u === '"/api/tools/run"'), noComments.match(/"\/api\/[^"]*"/g));
   check("minecraft-panel.js never calls a vendor directly", !/https?:\/\/(?!modrinth|www\.curseforge)/.test(noComments.replace(/"https?:\/\/[^"]*"/g, "")) && !/fetch\(\s*["']https?:/.test(noComments));

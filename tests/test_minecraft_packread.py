@@ -1076,6 +1076,131 @@ def test_source_files_keep_the_rules():
     check("both handlers refuse a guest first", texts["actions/minecraft_packread.py"].count("_is_chat_guest()") >= 3)
 
 
+# --------------------------------------------------------------------------- allow_drop and the writer's zip source (agent MC-C, add-only)
+
+def _foreign_pack(extra_items=(), name="foreign.mrpack"):
+    """The usual old pack plus entries Modrinth doesn't know; the first has a link off cdn.modrinth.com (it cannot be carried)."""
+    base = old_modrinth_pack(new_dir("pk"))
+    items = [mr_item("mods/foreign.jar", "foreignZ", url="https://example.org/foreign.jar")] + list(extra_items)
+    return rewrite_index(base, new_dir("pk"), lambda doc: doc["files"].extend(items), name)
+
+
+def test_allow_drop_is_a_boolean_argument_that_defaults_to_off():
+    schema = next(x for x in mpr.TOOL_SCHEMAS if x["name"] == "update_modpack_file")
+    prop = schema["parameters"]["properties"].get("allow_drop")
+    check("update_modpack_file declares allow_drop as a boolean", prop and prop["type"] == "boolean", prop)
+    check("allow_drop says it is off by default and only after the owner agreed", "Default false" in prop["description"] and "owner" in prop["description"])
+    check("it is not required", "allow_drop" not in schema["parameters"]["required"])
+    check("the schema description tells the model never to set it alone", "Never set allow_drop on your own" in schema["description"])
+    check("inspect_modpack has no such argument", "allow_drop" not in next(x for x in mpr.TOOL_SCHEMAS if x["name"] == "inspect_modpack")["parameters"]["properties"])
+    steps = mpr.TEST_CHECKLIST["update_modpack_file"]["steps"]
+    check("the checklist has a dry run with allow_drop", any(st.get("run", {}).get("allow_drop") is True and st["run"].get("dry_run") is True for st in steps))
+    check("the dropped list is never cut by result shaping", "dropped" in mpr.TOOL_RESULT_SPECS["update_modpack_file"]["list_item_drop"])
+
+
+def test_without_allow_drop_an_uncarriable_entry_still_refuses_and_says_how_to_go_on():
+    with World() as w:
+        pack = _foreign_pack()
+        out = new_dir("out")
+        res = mpr.tool_update_modpack_file(args_for(pack, out))
+        check("default: ok false, verify_failed, written false, nothing in the folder, nothing asked",
+              res["ok"] is False and res["reason"] == "verify_failed" and res["written"] is False and listing(out) == [] and w.asked == [], res)
+        check("the error names allow_drop=true as the way to a smaller pack", "allow_drop=true" in res["error"], res["error"])
+        check("the result has no allow_drop / dropped keys: it reads exactly as before", "dropped" not in res and "allow_drop" not in res and "dropped" not in res["counts"], sorted(res))
+        for off in (False, "false", "no", 0, None):
+            res = mpr.tool_update_modpack_file(args_for(pack, out, allow_drop=off, dry_run=True))
+            check("allow_drop=%r is off: still the blockers" % (off,), res["ok"] is False and len(res["blockers"]) == 1, res)
+
+
+def test_allow_drop_dry_run_lists_what_would_be_left_out_and_writes_nothing():
+    with World() as w:
+        pack = _foreign_pack()
+        out = new_dir("out")
+        before = digest(pack)
+        res = mpr.tool_update_modpack_file(args_for(pack, out, dry_run=True, allow_drop=True))
+        check("ok, dry run, nothing written, nothing asked", res["ok"] and res["dry_run"] is True and res["written"] is False and w.asked == [] and listing(out) == [], res)
+        check("allow_drop is echoed and exactly one entry is dropped, with its reason and why",
+              res["allow_drop"] is True and len(res["dropped"]) == 1 and res["dropped"][0]["project"] == "foreign.jar"
+              and res["dropped"][0]["reason"] == "cannot_carry" and "cdn.modrinth.com" in res["dropped"][0]["error"], res.get("dropped"))
+        check("the dropped entry says it was not found on Modrinth before, and that it is NOT kept",
+              res["dropped"][0]["was"] == "not_found" and res["dropped"][0]["kept"].startswith("no"), res["dropped"])
+        check("it is no longer listed as 'skipped, kept as it was'", all(s["file_name"] != "foreign.jar" for s in res["skipped"]), res["skipped"])
+        check("counts say dropped 1; complete is false", res["counts"]["dropped"] == 1 and res["complete"] is False, res["counts"])
+        check("a warning says it was LEFT OUT and the pack is smaller", any("LEFT OUT" in x and "fewer" in x for x in res["warnings"]), res["warnings"])
+        check("the message counts it", "1 left out" in res["message"], res["message"])
+        check("no blockers; the original is untouched", "blockers" not in res and digest(pack) == before)
+        check("stranger text is still marked", "untrusted_note" in res)
+
+
+def test_allow_drop_real_run_writes_the_pack_without_exactly_those_entries():
+    with World(answer=True) as w:
+        pack = _foreign_pack()
+        out = new_dir("out")
+        before = digest(pack)
+        res = mpr.tool_update_modpack_file(args_for(pack, out, allow_drop=True))
+        check("written, installed false, asked the usual question once", res["ok"] and res["written"] is True and res["installed"] is False
+              and asks(w) == ["Save outside the downloads library?"], (res, asks(w)))
+        check("the result lists the dropped file and the message says so", [d["file_name"] for d in res["dropped"]] == ["foreign.jar"] and "1 left out" in res["message"], res)
+        info = packread.read_pack(res["path"])
+        check("the new pack re-reads cleanly and does not list the dropped file", info["ok"] and info["complete"] and sha1("foreignZ") not in {f["sha1"] for f in info["files"]}, info.get("problems"))
+        check("everything else is there: updated, unchanged, skipped and the dependency (5 files, not 6)", len(info["files"]) == 5, len(info["files"]))
+        with zipfile.ZipFile(res["path"]) as z:
+            names = sorted(n for n in z.namelist() if n.startswith("overrides/"))
+        check("the overrides came along", len(names) == 3, names)
+        check("one new file, the original byte-identical", listing(out) == [Path(res["path"]).name] and digest(pack) == before)
+        again = mpr.tool_update_modpack_file(args_for(pack, out, allow_drop="true"))
+        check("a string 'true' counts as yes, and the next number is used", again["ok"] and again["filename"].endswith("-updated-2.mrpack") and again["counts"]["dropped"] == 1, again)
+
+
+def test_allow_drop_with_nothing_to_drop_says_so_and_changes_nothing_else():
+    with World() as w:
+        pack = old_modrinth_pack(new_dir("pk"))
+        plain = mpr.tool_update_modpack_file(args_for(pack, new_dir("out"), dry_run=True))
+        asked = mpr.tool_update_modpack_file(args_for(pack, new_dir("out"), dry_run=True, allow_drop=True))
+        check("an empty dropped list and dropped 0", asked["ok"] and asked["dropped"] == [] and asked["counts"]["dropped"] == 0, asked.get("dropped"))
+        for key in ("updated", "unchanged", "skipped", "dependencies_added", "complete", "warnings"):
+            check("%s is the same with and without allow_drop" % key, asked.get(key) == plain.get(key), (asked.get(key), plain.get(key)))
+
+
+def test_allow_drop_does_not_drop_a_path_clash_or_an_empty_pack():
+    with World() as w:
+        clash = mr_item("mods/fabric-api-0.92.0.jar", "clashZ1", url="https://cdn.modrinth.com/data/zz/versions/v/clash.jar", size=5)
+        pack = _foreign_pack([clash], name="clash.mrpack")
+        out = new_dir("out")
+        res = mpr.tool_update_modpack_file(args_for(pack, out, allow_drop=True))
+        reasons = sorted(b["reason"] for b in res.get("blockers", []))
+        check("two files with one path still stop the write, even with allow_drop", res["ok"] is False and "name_clash" in reasons and listing(out) == [] and w.asked == [], res)
+        check("and the error says what allow_drop does and does not do", "allow_drop only leaves out" in res["error"], res["error"])
+        check("nothing is reported as dropped when nothing was", "dropped" in res and res["dropped"] == [], res.get("dropped"))
+        only = hand_zip(new_dir("pk") / "only.mrpack", [], index=dict(MIN_INDEX, files=[mr_item("mods/foreign.jar", "foreignZ", url="https://example.org/foreign.jar")]))
+        real = packs.work_out_loader_version
+        packs.work_out_loader_version = lambda loader, mc, given: ({"value": "0.16.0", "source": "latest"}, None)
+        try:
+            res = mpr.tool_update_modpack_file(args_for(only, out, allow_drop=True, mc_version="1.20.4"))
+        finally:
+            packs.work_out_loader_version = real
+        check("a pack that would have nothing left is never written", res["ok"] is False and "nothing in the new pack" in res["error"] and listing(out) == [], res)
+
+
+def test_the_update_no_longer_has_its_own_copy_code():
+    base = ROOT / "jarvis-cli" / "jarvis" / "modhosts"
+    text = (base / "packupdate.py").read_text(encoding="utf-8")
+    code = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
+    check("packupdate.py has no _copy_overrides, no ZipFile and no ZipInfo of its own", not re.search(r"_copy_overrides|zipfile|ZipFile|ZipInfo", code))
+    check("it writes through packs.write_pack with the old pack as the zip source", "packs.write_pack(" in text and "packs.overrides_from_zip(" in text)
+    calls = []
+    real = packs.write_pack
+    with World(answer=True):
+        pack = old_modrinth_pack(new_dir("pk"))          # built with the real writer BEFORE the spy goes in
+        packs.write_pack = lambda plan, describe_with=None: calls.append(plan) or real(plan, describe_with=describe_with)
+        try:
+            res = mpr.tool_update_modpack_file(args_for(pack, new_dir("out")))
+        finally:
+            packs.write_pack = real
+    check("a real run calls write_pack once, never with overwrite, with the pack's overrides as a zip source",
+          res["ok"] and len(calls) == 1 and calls[0]["overwrite"] is False and calls[0]["overrides"]["kind"] == "zip"
+          and calls[0]["overrides"]["zip"] == pack and len(calls[0]["overrides"]["members"]) == 3, calls)
+
 # --- runner (keep BELOW every test: it reads globals() when it executes) ----
 
 if __name__ == "__main__":
