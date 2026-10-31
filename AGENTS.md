@@ -41,6 +41,13 @@ things that were already fixed once.
   `pack_instructions_ctx`, once by the tools blurb's playnite/spotify
   flags — and both times the symptom was silent: the prompt still worked,
   the cache just never hit. `tests/test_prompt_cache.py` guards it.
+- **Pokemon Showdown (`jarvis/showdown/`, `actions/showdown_tools.py`).** The battle loop lives in the
+  `showdown_tools-worker` daemon, never in an ask (a battle outlives MAX_TOOL_ROUNDS); the tools only relay one op
+  over the loopback socket. Text from the server about the OPPONENT is a stranger's: `protocol.py` drops chat/markup
+  lines, `battle.py` keys Pokemon by species (never nickname), and every name in a model prompt goes through
+  `data.clean`. The model only ever picks a candidate id the engine generated; it can never produce a choice string,
+  and `client.choose` sends only choices the engine lists as legal. `allowed_users` empty = every challenge is
+  rejected. `tests/test_showdown.py` guards all of it.
 - **Download Hub (`jarvis/hub/`, `actions/download_hub.py`).** An engine only returns an
   `Outcome`; the retry / stall / restart policy lives in `daemon._finish` and nowhere else. Every row
   write goes through `Store._update` (so it is sanitised and state changes are checked); a provider

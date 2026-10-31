@@ -26,6 +26,9 @@ instagram-private = ["instagrapi==3.0.25"]
 # actions/path_tools.py — delete_path sends to the Recycle Bin/Trash and refuses
 # (deleting nothing) when this isn't installed; there is no permanent delete.
 trash = ["send2trash>=1.8"]
+# jarvis/showdown/client.py — the Pokemon Showdown websocket transport. Imported only when the
+# worker connects; `showdown_connect` says to install it if it is missing.
+showdown = ["websocket-client>=1.6"]
 # jarvis-enhancement-plan.md §3.5 — pluggable voice backends. All opt-in;
 # none of these are in the base `dependencies` above. "voice-audio" is
 # needed by every voice command (record/play); the tts-*/stt-* extras are

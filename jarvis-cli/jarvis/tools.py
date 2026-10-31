@@ -677,6 +677,11 @@ TOOL_SCHEMAS = [*CORE_TOOL_SCHEMAS, *PLAYNITE_AND_SPOTIFY, *DISCOVERY_TOOL_SCHEM
 # own owner check (that is the real gate, and tests/test_send_dm.py pins it),
 # and TOOLS / tool_safety / confirmation are not involved at all.
 OWNER_ONLY_TOOLS = frozenset({
+    # Pokemon Showdown (actions/showdown_tools.py): they drive a logged-in game account on the
+    # owner's PC through the Showdown worker daemon (the handlers refuse a guest too).
+    "showdown_status", "showdown_connect", "showdown_disconnect", "showdown_challenge",
+    "showdown_ladder", "showdown_set_mode", "showdown_battle_state", "showdown_suggest",
+    "showdown_choose", "showdown_forfeit",
     "send_dm", "recent_dms",
     # Channel spaces S10c (actions/recent_spaces.py): reads what OTHER people said in
     # shared rooms (never a DM), so a guest is never offered it either.

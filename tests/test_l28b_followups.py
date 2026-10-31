@@ -228,11 +228,11 @@ def test_owner_only_set_is_exactly_what_the_handlers_gate():
     check("it is send_dm + recent_dms + recent_spaces (S10c) + the L.21-L.23 person tools + the Download Hub's "
           "add / dismiss / season / Stremio-library tools + torrent_files (N24) + the rest of the hub group except "
           "dl_list, dl_status and the status card (9B) + play_control (brief 31) + the three Steam tools (N22b/c) + "
-          "play_local, play_episode, stack_start, stack_stop, server_cache_clear (7A) + the two Minecraft lookups "
-          "+ the two OptiFine tools + download_mc_file, make_modpack_file and check_mc_updates "
-          "+ the twelve Updates-rework names (dl_updates_apply and the eleven pre-allocated to the other agents) "
           "+ the two file-host tools that contact a host from the owner's PC (hoster_resolve, hoster_doctor)",
-          system_tools.OWNER_ONLY_TOOLS == {
+          "play_local, play_episode, stack_start, stack_stop, server_cache_clear (7A) + the two Minecraft lookups "
+          "+ the two OptiFine tools + download_mc_file, make_modpack_file and check_mc_updates ",
+          "+ the twelve Updates-rework names (dl_updates_apply and the eleven pre-allocated to the other agents) "
+          "+ the ten Pokemon Showdown tools (actions/showdown_tools.py)",          system_tools.OWNER_ONLY_TOOLS == {
               "send_dm", "recent_dms", "recent_spaces", "person_remember", "person_forget",
               "person_instruct", "person_recall", "person_review", "await_reply",
               "dl_add", "dl_add_ytdlp", "dl_add_stremio", "dl_dismiss", "torrent_files",
@@ -244,7 +244,10 @@ def test_owner_only_set_is_exactly_what_the_handlers_gate():
               "play_local", "play_episode", "stack_start", "stack_stop", "server_cache_clear",
               "search_mc_mods", "get_mc_project", "list_optifine_versions", "download_optifine",
               "download_mc_file", "make_modpack_file", "check_mc_updates",
-              "dl_updates_apply", "hoster_resolve", "hoster_doctor"} | UPDATES_OTHER_AGENTS,
+              "dl_updates_apply", "hoster_resolve", "hoster_doctor"
+              "showdown_status", "showdown_connect", "showdown_disconnect", "showdown_challenge",
+              "showdown_ladder", "showdown_set_mode", "showdown_battle_state", "showdown_suggest",
+              "showdown_choose", "showdown_forfeit"} | UPDATES_OTHER_AGENTS,
           sorted(system_tools.OWNER_ONLY_TOOLS))
 
 
