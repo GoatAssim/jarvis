@@ -18,7 +18,11 @@
     exists, then the `.part` is removed); a finished file that took the name meanwhile, or a name
     another download has reserved, sends the download to the next free `name (n).ext`;
   * `stream_to_file` is the reusable part: the Stremio engine (phase 4) points it at the
-    server's `download=1` URL and adds its own registration and stats watchdog.
+    server's `download=1` URL and adds its own registration and stats watchdog.  The hosters engine
+    (hub/engines/hosters.py) points it at the file link a hoster resolver found and passes
+    `trusted_headers`: request headers a resolver learned for ONE attempt (a Cookie, a Referer).  They
+    are held in memory for that call, never written to the store, the row's events or a log; a
+    cross-host redirect still drops the Cookie and Authorization (`_DROP_ON_NEW_HOST`).
 
 SEGMENTED download (plan 7.2 "later option", phase 9) -- OPT IN, never the default:
   * on when `http.segments` (or the item's `options.segments`) is above 1, the file is at least
@@ -85,6 +89,26 @@ def clean_headers(raw):
     for key, value in raw.items():
         name = _SAFE_HEADERS.get(str(key).lower())
         if name and isinstance(value, str) and len(value) <= 2000 and "\r" not in value and "\n" not in value:
+            out[name] = value
+    return out
+
+
+# What a RESOLVER (not the owner, not a stored row) may ask this one request to carry: the allow-list above
+# plus Cookie.  A Cookie is a credential like Authorization, which is why it is only ever accepted through
+# `trusted_headers` (in memory, one call) and never from `item.options.headers`.
+_TRUSTED_HEADERS = dict(_SAFE_HEADERS, cookie="Cookie")
+MAX_TRUSTED_VALUE = 4000
+
+
+def clean_trusted_headers(raw):
+    """Like `clean_headers`, but a Cookie is allowed.  Single-line values only; anything else is dropped."""
+    out = {}
+    if not isinstance(raw, dict):
+        return out
+    for key, value in raw.items():
+        name = _TRUSTED_HEADERS.get(str(key).lower())
+        if (name and isinstance(value, str) and 0 < len(value) <= MAX_TRUSTED_VALUE
+                and "\r" not in value and "\n" not in value and "\x00" not in value):
             out[name] = value
     return out
 
@@ -235,16 +259,20 @@ def _fmt_size(n):
     return "%d B" % n
 
 
-def stream_to_file(ctx, item, url, headers=None, resolver=None, session=None, segments=1):
+def stream_to_file(ctx, item, url, headers=None, resolver=None, session=None, segments=1, trusted_headers=None):
     """Download `url` for `item`; returns an Outcome.  The reusable core of this engine.
 
     `segments` > 1 allows a segmented download (see the module docstring); the default, 1, is
     the single-connection download every caller got before, so existing callers (the Stremio
-    engine) are untouched."""
+    engine) are untouched.
+
+    `trusted_headers`: request headers a resolver found for this one attempt (see
+    `clean_trusted_headers`).  They are sent on the requests of this call, parts included, and kept nowhere:
+    not in the row, not in `source_ref`, not in an event."""
     mine = {}                                    # "part": the .part THIS call reserved, if it did
     out = None
     try:
-        out = _stream_to_file(ctx, item, url, headers, resolver, session, segments, mine)
+        out = _stream_to_file(ctx, item, url, headers, resolver, session, segments, mine, trusted_headers)
         return out
     finally:
         _drop_unused_reservation(ctx, mine, out)
@@ -269,7 +297,7 @@ def _drop_unused_reservation(ctx, mine, out):
     ctx.update(source_ref={})
 
 
-def _stream_to_file(ctx, item, url, headers, resolver, session, segments, mine):
+def _stream_to_file(ctx, item, url, headers, resolver, session, segments, mine, trusted_headers=None):
     import requests
 
     opts = item.get("options") or {}
@@ -299,6 +327,8 @@ def _stream_to_file(ctx, item, url, headers, resolver, session, segments, mine):
     req.update(clean_headers(headers if headers is not None else opts.get("headers")))
     if opts.get("referer"):      # brief 7C: the owner's own Referer for this download (dl_add_http); it wins over a headers one
         req.update(clean_headers({"referer": opts.get("referer")}))
+    if trusted_headers:          # a hoster resolver's own, for this attempt only (never stored)
+        req.update(clean_trusted_headers(trusted_headers))
     if offset > 0:
         req["Range"] = "bytes=%d-" % offset
         validator = ref.get("etag") or ref.get("last_modified")

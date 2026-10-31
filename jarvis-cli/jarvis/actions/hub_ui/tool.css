@@ -452,6 +452,11 @@ input[type=time], input[type=number] { width: auto; }
 .section.drop-before { box-shadow: 0 -2px 0 0 var(--h-acc); }
 .section.drop-after { box-shadow: 0 2px 0 0 var(--h-acc); }
 .section__grip { flex: none; color: var(--h-dimmer); font-size: 11px; margin-right: 2px; user-select: none; cursor: grab; }
+/* DH-B: where a section header sits in the list (look only; the start order is the \22EE\22EE grip and the arrows above).
+   The up / down buttons are .rbtn made small enough for a header line. */
+.section__look { display: flex; align-items: center; gap: 3px; flex: none; }
+.section__grip--look { margin: 0; font-size: 13px; line-height: 1; padding: 0 3px; }
+.rbtn.section__lookbtn { min-height: 20px; min-width: 22px; padding: 0 5px; font-size: 9px; letter-spacing: 0; }
 .picker { display: flex; flex-direction: column; gap: 8px; min-height: 0; flex: 1; }
 .picker[hidden] { display: none; }
 .picker__head { display: flex; align-items: center; gap: 8px; }

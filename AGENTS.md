@@ -67,6 +67,18 @@ things that were already fixed once.
   done-bytes, speed or ETA (speed_bps / eta_s are sent as None on purpose); "stalled" needs the manifest and every
   readable second signal flat for `STALL_SECONDS`, and an unreadable signal is "unavailable", never "flat".
   `steam-checks.py` keeps copies of `STALL_SECONDS` and `WRITES_MIN_BYTES_PER_S`.
+- **File-host links (`hub/hosters/`, `hub/engines/hosters.py`).** A hoster link is a PAGE address; a resolver turns
+  it into the real file address and the HTTP engine's `stream_to_file` does the transfer, so a resolver moves no bytes.
+  Rules that must keep holding: the row keeps the PAGE link as its `source` and the engine resolves AGAIN at every attempt
+  (a resolved link is signed and expires, so it is never stored); a resolver reaches the network only through
+  `ctx.fetch` (`hosters/fetch.py`: the SSRF guard on every hop, a body cap, no body read for a file) and never runs
+  page script or defeats a captcha (it raises `NeedsHuman`); retry policy lives in the engine's `_error_outcome`, never in
+  a resolver; a Cookie a resolver learned goes to `stream_to_file(trusted_headers=...)`, is held in memory for that one
+  attempt and is stored nowhere (`test_hub_hosters_core.py` searches the database files for it); `options.resolver`
+  names the resolver of a child row so a folder's children re-resolve without a host rule. Adding a host is one file
+  in `hub/hosters/` exporting `RESOLVER`, a fixture under `tests/fixtures/hosters/`, a fake route in
+  `tests/_hub_fake_hosters.py` and a test. The fixtures there are written from the plan's description, NOT recorded:
+  never describe a resolver as working until `hoster_doctor` has seen it work on the real site.
 - **The Stremio half of the hub (`hub/engines/stremio.py`, `hub/stremio/`, `actions/stremio_stack.py`,
   `stremio_open.py`, `play_media.py`).** The engine is the HTTP engine's `stream_to_file` plus
   registration (`POST /<hash>/create`, then poll `stats.json`: a torrent with no peers never answers

@@ -80,7 +80,7 @@ def preview(text, engine=None, store=None):
     store = _store(store)
     settings = store.get_settings()
     decision = router.route(text, engine=engine, settings=settings)
-    if decision["ok"] and decision["engine"] == "http":
+    if decision["ok"] and decision["engine"] in ("http", "hosters"):    # a hoster page link is a request too
         try:
             netguard.check_url(decision["source"], settings["allow_private_hosts"])
         except netguard.GuardError as exc:
@@ -1302,10 +1302,12 @@ def dismiss(*, id=None, finished=False, store=None):
     """Hide rows from the lists (`dl_dismiss`).  Nothing is deleted and no file is touched.
 
     `id`: one row.  `finished`: every row that can be dismissed (a provider row that is unknown or
-    finished, a hub download that was cancelled).  A hub download is hidden once it failed or was
-    cancelled; a running one is cancelled with dl_cancel and a finished one is removed from History.  A dismissed row stays hidden while
-    its provider keeps reporting it finished or unknown, and comes back when the provider reports it
-    live again."""
+    finished, a hub download that is done or was cancelled; a failed hub download only one by one,
+    it may want a Retry).  A hub download is hidden once it is done, has failed or was cancelled; a
+    running one is cancelled with dl_cancel first.  A hidden hub download stays in History (the
+    History tab reads it with `include_dismissed`) and in the panel's "Show hidden" list.  A dismissed
+    row stays hidden while its provider keeps reporting it finished or unknown, and comes back when
+    it is reported live again (a hub download comes back when it is queued again, e.g. by Retry)."""
     try:
         store = _store(store)
         row_id = str(id or "").strip()
@@ -1314,24 +1316,25 @@ def dismiss(*, id=None, finished=False, store=None):
         if not row_id and not finished:
             return _err("say which row: an id, or finished: true to clear everything that can be dismissed")
         note = "hidden from the lists; no file was touched"
+        hub_dismissable = ("done", "failed", "cancelled")     # a hub download that ended (a finished one may be hidden too)
         if finished:
             rows = store.list_items(owner="provider", states_in=states.DISMISSABLE_STATES, limit=2000)
-            rows += store.list_items(owner="hub", states_in=("cancelled",), limit=2000)     # ones the owner abandoned
-            done = store.dismiss_items([r["id"] for r in rows])
+            rows += store.list_items(owner="hub", states_in=("cancelled", "done"), limit=2000)   # ones the owner abandoned or already has
+            done = store.dismiss_items([r["id"] for r in rows], hub_states=("done",))
             return {"ok": True, "dismissed": done, "count": len(done),
                     "note": note if done else "nothing to clear"}
         item = store.get_item(row_id)
         if not item:
             return _err("no such download")
-        if item["owner"] == "hub" and not states.is_dismissable("hub", item["state"]):
-            return _err("a hub download is hidden once it has failed or been cancelled: cancel it with dl_cancel first "
-                        "(a finished one is removed from History in the Downloads panel)")
+        if item["owner"] == "hub" and item["state"] not in hub_dismissable:
+            return _err("a hub download is hidden once it has finished, failed or been cancelled: cancel it with dl_cancel first "
+                        "(a running or waiting one cannot be hidden)")
         if item["state"] not in states.DISMISSABLE_STATES:
             why = "it is still running" if item["state"] in states.ACTIVE_STATES else "it hasn't finished"
             return _err("%s (%s); only a row that is unknown or finished can be dismissed" % (why, item["state"]))
         if item.get("dismissed_at") is not None:
             return {"ok": True, "dismissed": [], "count": 0, "note": "it was already hidden"}
-        done = store.dismiss_items([item["id"]])
+        done = store.dismiss_items([item["id"]], hub_states=("done",))
         if not done:
             return _err("its state just changed; look at it again")
         return {"ok": True, "dismissed": done, "count": len(done), "note": note}

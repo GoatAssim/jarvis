@@ -1133,6 +1133,7 @@ ENGINE_HANDLES = {
     "ytdlp": "YouTube and other video sites",
     "stremio": "magnets, torrent files and Stremio streams",
     "qbittorrent": "magnets, when you ask for it",
+    "hosters": "file-host links (MediaFire, Google Drive, Buzzheavier ...)",
 }
 # The file an engine is set up in, when it has no settings page.  A path in words, never its contents.
 ENGINE_CONFIG_FILES = {"qbittorrent": "~/.jarvis/qbittorrent.json"}

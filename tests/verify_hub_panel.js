@@ -531,7 +531,7 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   check("a paused row has a pause glyph and a dimmed bar", /tone === "paused"\) meta\.push\(el\("span", \{ cls: "pglyph"/.test(source) && /\.bar-track\.paused \{ opacity/.test(css));
   check("the card shows the explanation line only where controlNote says so", /why && why\.card \? el\("div", \{ cls: "row__why"/.test(source) && /\.row__why \{/.test(css));
   check("runAction shows the notice, and the open-folder button shows it too", /const n = controlNotice\(r, Object\.assign\(\{\}, action, \{ doing: doing \}\)\);\s*if \(n\) toast\(n\.msg, n\.level\);/.test(source) && /controlNotice\(await callTool\("dl_open", \{ id: row\.id, action: "folder" \}\)\)/.test(source));
-  check("a pressed Pause / Resume / Retry says what is happening at once, and it is cleared on failure or when the state moves on", /S\.acting\[row\.id\] = \{ from: row\.state, doing: doing/.test(source) && /if \(r\.declined \|\| r\.ok === false\) delete S\.acting\[row\.id\]/.test(source) && /row\.state !== a\.from/.test(source) && /S\.acting\]\)\) return;|S\.acting\]\)/.test(source));
+  check("a pressed Pause / Resume / Retry says what is happening at once, and it is cleared on failure or when the state moves on", /S\.acting\[row\.id\] = \{ from: row\.state, doing: doing/.test(source) && /if \(r\.declined \|\| r\.ok === false\) delete S\.acting\[row\.id\]/.test(source) && /row\.state !== a\.from/.test(source) && /S\.acting\]\)\) return;|S\.acting(, S\.sectionOrder)?\]\)/.test(source));
   check("the pending word shows on the toggle too (the hub's own request), and the button is disabled while busy", /busy \|\| prim\.label/.test(source) && /attrs\.disabled = "disabled"/.test(source) && /busyWord\(row\) \{[^}]*pendingWord\(row\.pending\)/.test(source.replace(/\n/g, " ")));
   check("the toggle is built with el() and textContent only (no HTML from data)", !/innerHTML|insertAdjacentHTML/.test(source.slice(source.indexOf("function toggleButton"), source.indexOf("function renderBar"))));
 
@@ -540,9 +540,9 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   check("a provider row can be dismissed when it is unknown or in a final state, and in no other",
     ["done", "failed", "cancelled", "unknown"].every((st) => pure.canDismiss(prow({ state: st })))
     && ["queued", "probing", "connecting", "downloading", "postprocessing", "paused", "stalled"].every((st) => !pure.canDismiss(prow({ state: st }))));
-  check("a hub row is dismissable once it failed or was cancelled, never while running or when finished (History holds those)",
+  check("a hub row is dismissable once it is done, failed or was cancelled (DH-B), never while running or waiting",
     pure.canDismiss(row({ state: "failed", owner: "hub" })) && pure.canDismiss(row({ state: "cancelled", owner: "hub" }))
-    && !pure.canDismiss(row({ state: "done" })) && !pure.canDismiss(row({ state: "downloading", owner: "hub" })) && !pure.canDismiss(row({ state: "paused", owner: "hub" })));
+    && pure.canDismiss(row({ state: "done" })) && !pure.canDismiss(row({ state: "downloading", owner: "hub" })) && !pure.canDismiss(row({ state: "paused", owner: "hub" })));
 check("Clear finished takes cancelled hub rows but leaves failed ones (they may want a Retry)",
     pure.dismissableRows([row({ id: "c", state: "cancelled", owner: "hub" }), row({ id: "f", state: "failed", owner: "hub" })]).map((r) => r.id).join() === "c");
   check("the row's own state decides: no capability named dismiss is read or invented",
@@ -552,8 +552,8 @@ check("Clear finished takes cancelled hub rows but leaves failed ones (they may 
   check("a hidden row is dimmed (and offers Show again) until it is listed again; it can't be dismissed twice",
     pure.isHidden(hid) && pure.isDimmed(hid, {}) && !pure.canDismiss(hid, {}) && !pure.isDimmed(hid, { "steam:2": true }) && pure.canDismiss(hid, { "steam:2": true }) && !pure.isHidden(prow({})));
   const live = [prow({ id: "steam:1" }), prow({ id: "steam:3", state: "downloading" }), row({ id: "h_1", state: "done" })];
-  check("Clear finished counts the shown dismissable provider rows only (not running, not hub, not hidden)",
-    eq(pure.dismissableRows(live.concat([hid]), {}).map((r) => r.id), ["steam:1"]));
+  check("Clear finished counts the shown dismissable provider rows and done hub rows only (not running, not hidden) (DH-B)",
+    eq(pure.dismissableRows(live.concat([hid]), {}).map((r) => r.id), ["steam:1", "h_1"]));
   const hidden = [hid, prow({ id: "steam:1", dismissed_at: 5 }), prow({ id: "steam:9" })];
   check("Show hidden off lists only the live rows", eq(pure.mergeHidden(live, hidden, false, {}).map((r) => r.id), ["steam:1", "steam:3", "h_1"]));
   check("Show hidden on adds the hidden rows (a row the hub shows again wins; a row without dismissed_at is not added)",
@@ -599,7 +599,7 @@ check("Clear finished takes cancelled hub rows but leaves failed ones (they may 
     /function toggleSection\(key\)/.test(source) && /"aria-expanded": open \? "true" : "false"/.test(source) && /collapsed: Object\.keys\(S\.collapsed\)/.test(source)
     && /p\.collapsed\.slice\(0, 200\)/.test(source) && /shownRows\(rows\)\.map\(\(r\) => r\.id\)/.test(source)
     && /id="collapseAll"/.test(fs.readFileSync(path.join(ui, "tool.html"), "utf8")) && /\.section__toggle \{/.test(css));
-  check("the list's signature includes what Show hidden and Show again change", /\[rows, S\.selected, S\.groupBy, S\.live, S\.revealed, S\.showHidden, S\.collapsed, S\.acting\]/.test(source));
+  check("the list's signature includes what Show hidden and Show again change", /\[rows, S\.selected, S\.groupBy, S\.live, S\.revealed, S\.showHidden, S\.collapsed, S\.acting(, S\.sectionOrder)?\]/.test(source));
 
   // ---- brief 19 step 4: a running Steam row's note on the card
   const steamNote = "30.6 % of 2.1 GB, reported 20 s ago; Steam isn't reporting live progress";

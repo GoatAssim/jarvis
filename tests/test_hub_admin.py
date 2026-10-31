@@ -316,8 +316,8 @@ def test_dismiss_op():
     check("a row that hasn't finished is refused (paused, queued)", pau["ok"] is False and que["ok"] is False
           and "hasn't finished" in pau["error"] and "hasn't finished" in que["error"])
     hub = hub_admin.admin("dismiss", {"id": hub_done["id"]}, store=st)
-    check("a hub row is refused, even a finished one, and points to dl_cancel and History",
-          hub["ok"] is False and "dl_cancel" in hub["error"] and "History" in hub["error"] and st.get_item(hub_done["id"])["dismissed_at"] is None)
+    check("a finished hub row is hidden now (DH-B), with the hub's own answer, and its row is kept",
+          hub["ok"] is True and hub["dismissed"] == [hub_done["id"]] and st.get_item(hub_done["id"])["dismissed_at"] is not None)
     check("an unknown id is a refusal, not a crash", hub_admin.admin("dismiss", {"id": "steam:nope"}, store=st)["ok"] is False)
     check("a malformed id is refused before it reaches the hub", hub_admin.admin("dismiss", {"id": "a b/../c"}, store=st)["ok"] is False)
     check("neither an id nor finished is a refusal", hub_admin.admin("dismiss", {}, store=st)["ok"] is False)
@@ -327,8 +327,8 @@ def test_dismiss_op():
     allrows = hub_admin.admin("dismiss", {"finished": True}, store=st)
     check("Clear finished hides every unknown or finished provider row that is still shown",
           allrows["ok"] and sorted(allrows["dismissed"]) == ["steam:can", "steam:fail", "steam:unk"] and allrows["count"] == 3)
-    check("... and nothing else: running, paused, queued and the hub row stay",
-          all(st.get_item(i)["dismissed_at"] is None for i in ("steam:run", "steam:pau", "steam:que", hub_done["id"])))
+    check("... and nothing else: running, paused and queued provider rows stay",
+          all(st.get_item(i)["dismissed_at"] is None for i in ("steam:run", "steam:pau", "steam:que")))
     check("clearing again says there is nothing to clear", hub_admin.admin("dismiss", {"finished": True}, store=st)["note"] == "nothing to clear")
     check("no file was touched by any of it", keep.exists() and keep.read_bytes() == b"x")
     # the answer is service.dismiss's, unchanged

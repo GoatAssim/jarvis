@@ -49,6 +49,7 @@ Every cell comes from a report or result file. **Nothing in this table is "works
 | Capability | How sure | What the evidence is, and its limits |
 |---|---|---|
 | **HTTP file** (direct link) | Tested against a fake | Local test servers on loopback with real sockets, including a real daemon process killed mid-file that then resumes (`tests/test_hub_http_engine.py`, `test_hub_daemon_process.py`). No report records a download from a real website. Parallel parts (`http.segments`) are tested the same way and are off by default. |
+| **File-host links** (MediaFire, Google Drive files, Buzzheavier) | Tested against a fake | A local fake server that behaves the way the link-resolver plan *describes* each site, with HTML fixtures written from that description, **not recorded from the real sites** (`tests/test_hub_hosters_*.py`, `tests/fixtures/hosters/README.md`). It shows the code does what the plan says; it cannot show the sites still behave that way. Never run against a real site. `hoster_doctor` is the check on a PC with network and a harmless test link. |
 | **yt-dlp** (video and audio sites) | Tested against a fake | A fake worker process, and a real yt-dlp + ffmpeg layer against a local server that skips itself when either is missing (`tests/test_hub_ytdlp_level_b.py`). Not tried on YouTube, HLS or DASH. The reports disagree about the real yt-dlp layer, see below. |
 | yt-dlp **playlists as a group** | Tested against a fake | `dl_add_ytdlp` has `playlist` (`one` or `all`) and `generic` in 182 (read); a playlist link asks, `all` queues one group of at most 50. Fake yt-dlp helper only (`tests/test_hub_ytdlp_playlists.py`, `test_hub_ytdlp_hook.py`). Never tried on YouTube. |
 | yt-dlp **generic extractor** | Written, not run | Switched off in code (`GENERIC_ENABLED = False` in `hub/engines/ytdlp.py`). |
@@ -303,6 +304,16 @@ These are the keys the hub reports as writable (`hub_admin.py`, `settings` op: `
 - **Checksum (`verify`).** A caller may queue a link with the item option `verify = {"algo": "sha1" | "sha256" | "sha512", "value": "<hex>", "size": <bytes, optional>}` (the Minecraft tools use it). Only the `http` engine honours it: it hashes the finished `.part`, and a mismatch fails the row without retry and deletes only that row's own file; `size` is a ceiling (a response announcing more than it, give or take 4 KB, is refused, and so is a stream that runs past it). If another engine takes the link the option is not stored, the add still succeeds, and the add result's `note` says `verify` was ignored; a link already queued keeps the options it was queued with (the note says so). **A caller that needs integrity must read that `note` before it says "checked".**
 - **Limits:** tested only against local servers.
 
+### File hosts (MediaFire, Google Drive files, Buzzheavier)
+- **Needs:** nothing installed. `dl_add` already sends these links here (the router rule has priority 60); `dl_add_hoster` forces it.
+- **How it works:** the row keeps the host's *page* link. Every attempt (first run, retry, resume, restart) a resolver (`hub/hosters/<host>.py`) asks the host for the real file link, and the HTTP engine does the transfer (pause, resume, progress, the SSRF guard, safe names). The resolved link is signed and expires, which is why it is never stored. If the file server refuses a fresh link (HTTP 401, 403 or 410) the attempt is retried so the next one asks again (`hosters.max_retries`, default 4).
+- **MediaFire:** reads the download button on the page and sends the page as Referer. **Google Drive:** `drive.usercontent.google.com/download`, answering the "virus scan warning" form when Google shows one; "too many users viewed or downloaded" is waited out (an hour), nothing evades it. **Buzzheavier (and bzzhr, fuckingfast):** `GET <page>/download`, the file link is in the `hx-redirect` header.
+- **Cannot (yet):** folders (MediaFire folders and Drive folders are refused by name, no method is guessed), captchas (a host that needs one will say "Needs you" with the page to open), MEGA, Gofile, 1fichier and the rest of the plan's hosts.
+- **Owner's controls:** `hosters.enabled.<id>` (switch one off; its links then go to the HTTP engine), `hosters.extra_hosts` (a host that moved to a new domain), `hosters.canary` (a harmless test link per host for `hoster_doctor`), `hosters.user_agent`, `concurrency.hosters`. The last two of the first group and `hosters.user_agent` go through `dl_settings` (asks first).
+- **Tools:** `hoster_resolve` says what a link would do and, by asking the host, the file name, size and any wait (it never prints the file address, which carries a token); `hoster_doctor` resolves each canary link and records what it saw as that resolver's health.
+- **Safety:** a Cookie a resolver learned is sent on that one attempt only and is stored nowhere (`trusted_headers`); a redirect to another host drops it. A resolved link to a private address is refused like any link. Page text is data, never run.
+- **Limits:** tested only against a fake that follows the plan's description. The plan itself is a desk study; its own table says which parts are confirmed and which are guesses.
+
 ### Video sites (yt-dlp)
 - **Needs:** the `yt_dlp` Python package and `ffmpeg` on PATH. Without them the hub says "yt-dlp isn't installed" or "ffmpeg isn't installed or not on PATH".
 - **Can:** YouTube and sites with their own yt-dlp extractor, with quality, container, audio-only, subtitles, thumbnail, chapters and SponsorBlock options; live percent, speed and time left; merging shown as a labelled phase; pause that keeps the partial file; cancel that leaves no half-written final file. It runs the same code as `ytdl_download`.
@@ -402,7 +413,8 @@ pip install psutil
 | `hub/service.py` | What tools, the panel and the CLI call: add, control, list, dismiss, open. Dicts in, dicts out. |
 | `hub/daemon.py` | The long-lived process: scheduler, one worker thread per running row, the retry policy (in `_finish`), housekeeping. |
 | `hub/router.py` | "Which engine takes this input?" Engines declare their own rules. |
-| `hub/engines/` | One module per engine, discovered by name: `http.py`, `ytdlp.py`, `stremio.py`, `qbittorrent.py` (`base.py` is the contract; names starting with `_` are helpers). |
+| `hub/engines/` | One module per engine, discovered by name: `http.py`, `ytdlp.py`, `stremio.py`, `qbittorrent.py`, `hosters.py` (`base.py` is the contract; names starting with `_` are helpers). |
+| `hub/hosters/` | File-host resolvers, discovered like engines: `base.py` (the contract and its exceptions), `fetch.py` (the SSRF-guarded fetcher), one module per host (`mediafire.py`, `gdrive.py`, `buzzheavier.py`). A resolver turns a page link into a file link; it moves no bytes. |
 | `hub/providers.py` | Registering and polling providers (`TOOL_DOWNLOADS`, Steam, Playnite). |
 | `hub/steam.py`, `hub/playnite_provider.py`, `hub/demo.py`, `hub/legacy.py` | The built-in providers. `hub/steam.py` starts nothing; the Steam launcher is in `actions/steam_tools.py`. |
 | `hub/updates.py`, `hub/updates_admin.py` | N23: the stored update findings, the runner thread inside the daemon (`UpdateRunner`), the admin ops `updates`, `updates_check`, `updates_dismiss`. |
@@ -445,7 +457,7 @@ Dismissable rows are provider rows that are `done`, `failed`, `cancelled` or `un
 ### Adding a new source
 
 **An engine (the hub does the transfer):**
-1. Create `hub/engines/<name>.py` exporting `ENGINE` (a subclass of `engines.base.Engine` with `name`, `label`, `available()` returning `(ok, reason)`, and `run(item, ctx)`) and `ROUTE_RULES = [RouteRule("<name>", priority, match)]`. The loader imports every module there; one that fails to import is recorded in `engines.LOAD_ERRORS` and shown by `hub_doctor`, and never takes the hub down. Priorities in use: qBittorrent explicit 1, HTTP 10, yt-dlp sites 40, Stremio 50, yt-dlp YouTube 70, qBittorrent preferred 500.
+1. Create `hub/engines/<name>.py` exporting `ENGINE` (a subclass of `engines.base.Engine` with `name`, `label`, `available()` returning `(ok, reason)`, and `run(item, ctx)`) and `ROUTE_RULES = [RouteRule("<name>", priority, match)]`. The loader imports every module there; one that fails to import is recorded in `engines.LOAD_ERRORS` and shown by `hub_doctor`, and never takes the hub down. Priorities in use: qBittorrent explicit 1, HTTP 10, yt-dlp sites 40, Stremio 50, hosters 60, yt-dlp YouTube 70, qBittorrent preferred 500.
 2. **Never add an engine-specific argument to `dl_add`.** Put the source's options in its own `dl_add_<source>` tool (see `dl_add_ytdlp` and `dl_add_stremio` in `actions/download_hub.py`), or in a setting reached through `dl_prefs`.
 3. Register the tool in its `actions/` file: `TOOL_SCHEMAS`, `TOOLS`, `TOOL_GROUP`, `TOOL_KEYWORDS`, `TOOL_CONFIRM_REQUIRED` for anything that deletes or runs something unseen, `TOOL_COMMANDS` if you want a palette command, and a `TEST_CHECKLIST` entry (every tool needs one; the app's Test Checklist lists them). A tool group has **one** pack instruction (`TOOL_PACK_INSTRUCTION`), so add your sentences to the existing text and keep its length under the limit its test pins. Add the tool name to `OWNER_ONLY_TOOLS` in `tools.py` and refuse guests in the handler.
 4. A new setting goes in `hub/settings.py` as a default, a validator and a `PREFS_WRITABLE` / `WRITABLE` entry, never changing an existing default or range; it needs a test.
@@ -469,6 +481,7 @@ node tests/verify_hub_panel.js
 | Daemon | `test_hub_daemon.py`, `test_hub_daemon_process.py` (a real daemon process, killed and resumed) |
 | Add tools and router | `test_hub_add_tools.py`, `test_router_*.py`, `test_hub_commands.py` |
 | HTTP | `test_hub_http_engine.py`, `test_hub_http_segments.py` |
+| File hosts | `test_hub_hosters_core.py` (registry, routing, the fetcher, `trusted_headers`, every outcome, groups, settings), `test_hub_hosters_mediafire.py`, `test_hub_hosters_gdrive.py`, `test_hub_hosters_buzzheavier.py`, `test_hub_hosters_tools.py` |
 | yt-dlp | `test_hub_ytdlp.py`, `test_hub_ytdlp_level_b.py`, `test_hub_ytdlp_parity.py` (needs yt-dlp), `test_hub_ytdlp_playlists.py` |
 | qBittorrent | `test_hub_qbittorrent_engine.py` |
 | Stremio | `test_hub_stremio_engine.py`, `test_hub_stremio_links.py`, `test_hub_stremio_tools.py`, `test_hub_stremio_detect.py`, `test_hub_stremio_torrentfile.py`, `test_hub_stremio_mpv.py`, `test_hub_stremio_pack_instruction.py`, `test_hub_stremio_discovery.py`, `test_hub_stremio_ranking.py`, `test_hub_stremio_real_cinemeta.py`, `test_hub_bulk.py` |
@@ -478,7 +491,7 @@ node tests/verify_hub_panel.js
 | Guest gates and pack text | `test_hub_guest_gates.py`, `test_hub_control_gates.py` (every hub tool's handler against a simulated guest), `test_hub_updates_gates.py`, `test_hub_play_gates.py`, `test_hub_play_stack_gates.py`, `test_channels_pack_instruction.py`, `test_l28b_followups.py` (the exact owner-only set) |
 | Panel and Settings pages (Node) | `verify_hub_panel.js`, `verify_hub_settings.js`, `verify_hub_add_form.js`, `verify_path_picker.js`, `verify_hub_browse_routes.js` |
 
-Test helpers (not tests): `_hub_testserver.py`, `_hub_fake_stremio.py`, `_hub_fake_addon.py`, `_hub_fake_qbittorrent.py`, `_hub_ytdlp_media.py`.
+Test helpers (not tests): `_hub_testserver.py`, `_hub_fake_stremio.py`, `_hub_fake_addon.py`, `_hub_fake_qbittorrent.py`, `_hub_ytdlp_media.py`, `_hub_fake_hosters.py` and `_hub_hoster_env.py` (the file hosts; the HTML it serves is in `tests/fixtures/hosters/`, written from the plan, not recorded).
 
 ### The shared files, and why
 
@@ -520,6 +533,8 @@ Several pieces of work touch the same files, so each change to one must be small
 | A real run of the N22 pieces (browser downloads, Steam install / library / update, the `stremio.json` repair) | Built in the code, none tried on a real PC; your four decisions N22 a to d: not re-read. |
 | Whether Stremio's server fetches only the files you chose from a torrent (N24) | The four experiments in `OWNER_TODO.md`; never measured. |
 | `dl_add_http` with a `headers` argument | Decided against: a `referer` only, so no secret is stored. |
+| The rest of the link-resolver plan: Gofile, Mixdrop/Streamtape/Doodstream, 1fichier, the XFileSharing hosts, MultiUp, MEGA, the browser hand-off for captchas, per-host concurrency (`concurrency.hoster_<id>`), `prefer_hosts`, MediaFire and Drive folders | Phases 2 to 7 of `Link_Resolver_for_the_Jarvis_Download_Hub.md`; its section 7 lists the decisions needed first (browser pop-up, MEGA backend, Gofile, free MEGA account). Phase 0 and 1 are built. |
+| A real run of any file-host resolver | The fixtures are written from the plan, not recorded. Set `hosters.canary` to a harmless file link per host and run `hoster_doctor`. |
 | Playnite name and cover lookup for Steam rows; a per-provider notification switch | Not scheduled. |
 | A real run of the qBittorrent engine | The settings block and `concurrency.qbittorrent` exist (brief 31); the engine has never run against a real qBittorrent. Decision 11 (the engine's shape, including its cancel behaviour) is still waiting for your confirmation. |
 | A way to un-hide a dismissed row for good, and remembering Show hidden | Not scheduled. |

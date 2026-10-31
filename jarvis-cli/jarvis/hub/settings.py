@@ -22,6 +22,7 @@ import copy
 import datetime
 import re
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from . import naming, paths
 
@@ -34,7 +35,7 @@ UPDATES_AUTO_MAX_DEFAULT = 10
 
 DEFAULTS = {
     "library_root": "",          # "" = paths.default_library_root()
-    "concurrency": {"total": 4, "http": 3, "ytdlp": 2, "stremio": 3, "qbittorrent": 2},
+    "concurrency": {"total": 4, "http": 3, "ytdlp": 2, "stremio": 3, "qbittorrent": 2, "hosters": 3},
     "rate_limit_kbps": 0,        # 0 = unlimited; shared across running hub downloads
     # Speed windows: [{"days": "all", "from": "01:00", "to": "07:00", "rate_limit_kbps": 0}].
     # Inside a window its limit replaces `rate_limit_kbps` (0 there = unlimited); first match wins.
@@ -52,6 +53,11 @@ DEFAULTS = {
     # segment_min_bytes big whose server supports Range.  A download can override it (options.segments).
     "http": {"stall_seconds": 60, "max_retries": 3, "connect_timeout": 15,
              "segments": 1, "segment_min_bytes": 32 * 1024 * 1024},
+    # File-host links (hub/hosters, link-resolver plan).  enabled: {resolver id: false} switches one resolver off
+    # (absent = on).  extra_hosts: {resolver id: [host, ...]} teaches a resolver a host that moved to a new domain.
+    # canary: {resolver id: a known-good harmless link} for hoster_doctor.  health: what hoster_doctor last found;
+    # written by the hub only, never by a tool.
+    "hosters": {"enabled": {}, "max_retries": 4, "user_agent": "", "extra_hosts": {}, "canary": {}, "health": {}},
     "stremio": {"mode": "save", "stall_seconds": 90, "max_retries": 3, "start_wait_seconds": 60,   # phase 4 
     "metadata_timeout": 90},      # seconds to wait for a torrent's file list (no peers = no list)
     # qBittorrent engine (brief 31, decision 11).  Only its BEHAVIOUR lives here; the connection (address,
@@ -134,6 +140,7 @@ QBITTORRENT_AFTER_DONE = ("keep", "pause", "remove")
 PREFS_WRITABLE = {
     "rate_limit_kbps", "schedule",
     "concurrency.total", "concurrency.http", "concurrency.ytdlp", "concurrency.stremio", "concurrency.qbittorrent",
+    "concurrency.hosters", "hosters.max_retries", "hosters.enabled.*",
     "http.stall_seconds", "http.max_retries", "http.segments", "http.segment_min_bytes",
     "stremio.stall_seconds", "stremio.max_retries", "stremio.metadata_timeout", "stremio.start_wait_seconds",
     "after_download.open",
@@ -146,7 +153,8 @@ PREFS_WRITABLE = {
 
 # Behaviour that deletes data or moves files, or changes which torrents count as the hub's own, goes
 # through dl_settings (which asks first), like library_root.
-WRITABLE = PREFS_WRITABLE | {"library_root", "allow_private_hosts"} \
+WRITABLE = PREFS_WRITABLE | {"library_root", "allow_private_hosts",
+                             "hosters.user_agent", "hosters.extra_hosts", "hosters.canary"} \
     | {"qbittorrent." + k for k in QBITTORRENT_CONFIRM} \
     | {"retention.keep_history_days"}       # brief 7C: deletes History rows, so dl_settings (asks first), never dl_prefs
 
@@ -684,6 +692,85 @@ def notify_provider_key(key):
     return pid if re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,39}", pid) else None
 
 
+HOSTER_ENABLED_KEY = re.compile(r"hosters\.enabled\.([a-z0-9]{2,24})")
+_HOSTNAME = re.compile(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*")
+
+
+def hoster_enabled_key(key):
+    """The resolver id in a `hosters.enabled.<id>` key, or None."""
+    m = HOSTER_ENABLED_KEY.fullmatch(key) if isinstance(key, str) else None
+    return m.group(1) if m else None
+
+
+def _known_hoster_ids():
+    """The installed resolvers' ids, or None when the package can't load (then only the id's shape is checked)."""
+    try:
+        from . import hosters
+        return hosters.ids()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _check_hoster_id(rid, label):
+    if not isinstance(rid, str) or not re.fullmatch(r"[a-z0-9]{2,24}", rid):
+        return "%s: %r isn't a file-host id" % (label, str(rid)[:30])
+    known = _known_hoster_ids()
+    if known is not None and rid not in known:
+        return "%s: unknown file host %r (known: %s)" % (label, rid, ", ".join(known) or "none")
+    return None
+
+
+def _check_hosters_user_agent(value):
+    text = str(value or "").strip()
+    if len(text) > 300 or any(ord(c) < 32 or ord(c) == 127 for c in text):
+        return None, "hosters.user_agent must be one line of at most 300 characters"
+    return text, None
+
+
+def _check_hosters_extra_hosts(value):
+    if not isinstance(value, dict):
+        return None, "hosters.extra_hosts must be a map of file-host id to a list of host names"
+    out = {}
+    for rid, hosts in value.items():
+        problem = _check_hoster_id(rid, "hosters.extra_hosts")
+        if problem:
+            return None, problem
+        if isinstance(hosts, str):
+            hosts = [hosts]
+        if not isinstance(hosts, (list, tuple)) or len(hosts) > 20:
+            return None, "hosters.extra_hosts.%s must be a list of at most 20 host names" % rid
+        clean = []
+        for host in hosts:
+            name = str(host or "").strip().lower().rstrip(".")
+            if not name or len(name) > 253 or not _HOSTNAME.fullmatch(name):
+                return None, "hosters.extra_hosts.%s: %r isn't a host name (no scheme, port or path)" % (rid, str(host)[:40])
+            if name not in clean:
+                clean.append(name)
+        if clean:
+            out[rid] = clean
+    return out, None
+
+
+def _check_hosters_canary(value):
+    if not isinstance(value, dict):
+        return None, "hosters.canary must be a map of file-host id to a link"
+    out = {}
+    for rid, link in value.items():
+        problem = _check_hoster_id(rid, "hosters.canary")
+        if problem:
+            return None, problem
+        text = str(link or "").strip()
+        try:
+            parts = urlsplit(text)
+        except ValueError:
+            return None, "hosters.canary.%s isn't a link" % rid
+        if (not text or len(text) > 2000 or re.search(r"\s", text) or parts.scheme.lower() not in ("http", "https")
+                or not parts.hostname or parts.username or parts.password):
+            return None, "hosters.canary.%s must be one http(s) link with no spaces and no user name or password" % rid
+        out[rid] = text
+    return out, None
+
+
 def qbittorrent_view(settings):
     """The `qbittorrent` block as an answer: the known behaviour keys only, whatever else is stored.
     The engine's connection details (and the password) are not settings and never pass through here."""
@@ -702,6 +789,11 @@ _CHECKS = {
     "concurrency.ytdlp": lambda v: _int_in(v, 1, 16, "concurrency.ytdlp"),
     "concurrency.stremio": lambda v: _int_in(v, 1, 16, "concurrency.stremio"),
     "concurrency.qbittorrent": lambda v: _int_in(v, 1, 16, "concurrency.qbittorrent"),
+    "concurrency.hosters": lambda v: _int_in(v, 1, 16, "concurrency.hosters"),
+    "hosters.max_retries": lambda v: _int_in(v, 0, 10, "hosters.max_retries"),
+    "hosters.user_agent": _check_hosters_user_agent,
+    "hosters.extra_hosts": _check_hosters_extra_hosts,
+    "hosters.canary": _check_hosters_canary,
     "qbittorrent.prefer_for_magnets": _bool("qbittorrent.prefer_for_magnets"),
     "qbittorrent.cancel_deletes_data": _bool("qbittorrent.cancel_deletes_data"),
     "qbittorrent.after_done": _check_qb_after_done,
@@ -757,6 +849,18 @@ def validate_update(updates, allowed=None):
         if pid is not None and key not in allowed and "notify.providers" in allowed:
             # any provider id has its own notification switch, not only the two built in
             checked, err = _bool(key)(value)
+            if err:
+                errors.append(err)
+            else:
+                clean[key] = checked
+            continue
+        if key == "hosters.enabled.*":        # the tier marker, not a setting
+            errors.append("%r isn't a setting: use hosters.enabled.<file host id>" % key)
+            continue
+        hid = hoster_enabled_key(key)
+        if hid is not None and "hosters.enabled.*" in allowed:
+            problem = _check_hoster_id(hid, key)
+            checked, err = (None, problem) if problem else _bool(key)(value)
             if err:
                 errors.append(err)
             else:

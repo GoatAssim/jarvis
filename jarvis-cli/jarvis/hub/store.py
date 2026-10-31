@@ -865,22 +865,28 @@ class Store:
             conn.execute("DELETE FROM notices WHERE item_id IN (%s)" % marks, ids)
             return conn.execute("DELETE FROM items WHERE id IN (%s)" % marks, ids).rowcount
 
-    def dismiss_items(self, ids, now=None):
+    def dismiss_items(self, ids, now=None, hub_states=()):
         """Hide provider rows that are `unknown` or finished.  Returns the ids actually hidden.
 
-        The rule lives here as well as in the service, so no caller can hide a hub row or a row that
-        is still running.  Nothing is deleted: the row stays in the database (a later report from the
-        provider may bring it back, see `_update`), and no file is touched.  A row already hidden
-        is not counted again."""
+        The rule lives here as well as in the service, so no caller can hide a row that is still
+        running, nor a hub row that is not over.  A hub row can be hidden once it failed or was
+        cancelled; `hub_states` (optional, e.g. `("done",)`) names more FINAL states of a hub row
+        the caller may hide too (the service passes "done": a finished download may leave the
+        Downloads list).  A state that is not final is ignored there.  Nothing is deleted: the row
+        stays in the database (a later report from the provider may bring it back, see `_update`),
+        and no file is touched.  A row already hidden is not counted again."""
         ids = [i for i in dict.fromkeys(ids or []) if i]
         if not ids:
             return []
+        extra = tuple(s for s in (hub_states or ()) if s in states.FINAL_STATES)
         now = self.now() if now is None else now
         done = []
         with self._write() as conn:
             for item_id in ids:
                 row = conn.execute("SELECT id, owner, state, dismissed_at FROM items WHERE id=?", (item_id,)).fetchone()
-                if row is None or row["dismissed_at"] is not None or not states.is_dismissable(row["owner"], row["state"]):
+                if row is None or row["dismissed_at"] is not None:
+                    continue
+                if not (states.is_dismissable(row["owner"], row["state"]) or (row["owner"] == "hub" and row["state"] in extra)):
                     continue
                 conn.execute("UPDATE items SET dismissed_at=? WHERE id=?", (now, item_id))
                 self._event(conn, item_id, "info", "dismissed (hidden; nothing was deleted)", now)

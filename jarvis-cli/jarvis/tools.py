@@ -703,6 +703,9 @@ OWNER_ONLY_TOOLS = frozenset({
     "dl_pause", "dl_resume", "dl_cancel", "dl_retry", "dl_schedule", "dl_open",
     "dl_settings", "dl_prefs", "dl_providers", "dl_provider_prefs", "dl_import_legacy",
     "hub_doctor", "hub_demo_provider", "dl_updates", "dl_updates_check",
+    # File-host resolvers: hoster_resolve contacts the host about a link and hoster_doctor probes the owner's
+    # canary links, both from the owner's PC (dl_add_hoster is hidden from a guest by its dl_add_ prefix).
+    "hoster_resolve", "hoster_doctor",
     # Stremio playback (brief 31): drives the mpv on the owner's PC; its handler refuses a guest too.
     "play_control",
     # Steam (N22b/c): they install / update games on the owner's PC and read what is installed; a guest is

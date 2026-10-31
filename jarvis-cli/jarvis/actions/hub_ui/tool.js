@@ -136,7 +136,8 @@ function cardNote(row) {
 }
 
 // ---- brief 19: Dismiss, Clear finished, Show hidden.
-// A row another tool reported (Steam, Playnite ...) that is unknown or finished can be HIDDEN.  Hiding deletes no row and
+// A row another tool reported (Steam, Playnite ...) that is unknown or finished, and a hub download that is done, failed or
+// cancelled, can be HIDDEN (DH-B: a finished hub download too; it leaves this list only, History keeps it).  Hiding deletes no row and
 // touches no file, so there is no question first.  The row's own `owner` and `state` decide (the hub sends no "can dismiss"
 // capability, and none is invented here); the hub applies the same rule again and says so if it disagrees (a hub download,
 // a row that is still running).  A hidden row carries `dismissed_at`; the live stream never lists it, so the panel asks for
@@ -144,8 +145,8 @@ function cardNote(row) {
 // lists the row as a normal row in this view (`revealed`), until the panel is reloaded; the hub un-hides a row by itself
 // when its tool reports it live again.
 const DISMISSABLE = new Set(["done", "failed", "cancelled", "unknown"]);
-const DISMISS_TIP = "Hide this row from the list. Nothing is deleted and no file is touched; it comes back by itself if its tool reports it running again, or if you Retry it.";
-const CLEAR_TIP = "Hide every finished, failed, cancelled or lost row that another tool (Steam, Playnite ...) reported, and hub downloads you cancelled. Other downloads the hub made itself (failed or finished ones) and the History tab are not touched, and no file is touched.";
+const DISMISS_TIP = "Hide this row from the Downloads list. Nothing is deleted and no file is touched. A finished download stays in History, and Show hidden lists it again; a row comes back by itself if its tool reports it running again, or if you Retry it.";
+const CLEAR_TIP = "Hide every finished, failed, cancelled or lost row that another tool (Steam, Playnite ...) reported, and every download the hub made itself that is done or that you cancelled. Failed downloads of the hub stay until you hide them one by one (they may need a Retry). The History tab is not touched, and no file is touched.";
 const SHOW_AGAIN_TIP = "List this row again for now. The hub keeps it hidden; it comes back for good when its tool reports it running again.";
 const SHOW_HIDDEN_TIP = "Also list the rows you hid, dimmed. Nothing hidden is deleted.";
 
@@ -154,8 +155,8 @@ function isHidden(row) { return !!(row && row.dismissed_at); }
 // Can this row be dismissed (a hidden row that was listed again counts as shown)?
 function canDismiss(row, revealed) {
   if (!row || !DISMISSABLE.has(row.state)) return false;
-  // a provider row that is unknown or finished; a hub download only once it failed or was cancelled (a finished one lives in History)
-  if (row.owner === "hub" ? (row.state !== "failed" && row.state !== "cancelled") : row.owner !== "provider") return false;
+  // a provider row that is unknown or finished; a hub download once it is done, failed or cancelled (never while it still runs or waits)
+  if (row.owner === "hub" ? (row.state !== "done" && row.state !== "failed" && row.state !== "cancelled") : row.owner !== "provider") return false;
   return !isHidden(row) || !!(revealed && revealed[row.id]);
 }
 
@@ -164,9 +165,9 @@ function isDimmed(row, revealed) { return isHidden(row) && !(revealed && reveale
 
 // The rows Clear finished would hide: shown rows only (a hidden one is already hidden).
 function dismissableRows(rows, revealed) {
-  // Clear finished: provider rows that are done / failed / cancelled / lost, and hub downloads the owner cancelled
+  // Clear finished: provider rows that are done / failed / cancelled / lost, and hub downloads that are done or that the owner cancelled
   // (a failed hub download is hidden one by one: it may still be worth a Retry)
-  return (Array.isArray(rows) ? rows : []).filter((r) => !isHidden(r) && canDismiss(r, revealed) && (r.owner === "provider" || r.state === "cancelled"));
+  return (Array.isArray(rows) ? rows : []).filter((r) => !isHidden(r) && canDismiss(r, revealed) && (r.owner === "provider" || r.state === "cancelled" || r.state === "done"));
 }
 
 // The live rows plus the hidden ones the view lists (all of them while Show hidden is on, else only the ones
@@ -1391,6 +1392,90 @@ function groupReorderNote(rows, live) {
   return "Only downloads that are still waiting can be put in a different order. Nothing in this group is waiting.";
 }
 
+// ---- the display order of the sections (DH-B).  NOT the start order above: this only says where a section header
+// sits in the list.  A section key is any string ("g:<id>", a source key, "loose", the keys of the update sections ...).
+// Saved on its own under `section_order`.  Rows inside a section never move.  All pure.
+
+const SECTION_ORDER_MAX = 200;        // keys kept
+const SECTION_KEY_MAX = 200;          // characters of one key
+
+// A saved order from whatever was read (a JSON string, a parsed list, garbage): unique non-empty strings, capped.  Never throws.
+function cleanSectionOrder(value) {
+  let list = value;
+  if (typeof list === "string") { try { list = JSON.parse(list); } catch (e) { return []; } }
+  if (!Array.isArray(list)) return [];
+  const seen = new Set();
+  const out = [];
+  for (let i = 0; i < list.length && out.length < SECTION_ORDER_MAX; i++) {
+    const k = list[i];
+    if (typeof k !== "string" || !k || k.length > SECTION_KEY_MAX || seen.has(k)) continue;
+    seen.add(k);
+    out.push(k);
+  }
+  return out;
+}
+// What goes into storage.
+function serializeSectionOrder(order) { return JSON.stringify(cleanSectionOrder(order)); }
+
+// `sections` (the answer of groupRows) in the saved order.  A section the order doesn't name keeps its default place, after
+// the ones it names.  Returns a new list; never changes `sections`.
+function applySectionOrder(sections, order) {
+  const list = Array.isArray(sections) ? sections.slice() : [];
+  const saved = cleanSectionOrder(order);
+  if (!saved.length || list.length < 2) return list;
+  const rank = new Map();
+  saved.forEach((k, i) => rank.set(k, i));
+  const known = [];
+  const rest = [];
+  list.forEach((s) => { if (s && typeof s.key === "string" && rank.has(s.key)) known.push(s); else rest.push(s); });
+  known.sort((a, b) => rank.get(a.key) - rank.get(b.key));
+  return known.concat(rest);
+}
+
+// The saved order after the sections on screen (`shown`, the keys top to bottom) were rearranged into `next`.  A saved key that
+// is not on screen now (a batch the filter hides) stays right behind the key it followed before.
+function mergeSectionOrder(order, shown, next) {
+  const old = cleanSectionOrder(order);
+  const here = new Set(shown);
+  const tail = new Map();
+  let anchor = null;
+  old.forEach((k) => {
+    if (here.has(k)) { anchor = k; return; }
+    if (!tail.has(anchor)) tail.set(anchor, []);
+    tail.get(anchor).push(k);
+  });
+  const out = (tail.get(null) || []).slice();
+  next.forEach((k) => { out.push(k); (tail.get(k) || []).forEach((a) => out.push(a)); });
+  return cleanSectionOrder(out);
+}
+// The new saved order with section `key` put before `target` (or after it when `after`), or null when nothing would move
+// (an unknown key, the same section, already there).  `shown`: the keys on screen, top to bottom.  Never mutates its input.
+function moveSectionInOrder(order, shown, key, target, after) {
+  const keys = cleanSectionOrder(shown);
+  if (key === target || keys.indexOf(key) === -1 || keys.indexOf(target) === -1) return null;
+  const rest = keys.filter((k) => k !== key);
+  const at = rest.indexOf(target);
+  rest.splice(after ? at + 1 : at, 0, key);
+  if (JSON.stringify(rest) === JSON.stringify(keys)) return null;
+  return mergeSectionOrder(order, keys, rest);
+}
+// One section up (-1) or down (+1), or null at the end of the list or for a key that isn't on screen.
+function stepSectionInOrder(order, shown, key, delta) {
+  const keys = cleanSectionOrder(shown);
+  const i = keys.indexOf(key);
+  const j = i + delta;
+  if (i === -1 || j < 0 || j >= keys.length) return null;
+  const rest = keys.filter((k) => k !== key);
+  rest.splice(j, 0, key);
+  return mergeSectionOrder(order, keys, rest);
+}
+// The wording of the two kinds of control on a header (a waiting Batch has both).
+const START_GRIP_TIP = "Drag to change the order this group's waiting downloads START in (the start order).";
+const START_GRIP_LOOK_NOTE = " To move the group only on screen, use the \u2195 handle.";
+const START_MOVE_TIP = "changes the order this group's waiting downloads start in, not just the look of the list.";
+const LOOK_GRIP_TIP = "Drag to move this section up or down in the list. This only changes how the list looks; the order downloads start in does not change.";
+const LOOK_MOVE_TIP = "This only changes how the list looks; the order downloads start in does not change.";
+
 // ---- the torrent file picker (N24) ---------------------------------------------------------------------------
 // The hub sends a torrent's files as [{index, path, size, video?, sample?, refused?, in_group?}] (paths are already cleaned
 // and cut; they are still only DATA here: everything is drawn with textContent, never as HTML).  All pure.
@@ -1622,6 +1707,8 @@ const pure = {
   HISTORY_STATES, HISTORY_SORTS, HISTORY_PAGE, HISTORY_REDOWNLOAD_MAX, historyGroup, historyGroups, historyRange, historyQuery, historyFiltersActive, historySummaryText, fmtTook, historyDuration, historyDestName, historyReason, historyRowModel, selectionRange, historyRemoveText, historyRedownloadText, historyRetentionNote, historyEmpty, csvCell, historyCsv, historyJson, historyMeta, providerTone, providerFacts, providerBadge, ENGINE_WORDS, ENGINE_TONES, CONFIGURE_ANCHORS, engineWord, engineTone, engineLine, engineConfigure, engineSettingsNote, sourcesSummary,
   queueOrder, moveInOrder, stepInOrder, canReorder, reorderNote, applyOrder,
   groupIdOf, groupWaiting, groupOrderKeys, moveGroupInOrder, stepGroupInOrder, canReorderGroup, groupReorderNote,
+  SECTION_ORDER_MAX, SECTION_KEY_MAX, cleanSectionOrder, serializeSectionOrder, applySectionOrder, mergeSectionOrder, moveSectionInOrder, stepSectionInOrder,
+  START_GRIP_TIP, START_GRIP_LOOK_NOTE, START_MOVE_TIP, LOOK_GRIP_TIP, LOOK_MOVE_TIP,
   PICK_MAX, PICK_QUICK, torrentSource, selectableFile, torrentTree, pickerQuick, pickerFilter, pickerTotals, pickerTotalText, pickerBlock, torrentGroupMeta,
   visibleSourceProviders,
   DRY_RUN_CHUNK, ADD_LIST_SHOWN, reasonWords, linkEngineWord, linkKindOf, torrentLinkCount, describeLinks, chunked, mergeDecisions, ignoredNote, looksAbsolute,
@@ -1646,6 +1733,7 @@ const S = {
   hubPrefs: null,
   saving: false,
   tab: "downloads", live: false, liveAt: 0, es: null, liveTimer: 0, dragId: "", dragGroup: "", picker: null,
+  sectionOrder: [], dragSection: "",     // DH-B: the saved display order of the section headers, and the header being dragged for it
   sources: null, srcTimer: 0, srcLoaded: false, srcBusy: false,
   updOnly: null, updOnlyAt: 0,      // ids of the providers that only report and apply updates (they are not download sources)
   // DH-A: the updates listed inside the Downloads list.  Their own array: nothing here is ever put into S.rows.
@@ -1714,6 +1802,20 @@ async function loadPrefs() {
     if (p.groupTouched === true && ["none", "source", "group"].indexOf(p.groupBy) !== -1) { S.groupBy = p.groupBy; S.groupTouched = true; }
     if (Array.isArray(p.collapsed)) p.collapsed.slice(0, 200).forEach((k) => { if (typeof k === "string") S.collapsed[k] = true; });
   } catch (e) { /* defaults */ }
+}
+
+// The display order of the section headers has its own storage key (it is not part of `prefs`).  Garbage in storage is ignored.
+async function loadSectionOrder() {
+  try { S.sectionOrder = cleanSectionOrder(await host.storage.get("section_order")); } catch (e) { S.sectionOrder = []; }
+}
+
+function saveSectionOrder() {
+  try {
+    const order = cleanSectionOrder(S.sectionOrder);
+    S.sectionOrder = order;
+    if (!order.length && host.storage.remove) { host.storage.remove("section_order").catch(() => {}); return; }
+    host.storage.set("section_order", serializeSectionOrder(order)).catch(() => {});
+  } catch (e) { /* storage is a convenience */ }
 }
 
 // The download rows the lists show: the live rows, plus the hidden ones when "Show hidden" is on (or one was listed again).
@@ -1934,11 +2036,28 @@ function groupMode(rows) {
 }
 function shownRows(rows) {
   const out = [];
-  groupRows(rows, groupMode(rows)).forEach((section) => { if (!(section.title && S.collapsed[section.key])) section.rows.forEach((r) => out.push(r)); });
+  applySectionOrder(groupRows(rows, groupMode(rows)), S.sectionOrder).forEach((section) => { if (!(section.title && S.collapsed[section.key])) section.rows.forEach((r) => out.push(r)); });
   return out;
 }
 
-function sectionHeader(section) {
+// The display-order controls of a header (DH-B): a \u2195 handle to drag it and \u25B2 \u25BC buttons for the keyboard.  They change where the
+// header sits in the list and nothing else.  `shownKeys`: the named sections on screen, top to bottom.  null when there is nothing to move past.
+function sectionLookControls(section, shownKeys) {
+  const keys = Array.isArray(shownKeys) ? shownKeys : [];
+  if (keys.length < 2) return null;
+  const at = keys.indexOf(section.key);
+  const grip = el("span", { cls: "section__grip section__grip--look", text: "\u2195", title: LOOK_GRIP_TIP, attrs: { draggable: "true", "aria-hidden": "true" } });
+  const box = el("span", { cls: "section__look", attrs: { role: "group", "aria-label": "Place of " + section.title + " in the list" } }, [grip]);
+  [["\u25B2", -1, "up"], ["\u25BC", 1, "down"]].forEach((m) => {
+    const attrs = { type: "button", "data-look": m[2], "aria-label": "Move " + m[2] + " in the list (look only): " + section.title };
+    if (at === -1 || at + m[1] < 0 || at + m[1] >= keys.length) attrs.disabled = "disabled";
+    box.appendChild(el("button", { cls: "rbtn section__lookbtn", text: m[0], title: "Move this section " + m[2] + " on screen. " + LOOK_MOVE_TIP, attrs: attrs,
+      on: { click: (e) => { e.stopPropagation(); e.preventDefault(); moveSectionBy(section.key, m[1]); } } }));
+  });
+  return { box: box, grip: grip };
+}
+
+function sectionHeader(section, shownKeys) {
   const open = !S.collapsed[section.key];
   const label = section.title + (section.meta ? DOT + section.meta : "") + (open ? "" : DOT + sectionSummary(section.rows));
   const flip = () => toggleSection(section.key);
@@ -1950,6 +2069,8 @@ function sectionHeader(section) {
     }),
     el("span", { cls: "section__t", text: label, on: { click: flip } }),
   ];
+  const look = sectionLookControls(section, shownKeys);
+  if (look) kids.push(look.box);
   let head = null;
   // Batch headers get the group-wide controls: the same tools, aimed at the whole batch.
   if (S.groupBy === "group" && /^g:/.test(section.key)) {
@@ -1972,20 +2093,57 @@ function sectionHeader(section) {
       [["\u2191", -1, "Move group up"], ["\u2193", 1, "Move group down"]].forEach((m) => {
         const attrs = { type: "button", "aria-label": m[2] + ": " + section.title };
         if (at === -1 || at + m[1] < 0 || at + m[1] >= order.length) attrs.disabled = "disabled";
-        acts.appendChild(el("button", { cls: "btn", text: m[0], title: m[2], attrs: attrs,
+        acts.appendChild(el("button", { cls: "btn", text: m[0], title: m[2] + " (start order): " + START_MOVE_TIP, attrs: attrs,
           on: { click: (e) => { e.stopPropagation(); e.preventDefault(); moveGroup(section.key, m[1]); } } }));
       });
-      kids.unshift(el("span", { cls: "section__grip", text: "\u22EE\u22EE", title: "Drag to change the order this group starts in", attrs: { "aria-hidden": "true" } }));
+      kids.unshift(el("span", { cls: "section__grip", text: "\u22EE\u22EE", title: START_GRIP_TIP + (look ? START_GRIP_LOOK_NOTE : ""), attrs: { "aria-hidden": "true" } }));
     }
     kids.push(acts);
     head = el("div", {
       cls: "section", title: reorderable ? "" : groupReorderNote(section.rows, S.live),
-      attrs: { draggable: reorderable ? "true" : "false", "data-group": section.key },
+      attrs: { draggable: reorderable ? "true" : "false", "data-group": section.key, "data-section": section.key },
     }, kids);
     wireGroupDrag(head, section.key, reorderable);
+    if (look) wireSectionDrag(head, section.key, look.grip);
     return head;
   }
-  return el("div", { cls: "section" }, kids);
+  head = el("div", { cls: "section", attrs: { "data-section": section.key } }, kids);
+  if (look) wireSectionDrag(head, section.key, look.grip);
+  return head;
+}
+
+// ---- the display order of the section headers (DH-B): where a header sits, saved under `section_order`
+// (DH-A: only the download sections have a place in it; the update sections stay after them)
+function shownSectionKeys() {
+  const rows = splitUpdates(visibleRows()).downloads;
+  return applySectionOrder(groupRows(rows, groupMode(rows)), S.sectionOrder).filter((s) => s.title).map((s) => s.key);
+}
+function syncResetOrder() {
+  const b = document.getElementById("resetSectionOrder");     // built in JS (not in tool.html), so not looked up with $("#...")
+  if (b) b.hidden = !S.sectionOrder.length;
+}
+function setSectionOrder(next, key, dir) {
+  S.sectionOrder = cleanSectionOrder(next);
+  saveSectionOrder();
+  renderList();
+  if (key && dir) focusLookButton(key, dir);       // the list was rebuilt: put the keyboard back on the button that was used
+}
+function focusLookButton(key, dir) {
+  const head = Array.from($("#list").querySelectorAll(".section[data-section]")).find((h) => h.getAttribute("data-section") === key);
+  if (!head) return;
+  const want = head.querySelector('[data-look="' + dir + '"]');
+  const other = head.querySelector('[data-look="' + (dir === "up" ? "down" : "up") + '"]');
+  const b = want && !want.disabled ? want : other;
+  if (b && !b.disabled && b.focus) b.focus();
+}
+function moveSectionBy(key, delta) {
+  const next = stepSectionInOrder(S.sectionOrder, shownSectionKeys(), key, delta);
+  if (next) setSectionOrder(next, key, delta < 0 ? "up" : "down");
+}
+function resetSectionOrder() {
+  S.sectionOrder = [];
+  saveSectionOrder();
+  renderList();
 }
 
 function renderList() {
@@ -1994,7 +2152,8 @@ function renderList() {
   const total = downloadViewRows().length;
   $("#count").textContent = countText(split.downloads.length, total);
   const upSections = updateSections(split.updates, S.upd.open);
-  const listChanged = changed("list", [rows, S.selected, S.groupBy, S.live, S.revealed, S.showHidden, S.collapsed, S.acting]);
+  syncResetOrder();
+  const listChanged = changed("list", [rows, S.selected, S.groupBy, S.live, S.revealed, S.showHidden, S.collapsed, S.acting, S.sectionOrder]);
   const updChanged = changed("listupd", [S.upd.open, S.upd.on, S.upd.error]);      // both signatures are stored on every pass
   if (!listChanged && !updChanged) return;
   const list = $("#list");
@@ -2008,10 +2167,11 @@ function renderList() {
     if (S.upd.on && S.upd.error) list.appendChild(updateReadNote());
     return;                                                  // as before: with nothing to list, the rest of the pass is skipped
   }
-  const sections = groupRows(split.downloads, groupMode(split.downloads));
+  const sections = applySectionOrder(groupRows(split.downloads, groupMode(split.downloads)), S.sectionOrder);
+  const shownKeys = sections.filter((section) => section.title).map((section) => section.key);
   if (split.downloads.length) {
     sections.forEach((section) => {
-      if (section.title) list.appendChild(sectionHeader(section));
+      if (section.title) list.appendChild(sectionHeader(section, shownKeys));
       if (section.title && S.collapsed[section.key]) return;
       section.rows.forEach((r) => list.appendChild(renderRow(r)));
     });
@@ -3182,6 +3342,15 @@ $("#resumeAll").addEventListener("click", () => allAction("resume"));
 $("#clearFinished").addEventListener("click", clearFinished);
 $("#showHidden").addEventListener("click", toggleShowHidden);
 $("#showUpdates").addEventListener("click", toggleShowUpdates);
+{
+  // DH-B: "Reset order" sits next to Collapse all and shows only while a display order is saved (built here: tool.html is not touched)
+  const all = $("#collapseAll");
+  const reset = el("button", {
+    cls: "btn btn--sm", text: "Reset order", title: "Put the section headers back in their default places. Only the look of the list changes; the order downloads start in does not.",
+    attrs: { type: "button", id: "resetSectionOrder", hidden: "hidden" }, on: { click: resetSectionOrder },
+  });
+  all.parentNode.insertBefore(reset, all.nextSibling);
+}
 $("#collapseAll").addEventListener("click", () => {
   const rows = splitUpdates(visibleRows()).downloads;      // the update sections have their own switch
   const named = groupRows(rows, groupMode(rows)).filter((section) => section.title);
@@ -3952,6 +4121,51 @@ function wireGroupDrag(head, key, draggable) {
   });
 }
 
+// ---- dragging a section header only to put it elsewhere in the list (DH-B).  This never talks to the hub: the start order
+// above is wireGroupDrag's, and the two drags use different handles and different state (S.dragSection, not S.dragGroup).
+function wireSectionDrag(head, key, grip) {
+  const clear = () => head.classList.remove("drop-before", "drop-after", "is-dragging");
+  grip.addEventListener("dragstart", (e) => {
+    e.stopPropagation();                          // the header's own drag (a waiting Batch's start order) must not start as well
+    if (S.dragId || S.dragGroup) { e.preventDefault(); return; }
+    S.dragSection = key;
+    S.hold = Date.now() + 60000;                  // don't rebuild the list under the drag
+    try {
+      e.dataTransfer.setData("application/x-jarvis-hub-section", key);
+      e.dataTransfer.effectAllowed = "move";
+      if (e.dataTransfer.setDragImage) e.dataTransfer.setDragImage(head, 12, 12);
+    } catch (err) { /* old browser */ }
+    head.classList.add("is-dragging");
+  });
+  grip.addEventListener("dragend", () => {
+    S.dragSection = "";
+    S.hold = 0;
+    $("#list").querySelectorAll(".drop-before,.drop-after,.is-dragging").forEach((n) => n.classList.remove("drop-before", "drop-after", "is-dragging"));
+    render();
+  });
+  head.addEventListener("dragover", (e) => {
+    if (!S.dragSection || S.dragSection === key) return;
+    e.preventDefault();
+    const box = head.getBoundingClientRect();
+    const after = e.clientY > box.top + box.height / 2;
+    head.classList.toggle("drop-after", after);
+    head.classList.toggle("drop-before", !after);
+  });
+  head.addEventListener("dragleave", () => head.classList.remove("drop-before", "drop-after"));
+  head.addEventListener("drop", (e) => {
+    if (!S.dragSection || S.dragSection === key) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const after = head.classList.contains("drop-after");
+    const moving = S.dragSection;
+    clear();
+    S.dragSection = "";
+    S.hold = 0;
+    const next = moveSectionInOrder(S.sectionOrder, shownSectionKeys(), moving, key, after);
+    if (next) setSectionOrder(next); else renderList();
+  });
+}
+
 // ---- the torrent file picker (N24): a folder tree with tick boxes, search, quick choices and a running total
 
 function openTorrentGroup(section) {
@@ -4142,6 +4356,7 @@ host.onClose(() => {
 
 (async function start() {
   await loadPrefs();
+  await loadSectionOrder();
   await loadUpdatePrefs();
   $("#groupBy").value = S.groupBy;
   render();
